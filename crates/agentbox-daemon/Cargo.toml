@@ -15,3 +15,8 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 reqwest = { workspace = true }
 ulid = { workspace = true }
+toml = "0.8"
+dirs = "6"
+rand = "0.8"
+r2d2 = "0.8"
+r2d2_sqlite = "0.25"

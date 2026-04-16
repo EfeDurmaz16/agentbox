@@ -1,0 +1,964 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Agentbox — Architecture Report</title>
+<style>
+  :root {
+    --bg: #0a0a0a;
+    --surface: #141414;
+    --surface2: #1a1a1a;
+    --border: #2a2a2a;
+    --text: #e5e5e5;
+    --text2: #999;
+    --accent: #ff6b35;
+    --accent2: #ff9f1c;
+    --green: #22c55e;
+    --red: #ef4444;
+    --yellow: #eab308;
+    --blue: #3b82f6;
+    --purple: #a855f7;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    font-family: 'SF Mono', 'Fira Code', 'JetBrains Mono', monospace;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.6;
+    padding: 40px 20px;
+    max-width: 1200px;
+    margin: 0 auto;
+  }
+
+  .header {
+    text-align: center;
+    padding: 60px 0 40px;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 60px;
+  }
+  .header h1 {
+    font-size: 48px;
+    font-weight: 800;
+    letter-spacing: -2px;
+    background: linear-gradient(135deg, var(--accent), var(--accent2));
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    margin-bottom: 12px;
+  }
+  .header .tagline {
+    font-size: 20px;
+    color: var(--text2);
+    font-weight: 400;
+  }
+  .header .date {
+    font-size: 13px;
+    color: var(--text2);
+    margin-top: 16px;
+    opacity: 0.6;
+  }
+
+  .section {
+    margin-bottom: 60px;
+  }
+  .section h2 {
+    font-size: 14px;
+    text-transform: uppercase;
+    letter-spacing: 3px;
+    color: var(--accent);
+    margin-bottom: 24px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--border);
+  }
+  .section h3 {
+    font-size: 18px;
+    color: var(--text);
+    margin: 24px 0 12px;
+    font-weight: 600;
+  }
+  .section p {
+    color: var(--text2);
+    font-size: 14px;
+    margin-bottom: 16px;
+    line-height: 1.8;
+  }
+
+  .arch-diagram {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 40px;
+    margin: 24px 0;
+    overflow-x: auto;
+  }
+
+  .layers {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    margin: 24px 0;
+  }
+  .layer {
+    display: grid;
+    grid-template-columns: 160px 1fr;
+    gap: 0;
+    min-height: 80px;
+  }
+  .layer-label {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-right: none;
+    border-radius: 8px 0 0 8px;
+    padding: 16px;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+  }
+  .layer-label .num {
+    font-size: 11px;
+    color: var(--text2);
+    text-transform: uppercase;
+    letter-spacing: 1px;
+  }
+  .layer-label .title {
+    font-size: 14px;
+    font-weight: 600;
+  }
+  .layer-content {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 0 8px 8px 0;
+    padding: 16px 20px;
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    flex-wrap: wrap;
+  }
+  .layer-content .chip {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 6px 12px;
+    font-size: 12px;
+    color: var(--text);
+    white-space: nowrap;
+  }
+  .layer-content .chip.highlight {
+    border-color: var(--accent);
+    color: var(--accent);
+  }
+
+  .comp-table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 24px 0;
+    font-size: 13px;
+  }
+  .comp-table th {
+    text-align: left;
+    padding: 12px 16px;
+    border-bottom: 2px solid var(--border);
+    color: var(--text2);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    font-weight: 600;
+  }
+  .comp-table td {
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--border);
+    color: var(--text);
+    vertical-align: top;
+  }
+  .comp-table tr:last-child td { border-bottom: none; }
+  .comp-table .product { font-weight: 600; white-space: nowrap; }
+  .comp-table .yes { color: var(--green); }
+  .comp-table .no { color: var(--red); }
+  .comp-table .partial { color: var(--yellow); }
+  .comp-table .highlight-row { background: rgba(255, 107, 53, 0.05); }
+  .comp-table .highlight-row .product { color: var(--accent); }
+
+  .shim-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: 12px;
+    margin: 24px 0;
+  }
+  .shim-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px;
+  }
+  .shim-card .bucket-tag {
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    padding: 2px 8px;
+    border-radius: 4px;
+    display: inline-block;
+    margin-bottom: 8px;
+    font-weight: 700;
+  }
+  .shim-card .bucket-tag.block {
+    background: rgba(239, 68, 68, 0.15);
+    color: var(--red);
+  }
+  .shim-card .bucket-tag.approve {
+    background: rgba(234, 179, 8, 0.15);
+    color: var(--yellow);
+  }
+  .shim-card .bins {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .shim-card .bin {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 3px 8px;
+    font-size: 12px;
+    font-family: 'SF Mono', monospace;
+  }
+  .shim-card .desc {
+    font-size: 12px;
+    color: var(--text2);
+    margin-top: 8px;
+  }
+
+  .timeline {
+    position: relative;
+    margin: 40px 0;
+    padding-left: 40px;
+  }
+  .timeline::before {
+    content: '';
+    position: absolute;
+    left: 16px;
+    top: 0;
+    bottom: 0;
+    width: 2px;
+    background: var(--border);
+  }
+  .timeline-item {
+    position: relative;
+    margin-bottom: 32px;
+    padding: 20px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+  }
+  .timeline-item::before {
+    content: '';
+    position: absolute;
+    left: -32px;
+    top: 24px;
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    background: var(--accent);
+    border: 2px solid var(--bg);
+  }
+  .timeline-item.current::before {
+    background: var(--green);
+    box-shadow: 0 0 8px rgba(34, 197, 94, 0.4);
+  }
+  .timeline-item.future::before {
+    background: var(--text2);
+  }
+  .timeline-item .phase {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: var(--accent);
+    margin-bottom: 4px;
+  }
+  .timeline-item.current .phase { color: var(--green); }
+  .timeline-item.future .phase { color: var(--text2); }
+  .timeline-item .title {
+    font-size: 18px;
+    font-weight: 600;
+    margin-bottom: 8px;
+  }
+  .timeline-item .desc {
+    font-size: 13px;
+    color: var(--text2);
+    line-height: 1.7;
+  }
+  .timeline-item .tech {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-top: 12px;
+  }
+  .timeline-item .tech span {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 3px 8px;
+    font-size: 11px;
+  }
+
+  .seq-diagram {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 32px;
+    margin: 24px 0;
+    font-size: 13px;
+    overflow-x: auto;
+  }
+  .seq-row {
+    display: grid;
+    grid-template-columns: 100px 1fr;
+    gap: 16px;
+    margin-bottom: 4px;
+    min-height: 32px;
+    align-items: center;
+  }
+  .seq-actor {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: var(--text2);
+    text-align: right;
+    font-weight: 600;
+  }
+  .seq-msg {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 8px 14px;
+    position: relative;
+    color: var(--text);
+  }
+  .seq-msg::before {
+    content: '';
+    position: absolute;
+    left: -8px;
+    top: 50%;
+    transform: translateY(-50%);
+    border: 4px solid transparent;
+    border-right-color: var(--border);
+  }
+  .seq-msg.allow { border-left: 3px solid var(--green); }
+  .seq-msg.approve { border-left: 3px solid var(--yellow); }
+  .seq-msg.block { border-left: 3px solid var(--red); }
+  .seq-msg code {
+    background: rgba(255, 255, 255, 0.05);
+    padding: 1px 5px;
+    border-radius: 3px;
+    font-size: 12px;
+  }
+  .seq-divider {
+    grid-column: 1 / -1;
+    border-top: 1px dashed var(--border);
+    margin: 12px 0;
+    position: relative;
+  }
+  .seq-divider span {
+    position: absolute;
+    top: -9px;
+    left: 50%;
+    transform: translateX(-50%);
+    background: var(--surface);
+    padding: 0 12px;
+    font-size: 11px;
+    color: var(--text2);
+    text-transform: uppercase;
+    letter-spacing: 1px;
+  }
+
+  .stats {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 16px;
+    margin: 24px 0;
+  }
+  .stat {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 20px;
+    text-align: center;
+  }
+  .stat .num {
+    font-size: 36px;
+    font-weight: 800;
+    background: linear-gradient(135deg, var(--accent), var(--accent2));
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+  }
+  .stat .label {
+    font-size: 12px;
+    color: var(--text2);
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    margin-top: 4px;
+  }
+
+  .callout {
+    background: rgba(255, 107, 53, 0.06);
+    border: 1px solid rgba(255, 107, 53, 0.2);
+    border-radius: 8px;
+    padding: 20px 24px;
+    margin: 24px 0;
+    font-size: 14px;
+    color: var(--text);
+  }
+  .callout strong { color: var(--accent); }
+
+  .vs-badge {
+    display: inline-block;
+    background: rgba(168, 85, 247, 0.15);
+    color: var(--purple);
+    padding: 4px 12px;
+    border-radius: 4px;
+    font-size: 12px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    margin-bottom: 16px;
+  }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>AGENTBOX</h1>
+  <div class="tagline">2FA for AI Agent Actions</div>
+  <div class="date">Architecture Report — April 16, 2026 — Step 0 Complete</div>
+</div>
+
+<!-- STATS -->
+<div class="section">
+  <h2>Assignment Results — 3 Agents, 68 Commands</h2>
+  <div class="stats">
+    <div class="stat">
+      <div class="num">3</div>
+      <div class="label">Agents Tested</div>
+    </div>
+    <div class="stat">
+      <div class="num">68</div>
+      <div class="label">Shell Commands</div>
+    </div>
+    <div class="stat">
+      <div class="num">21</div>
+      <div class="label">Shim Binaries</div>
+    </div>
+    <div class="stat">
+      <div class="num">22</div>
+      <div class="label">Policy Tests</div>
+    </div>
+  </div>
+  <p>Claude Code (x2) and Codex CLI were given destructive tasks on dummy projects in /tmp.
+     Every shell command was logged. 25 unique binaries found, 21 require shims.
+     PATH shim approach confirmed viable (under 50 threshold).</p>
+</div>
+
+<!-- OPENAI vs AGENTBOX -->
+<div class="section">
+  <h2>Positioning — OpenAI Agents SDK vs Agentbox</h2>
+  <div class="vs-badge">Why Both Exist</div>
+  <p>OpenAI's April 2026 Agents SDK update added sandboxing, guardrails, and a long-horizon harness.
+     Their approach: safety <strong>inside</strong> the SDK. Agents must be built with their SDK to get protection.</p>
+  <p>Agentbox is the opposite: safety <strong>outside</strong> the agent. Any agent — OpenClaw, Hermes, Claude Code,
+     Codex, custom scripts — gets intercepted at the OS level. No SDK integration needed.</p>
+
+  <div style="overflow-x: auto;">
+    <table class="comp-table">
+      <thead>
+        <tr>
+          <th>Feature</th>
+          <th>OpenAI Agents SDK</th>
+          <th>Agentbox</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td class="product">Approach</td>
+          <td>SDK-integrated guardrails</td>
+          <td>OS-level interception</td>
+        </tr>
+        <tr>
+          <td class="product">Agent Support</td>
+          <td>OpenAI SDK agents only</td>
+          <td>Any agent, any runtime</td>
+        </tr>
+        <tr>
+          <td class="product">Sandboxing</td>
+          <td class="yes">Workspace isolation</td>
+          <td class="partial">PATH shims (v0.1) then kernel (v1.0)</td>
+        </tr>
+        <tr>
+          <td class="product">Human-in-the-Loop</td>
+          <td class="no">No phone approval</td>
+          <td class="yes">Phone push notification</td>
+        </tr>
+        <tr>
+          <td class="product">Audit Log</td>
+          <td class="partial">Tracing (cloud)</td>
+          <td class="yes">Local SQLite, tamper-evident</td>
+        </tr>
+        <tr>
+          <td class="product">Bypassable?</td>
+          <td>Agent must use SDK</td>
+          <td>v0.1: yes (absolute paths) / v1.0: no</td>
+        </tr>
+        <tr>
+          <td class="product">Target User</td>
+          <td>Enterprise developers</td>
+          <td>Individual dev/creator</td>
+        </tr>
+        <tr>
+          <td class="product">Install</td>
+          <td><code>pip install openai-agents</code></td>
+          <td><code>brew install agentbox</code></td>
+        </tr>
+        <tr>
+          <td class="product">Cost</td>
+          <td>API pricing</td>
+          <td>Free (OSS core)</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="callout">
+    <strong>Key insight:</strong> OpenAI protects agents they control. Agentbox protects the machine from agents it does not control.
+    These are complementary — an OpenAI SDK agent with built-in guardrails, running on a machine with Agentbox, gets both layers.
+  </div>
+</div>
+
+<!-- ARCHITECTURE LAYERS -->
+<div class="section">
+  <h2>Architecture — How It Works</h2>
+
+  <div class="layers">
+    <div class="layer">
+      <div class="layer-label">
+        <div class="num">Layer 1</div>
+        <div class="title" style="color: var(--purple);">Agent</div>
+      </div>
+      <div class="layer-content">
+        <div class="chip">OpenClaw</div>
+        <div class="chip">Claude Code</div>
+        <div class="chip">Codex CLI</div>
+        <div class="chip">Hermes</div>
+        <div class="chip">Custom scripts</div>
+        <span style="color: var(--text2); font-size: 12px;">Agent calls <code style="color: var(--text);">git push</code></span>
+      </div>
+    </div>
+
+    <div class="layer">
+      <div class="layer-label">
+        <div class="num">Layer 2</div>
+        <div class="title" style="color: var(--yellow);">PATH Shim</div>
+      </div>
+      <div class="layer-content">
+        <div class="chip highlight">~/.agentbox/shims/git</div>
+        <span style="color: var(--text2); font-size: 12px;">Symlink to <code style="color: var(--text);">agentbox-shim</code> binary. Sits first in PATH. Intercepts the call.</span>
+      </div>
+    </div>
+
+    <div class="layer">
+      <div class="layer-label">
+        <div class="num">Layer 3</div>
+        <div class="title" style="color: var(--accent);">Daemon</div>
+      </div>
+      <div class="layer-content">
+        <div class="chip highlight">Unix Socket IPC</div>
+        <div class="chip">Policy Engine</div>
+        <div class="chip">SQLite Audit</div>
+        <div class="chip">ntfy Client</div>
+        <span style="color: var(--text2); font-size: 12px;">Classifies command: Allow / Approve / Block</span>
+      </div>
+    </div>
+
+    <div class="layer">
+      <div class="layer-label">
+        <div class="num">Layer 4</div>
+        <div class="title" style="color: var(--blue);">Phone</div>
+      </div>
+      <div class="layer-content">
+        <div class="chip">ntfy push notification</div>
+        <div class="chip">Approve / Deny buttons</div>
+        <div class="chip">120s auto-deny timeout</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- SEQUENCE DIAGRAMS -->
+<div class="section">
+  <h2>Request Flows — Three Scenarios</h2>
+
+  <h3>Scenario 1: Safe Command (Allow)</h3>
+  <div class="seq-diagram">
+    <div class="seq-row">
+      <div class="seq-actor">Agent</div>
+      <div class="seq-msg allow">Runs <code>git commit -m "fix"</code> — shell resolves to shim</div>
+    </div>
+    <div class="seq-row">
+      <div class="seq-actor">Shim</div>
+      <div class="seq-msg allow">Detects <code>argv[0] = git</code>, sends JSON to daemon socket</div>
+    </div>
+    <div class="seq-row">
+      <div class="seq-actor">Daemon</div>
+      <div class="seq-msg allow">Policy engine: <code>git commit</code> — <strong style="color: var(--green);">ALLOW</strong></div>
+    </div>
+    <div class="seq-row">
+      <div class="seq-actor">Shim</div>
+      <div class="seq-msg allow">Finds real <code>/usr/bin/git</code> (PATH minus shim dir), runs it</div>
+    </div>
+    <div class="seq-row">
+      <div class="seq-actor" style="color: var(--green);">Total</div>
+      <div class="seq-msg allow"><strong>Under 50ms overhead</strong> — agent never notices</div>
+    </div>
+  </div>
+
+  <h3>Scenario 2: Risky Command (Approve)</h3>
+  <div class="seq-diagram">
+    <div class="seq-row">
+      <div class="seq-actor">Agent</div>
+      <div class="seq-msg approve">Runs <code>git push origin main</code></div>
+    </div>
+    <div class="seq-row">
+      <div class="seq-actor">Shim</div>
+      <div class="seq-msg approve">Sends CommandContext to daemon via Unix socket</div>
+    </div>
+    <div class="seq-row">
+      <div class="seq-actor">Daemon</div>
+      <div class="seq-msg approve">Policy engine: <code>git push</code> — <strong style="color: var(--yellow);">APPROVE</strong></div>
+    </div>
+    <div class="seq-row">
+      <div class="seq-actor">Daemon</div>
+      <div class="seq-msg approve">HTTP POST to ntfy with action buttons</div>
+    </div>
+    <div class="seq-divider"><span>user's phone buzzes</span></div>
+    <div class="seq-row">
+      <div class="seq-actor" style="color: var(--blue);">Phone</div>
+      <div class="seq-msg approve">
+        "Agent wants to push code to remote repository"<br>
+        <span style="color: var(--green);">[Approve]</span>
+        <span style="color: var(--red);">[Deny]</span>
+        <span style="color: var(--text2);">[Always Allow in this repo]</span>
+      </div>
+    </div>
+    <div class="seq-row">
+      <div class="seq-actor" style="color: var(--blue);">Phone</div>
+      <div class="seq-msg approve">User taps <strong style="color: var(--green);">Approve</strong> — ntfy response received</div>
+    </div>
+    <div class="seq-row">
+      <div class="seq-actor">Daemon</div>
+      <div class="seq-msg approve">Logs to SQLite audit, responds to shim</div>
+    </div>
+    <div class="seq-row">
+      <div class="seq-actor">Shim</div>
+      <div class="seq-msg allow">Finds real git, runs <code>git push origin main</code></div>
+    </div>
+  </div>
+
+  <h3>Scenario 3: Dangerous Command (Block)</h3>
+  <div class="seq-diagram">
+    <div class="seq-row">
+      <div class="seq-actor">Agent</div>
+      <div class="seq-msg block">Runs <code>rm -rf /</code></div>
+    </div>
+    <div class="seq-row">
+      <div class="seq-actor">Shim</div>
+      <div class="seq-msg block">Sends CommandContext to daemon</div>
+    </div>
+    <div class="seq-row">
+      <div class="seq-actor">Daemon</div>
+      <div class="seq-msg block">Policy engine: <code>rm -rf /</code> — <strong style="color: var(--red);">BLOCK</strong></div>
+    </div>
+    <div class="seq-row">
+      <div class="seq-actor">Daemon</div>
+      <div class="seq-msg block">Logs blocked attempt to SQLite audit</div>
+    </div>
+    <div class="seq-row">
+      <div class="seq-actor">Shim</div>
+      <div class="seq-msg block">Prints <code style="color: var(--red);">agentbox: BLOCKED</code>, exits 1</div>
+    </div>
+    <div class="seq-row">
+      <div class="seq-actor" style="color: var(--red);">Result</div>
+      <div class="seq-msg block"><strong>No notification sent.</strong> Instant deny. Agent sees non-zero exit.</div>
+    </div>
+  </div>
+</div>
+
+<!-- SHIM LIST -->
+<div class="section">
+  <h2>Shim Binary List — From Assignment</h2>
+  <div class="shim-grid">
+    <div class="shim-card">
+      <div class="bucket-tag block">Block</div>
+      <div class="bins">
+        <span class="bin">rm *</span>
+        <span class="bin">mkfs</span>
+        <span class="bin">diskutil</span>
+        <span class="bin">csrutil</span>
+        <span class="bin">spctl</span>
+        <span class="bin">dd</span>
+      </div>
+      <div class="desc">* rm only blocked for -rf / or -rf ~. Other rm patterns go to approve/allow.</div>
+    </div>
+    <div class="shim-card">
+      <div class="bucket-tag approve">Approve — VCS and Deploy</div>
+      <div class="bins">
+        <span class="bin">git</span>
+        <span class="bin">gh</span>
+        <span class="bin">docker</span>
+        <span class="bin">kubectl</span>
+      </div>
+      <div class="desc">git push/force-push, gh pr/issue/release, docker build/push/rm, kubectl apply/delete</div>
+    </div>
+    <div class="shim-card">
+      <div class="bucket-tag approve">Approve — Network</div>
+      <div class="bins">
+        <span class="bin">curl</span>
+        <span class="bin">wget</span>
+        <span class="bin">ssh</span>
+        <span class="bin">scp</span>
+      </div>
+      <div class="desc">All network egress requires approval. Domain allowlist reduces friction over time.</div>
+    </div>
+    <div class="shim-card">
+      <div class="bucket-tag approve">Approve — Database</div>
+      <div class="bins">
+        <span class="bin">psql</span>
+        <span class="bin">mysql</span>
+        <span class="bin">sqlite3</span>
+      </div>
+      <div class="desc">Any database client invocation requires phone approval.</div>
+    </div>
+    <div class="shim-card">
+      <div class="bucket-tag approve">Approve — Credentials</div>
+      <div class="bins">
+        <span class="bin">cat</span>
+        <span class="bin">head</span>
+        <span class="bin">tail</span>
+      </div>
+      <div class="desc">Only when targeting .env, .ssh/, .aws/, .config/ paths. Normal file reads are allowed.</div>
+    </div>
+    <div class="shim-card">
+      <div class="bucket-tag approve">Approve — System</div>
+      <div class="bins">
+        <span class="bin">chmod</span>
+        <span class="bin">kill</span>
+        <span class="bin">killall</span>
+        <span class="bin">npm *</span>
+        <span class="bin">cargo *</span>
+        <span class="bin">osascript</span>
+      </div>
+      <div class="desc">Permission changes, process kills, package publish, AppleScript</div>
+    </div>
+  </div>
+</div>
+
+<!-- CRATE ARCHITECTURE -->
+<div class="section">
+  <h2>Crate Architecture — Rust Workspace</h2>
+  <div class="arch-diagram">
+    <pre style="font-size: 13px; line-height: 2; color: var(--text);">
+<span style="color: var(--accent);">agentbox/</span>
+  Cargo.toml                          <span style="color: var(--text2);"># Workspace: 4 crates</span>
+
+  <span style="color: var(--green);">crates/agentbox-policy/</span>            <span style="color: var(--green);">DONE — 22 tests pass</span>
+    classify.rs                       <span style="color: var(--text2);"># Bucket enum, CommandContext, classify()</span>
+    rules.rs                          <span style="color: var(--text2);"># check_block() + check_approve() + tests</span>
+
+  <span style="color: var(--yellow);">crates/agentbox-daemon/</span>            <span style="color: var(--yellow);">Step 1 — Next</span>
+    main.rs                           <span style="color: var(--text2);"># Tokio runtime, socket listener, signal handling</span>
+    socket.rs                         <span style="color: var(--text2);"># Unix socket server, JSON protocol</span>
+    audit.rs                          <span style="color: var(--text2);"># SQLite audit log (append-only, WAL mode)</span>
+    notify.rs                         <span style="color: var(--text2);"># ntfy HTTP client, response polling</span>
+    config.rs                         <span style="color: var(--text2);"># ~/.agentbox/config.toml parser</span>
+
+  <span style="color: var(--yellow);">crates/agentbox-shim/</span>              <span style="color: var(--yellow);">Step 2</span>
+    main.rs                           <span style="color: var(--text2);"># argv[0] detect, socket IPC, run real binary</span>
+
+  <span style="color: var(--yellow);">crates/agentbox-cli/</span>               <span style="color: var(--yellow);">Step 4</span>
+    main.rs                           <span style="color: var(--text2);"># clap: start/stop/status/audit/allow/config</span>
+    </pre>
+  </div>
+
+  <h3>IPC Protocol (Shim to Daemon)</h3>
+  <div class="arch-diagram">
+    <pre style="font-size: 13px; color: var(--text); line-height: 1.8;">
+<span style="color: var(--yellow);">Shim sends</span> (Unix socket, newline-delimited JSON)
+{
+  "binary": "git",
+  "args": ["push", "origin", "main"],
+  "cwd": "/Users/efe/agentbox",
+  "parent_process": "claude-code",
+  "pid": 12345
+}
+
+<span style="color: var(--green);">Daemon responds</span>
+{
+  "bucket": "approve",
+  "decision": "approved",
+  "reason": "git push to remote",
+  "real_binary": "/usr/bin/git"
+}
+    </pre>
+  </div>
+
+  <h3>Audit Log Schema</h3>
+  <div class="arch-diagram">
+    <pre style="font-size: 13px; color: var(--text); line-height: 1.8;">
+<span style="color: var(--accent);">CREATE TABLE</span> audit_log (
+  id                TEXT PRIMARY KEY,    <span style="color: var(--text2);">-- ULID</span>
+  timestamp         TEXT NOT NULL,       <span style="color: var(--text2);">-- ISO 8601 UTC</span>
+  agent_pid         INTEGER NOT NULL,
+  agent_name        TEXT,                <span style="color: var(--text2);">-- "claude-code", "openclaw", "unknown"</span>
+  command           TEXT NOT NULL,       <span style="color: var(--text2);">-- full command line</span>
+  cwd               TEXT NOT NULL,
+  bucket            TEXT NOT NULL,       <span style="color: var(--text2);">-- "allow" | "approve" | "block"</span>
+  decision          TEXT NOT NULL,       <span style="color: var(--text2);">-- "allowed" | "approved" | "denied" | "blocked" | "timed_out"</span>
+  user_response_ms  INTEGER,            <span style="color: var(--text2);">-- NULL for allow/block</span>
+  parent_process    TEXT
+);
+    </pre>
+  </div>
+</div>
+
+<!-- PHASED ROADMAP -->
+<div class="section">
+  <h2>Phased Roadmap</h2>
+  <div class="timeline">
+    <div class="timeline-item current">
+      <div class="phase">v0.1 — now (2 weeks)</div>
+      <div class="title">PATH Shim Daemon</div>
+      <div class="desc">
+        Rust daemon + compiled shim binaries. Shims sit first in PATH, intercept calls,
+        check policy via daemon socket. Phone approval via ntfy. Works with any terminal agent.
+        <br><br>
+        <strong>Bypassable?</strong> Yes — via absolute paths (/usr/bin/rm). Acceptable for v0.1.
+        Target user is not adversarial; their own agent is.
+      </div>
+      <div class="tech">
+        <span>Rust</span>
+        <span>Tokio</span>
+        <span>Unix Socket</span>
+        <span>SQLite</span>
+        <span>ntfy</span>
+      </div>
+    </div>
+    <div class="timeline-item future">
+      <div class="phase">v1.0 — week 6</div>
+      <div class="title">Endpoint Security Agent</div>
+      <div class="desc">
+        macOS Endpoint Security framework — kernel-level interception of ALL process exec,
+        file unlink, network connect. Cannot be bypassed. Same mechanism as CrowdStrike/SentinelOne.
+        Requires Apple Developer Program ($99/yr).
+      </div>
+      <div class="tech">
+        <span>ES Framework</span>
+        <span>System Extension</span>
+        <span>Apple Developer</span>
+      </div>
+    </div>
+    <div class="timeline-item future">
+      <div class="phase">v1.5 — week 10</div>
+      <div class="title">MCP Governance Proxy</div>
+      <div class="desc">
+        Local MCP proxy between agent and MCP servers. Tool-level semantic interception:
+        "Agent wants to call supabase.delete_table('users')".
+        Richer risk classification than shell command parsing.
+      </div>
+      <div class="tech">
+        <span>MCP Protocol</span>
+        <span>Proxy Server</span>
+        <span>Semantic Classification</span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- BUILD STEPS -->
+<div class="section">
+  <h2>v0.1 Build Steps</h2>
+  <div style="overflow-x: auto;">
+    <table class="comp-table">
+      <thead>
+        <tr>
+          <th>Step</th>
+          <th>What</th>
+          <th>Crate</th>
+          <th>Status</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr class="highlight-row">
+          <td class="product">0</td>
+          <td>Assignment — run agents, log commands, determine shim list</td>
+          <td>-</td>
+          <td class="yes">DONE</td>
+        </tr>
+        <tr>
+          <td class="product">1</td>
+          <td>Daemon — Unix socket listener, JSON protocol, SQLite audit, config</td>
+          <td>agentbox-daemon</td>
+          <td class="partial">NEXT</td>
+        </tr>
+        <tr>
+          <td class="product">2</td>
+          <td>Shim — argv[0] detection, daemon IPC, real binary exec (under 50ms)</td>
+          <td>agentbox-shim</td>
+          <td>Pending</td>
+        </tr>
+        <tr>
+          <td class="product">3</td>
+          <td>ntfy — HTTP POST notifications, action buttons, 120s timeout</td>
+          <td>agentbox-daemon</td>
+          <td>Pending</td>
+        </tr>
+        <tr>
+          <td class="product">4</td>
+          <td>CLI — start/stop/status/audit + install script (PATH setup)</td>
+          <td>agentbox-cli</td>
+          <td>Pending</td>
+        </tr>
+        <tr>
+          <td class="product">5</td>
+          <td>Demo — 60s recording, README, Show HN post</td>
+          <td>-</td>
+          <td>Pending</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<!-- WHY OS-LEVEL -->
+<div class="section">
+  <h2>Why OS-Level, Not SDK-Level</h2>
+  <p>OpenAI, Anthropic, and others are building safety <strong>into</strong> their agent SDKs.
+     This solves safety for agents built with those SDKs. But:</p>
+
+  <div class="callout">
+    <strong>The real world has many agents.</strong> A developer runs OpenClaw (open-source, no SDK),
+    Claude Code (Anthropic), Codex CLI (OpenAI), and custom bash scripts — all on the same machine,
+    all day. No single SDK covers all of them. Agentbox sits below all of them, at the OS boundary,
+    and catches every dangerous command regardless of origin.
+  </div>
+
+  <p>This is the Tailscale insight: do not fix every app's networking — fix it once at the OS layer.
+     Do not fix every agent's safety — fix it once where commands actually execute.</p>
+</div>
+
+<div style="text-align: center; padding: 40px 0; border-top: 1px solid var(--border); margin-top: 40px;">
+  <div style="font-size: 13px; color: var(--text2);">
+    Agentbox v0.1 — Built by Efe Baran Durmaz<br>
+    <span style="color: var(--accent);">Your agent runs free. We catch the dangerous stuff.</span>
+  </div>
+</div>
+
+</body>
+</html>
