@@ -46,6 +46,13 @@ pub fn check_block(ctx: &CommandContext) -> Option<Classification> {
                 notification_summary: None,
             });
         }
+        "dd" => {
+            return Some(Classification {
+                bucket: Bucket::Block,
+                reason: "dd — raw disk/device write tool".into(),
+                notification_summary: None,
+            });
+        }
         _ => {}
     }
 
@@ -136,6 +143,82 @@ pub fn check_approve(ctx: &CommandContext) -> Option<Classification> {
                 reason: "AppleScript execution (can control other apps)".into(),
                 notification_summary: Some("Agent wants to run AppleScript (can control macOS apps)".into()),
             });
+        }
+        "cat" | "head" | "tail" | "less" | "more" => {
+            // Reading credential/secret files requires approval
+            let sensitive_patterns = [
+                ".env", ".ssh/", ".aws/", ".config/", ".gnupg/",
+                "credentials", "secrets", "token", ".netrc",
+            ];
+            let reads_sensitive = ctx.args.iter().any(|a| {
+                if a.starts_with('-') { return false; }
+                let lower = a.to_lowercase();
+                sensitive_patterns.iter().any(|p| lower.contains(p))
+            });
+            if reads_sensitive {
+                let files: Vec<_> = ctx.args.iter().filter(|a| !a.starts_with('-')).collect();
+                return Some(Classification {
+                    bucket: Bucket::Approve,
+                    reason: "reading sensitive/credential file".into(),
+                    notification_summary: Some(format!(
+                        "Agent wants to read sensitive file: {}",
+                        files.iter().map(|f| f.as_str()).collect::<Vec<_>>().join(", ")
+                    )),
+                });
+            }
+        }
+        "chmod" | "chown" => {
+            return Some(Classification {
+                bucket: Bucket::Approve,
+                reason: format!("{} — file permission/ownership change", ctx.binary),
+                notification_summary: Some(format!(
+                    "Agent wants to change permissions: {} {}",
+                    ctx.binary, ctx.args.join(" ")
+                )),
+            });
+        }
+        "kill" | "killall" | "pkill" => {
+            return Some(Classification {
+                bucket: Bucket::Approve,
+                reason: format!("{} — process termination", ctx.binary),
+                notification_summary: Some(format!(
+                    "Agent wants to terminate process: {} {}",
+                    ctx.binary, ctx.args.join(" ")
+                )),
+            });
+        }
+        "docker" | "podman" => {
+            let subcommand = ctx.args.first().map(|s| s.as_str()).unwrap_or("");
+            match subcommand {
+                "ps" | "images" | "inspect" | "logs" => {} // read-only, fall through to allow
+                _ => {
+                    return Some(Classification {
+                        bucket: Bucket::Approve,
+                        reason: format!("docker {} — container mutation", subcommand),
+                        notification_summary: Some(format!(
+                            "Agent wants to run: {} {} {}",
+                            ctx.binary, subcommand,
+                            ctx.args.get(1).unwrap_or(&String::new())
+                        )),
+                    });
+                }
+            }
+        }
+        "kubectl" | "helm" => {
+            let subcommand = ctx.args.first().map(|s| s.as_str()).unwrap_or("");
+            match subcommand {
+                "get" | "describe" | "logs" => {} // read-only, fall through to allow
+                _ => {
+                    return Some(Classification {
+                        bucket: Bucket::Approve,
+                        reason: format!("{} {} — cluster mutation", ctx.binary, subcommand),
+                        notification_summary: Some(format!(
+                            "Agent wants to run: {} {}",
+                            ctx.binary, ctx.args.join(" ")
+                        )),
+                    });
+                }
+            }
         }
         "gh" => {
             // GitHub CLI — most operations are visible to others
@@ -239,6 +322,74 @@ mod tests {
     #[test]
     fn test_npm_install_is_allowed() {
         let c = classify(&ctx("npm", &["install", "express"]));
+        assert_eq!(c.bucket, Bucket::Allow);
+    }
+
+    // --- Assignment-discovered rules ---
+
+    #[test]
+    fn test_dd_is_blocked() {
+        let c = classify(&ctx("dd", &["if=/dev/zero", "of=/dev/sda"]));
+        assert_eq!(c.bucket, Bucket::Block);
+    }
+
+    #[test]
+    fn test_cat_ssh_key_needs_approval() {
+        let c = classify(&ctx("cat", &["/Users/test/.ssh/id_rsa"]));
+        assert_eq!(c.bucket, Bucket::Approve);
+    }
+
+    #[test]
+    fn test_cat_env_file_needs_approval() {
+        let c = classify(&ctx("cat", &[".env"]));
+        assert_eq!(c.bucket, Bucket::Approve);
+    }
+
+    #[test]
+    fn test_cat_readme_is_allowed() {
+        let c = classify(&ctx("cat", &["README.md"]));
+        assert_eq!(c.bucket, Bucket::Allow);
+    }
+
+    #[test]
+    fn test_chmod_needs_approval() {
+        let c = classify(&ctx("chmod", &["777", "important.txt"]));
+        assert_eq!(c.bucket, Bucket::Approve);
+    }
+
+    #[test]
+    fn test_kill_needs_approval() {
+        let c = classify(&ctx("kill", &["-9", "12345"]));
+        assert_eq!(c.bucket, Bucket::Approve);
+    }
+
+    #[test]
+    fn test_killall_needs_approval() {
+        let c = classify(&ctx("killall", &["node"]));
+        assert_eq!(c.bucket, Bucket::Approve);
+    }
+
+    #[test]
+    fn test_docker_build_needs_approval() {
+        let c = classify(&ctx("docker", &["build", "-t", "myapp", "."]));
+        assert_eq!(c.bucket, Bucket::Approve);
+    }
+
+    #[test]
+    fn test_docker_ps_is_allowed() {
+        let c = classify(&ctx("docker", &["ps"]));
+        assert_eq!(c.bucket, Bucket::Allow);
+    }
+
+    #[test]
+    fn test_kubectl_apply_needs_approval() {
+        let c = classify(&ctx("kubectl", &["apply", "-f", "deploy.yaml"]));
+        assert_eq!(c.bucket, Bucket::Approve);
+    }
+
+    #[test]
+    fn test_kubectl_get_is_allowed() {
+        let c = classify(&ctx("kubectl", &["get", "pods"]));
         assert_eq!(c.bucket, Bucket::Allow);
     }
 }
