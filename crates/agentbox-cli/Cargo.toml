@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+agentbox-daemon = { path = "../agentbox-daemon" }
 agentbox-policy = { path = "../agentbox-policy" }
 clap = { workspace = true }
 serde = { workspace = true }

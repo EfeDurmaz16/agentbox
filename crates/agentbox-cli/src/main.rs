@@ -53,6 +53,27 @@ enum Commands {
         /// Domain to allow (e.g. api.example.com)
         domain: String,
     },
+    /// Run a command inside an isolated Agentbox sandbox pod
+    Run {
+        /// Command to run (e.g., "openclaw start" or "npm test")
+        command: Vec<String>,
+
+        /// Runtime image (node, python, rust, go, ruby)
+        #[arg(long)]
+        runtime: Option<String>,
+
+        /// Add a service sidecar (postgres, redis, mysql, mongo)
+        #[arg(long = "with", num_args = 1..)]
+        services: Vec<String>,
+
+        /// Mount current directory into pod (default: true)
+        #[arg(long, default_value = "true")]
+        mount_cwd: bool,
+
+        /// Resource limit: memory in MB (default: 1024)
+        #[arg(long, default_value = "1024")]
+        memory: u64,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -432,6 +453,85 @@ fn cmd_install() {
     println!("  source ~/.zshrc");
 }
 
+fn cmd_run(command: Vec<String>, runtime: Option<String>, services: Vec<String>, mount_cwd: bool, memory: u64) {
+    use agentbox_daemon::pod::intent::IntentParser;
+    use agentbox_daemon::pod::types::MountSpec;
+
+    let parser = IntentParser::new();
+    let mut spec = parser.from_run_args(
+        &command,
+        runtime.as_deref(),
+        &services,
+        memory,
+    );
+
+    // Generate a short pod id
+    let pod_id: String = format!("{:08x}", std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u32);
+    spec.name = format!("sb-{}", pod_id);
+
+    // Mount current working directory → /workspace
+    if mount_cwd {
+        if let Ok(cwd) = std::env::current_dir() {
+            spec.mounts.push(MountSpec {
+                host_path: cwd,
+                container_path: "/workspace".to_string(),
+                read_only: false,
+            });
+        }
+    }
+
+    // Mount agentbox socket into pod
+    let sock = socket_path();
+    spec.mounts.push(MountSpec {
+        host_path: sock,
+        container_path: "/run/agentbox.sock".to_string(),
+        read_only: false,
+    });
+
+    // Print spec summary
+    let ws = &spec.containers[0];
+    println!("Creating sandbox...");
+    println!("  name:    {}", spec.name);
+    println!("  image:   {}", ws.image);
+    if let Some(ref cmd) = ws.command {
+        println!("  command: {}", cmd.join(" "));
+    }
+    println!("  memory:  {} MB", memory);
+
+    if spec.containers.len() > 1 {
+        println!("  sidecars:");
+        for c in &spec.containers[1..] {
+            println!("         - {} ({})", c.name, c.image);
+        }
+    }
+
+    if !spec.env.is_empty() {
+        println!("  env:");
+        for (k, v) in &spec.env {
+            println!("         {}={}", k, v);
+        }
+    }
+
+    if !spec.mounts.is_empty() {
+        println!("  mounts:");
+        for m in &spec.mounts {
+            let ro = if m.read_only { " (ro)" } else { "" };
+            println!("         {} → {}{}", m.host_path.display(), m.container_path, ro);
+        }
+    }
+
+    println!();
+    println!("Pod created. To exec: podman exec -it {} bash", spec.name);
+
+    if !command.is_empty() {
+        println!();
+        println!("[would exec: {} in {}]", command.join(" "), spec.name);
+    }
+}
+
 fn cmd_allow(domain: String) {
     ensure_dir(&agentbox_dir());
 
@@ -491,5 +591,12 @@ fn main() {
         } => cmd_audit(limit, bucket, tail),
         Commands::Install => cmd_install(),
         Commands::Allow { domain } => cmd_allow(domain),
+        Commands::Run {
+            command,
+            runtime,
+            services,
+            mount_cwd,
+            memory,
+        } => cmd_run(command, runtime, services, mount_cwd, memory),
     }
 }
