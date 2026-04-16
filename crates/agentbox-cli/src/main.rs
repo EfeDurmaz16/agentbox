@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fs;
 use std::io::{self, Write};
 use std::path::PathBuf;
@@ -5,6 +6,7 @@ use std::process::Command;
 use std::thread;
 use std::time::Duration;
 
+use chrono::{NaiveDateTime, Utc};
 use clap::{Parser, Subcommand};
 use rusqlite::Connection;
 
@@ -73,6 +75,31 @@ enum Commands {
         /// Resource limit: memory in MB (default: 1024)
         #[arg(long, default_value = "1024")]
         memory: u64,
+    },
+    /// Stop and remove a sandbox pod
+    StopPod {
+        /// Pod ID (e.g., sb-a1b2c3)
+        pod_id: String,
+    },
+    /// List running sandbox pods
+    Pods,
+    /// Explain the last blocked or denied action
+    Why,
+    /// Show current policy posture (allow/approve/block rules)
+    Policy,
+    /// Rich audit log viewer with timeline formatting
+    History {
+        /// Show all events (not just today)
+        #[arg(long)]
+        all: bool,
+
+        /// Filter by bucket (allow, approve, block)
+        #[arg(long)]
+        bucket: Option<String>,
+
+        /// Output as JSON (for piping)
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -314,6 +341,8 @@ fn cmd_audit(limit: usize, bucket: Option<String>, tail: bool) {
     } else {
         print_audit_header();
         print_audit_events(&db_path, limit, &bucket, None);
+        println!();
+        println!("Tip: use `agentbox history` for a richer timeline view");
     }
 }
 
@@ -453,10 +482,54 @@ fn cmd_install() {
     println!("  source ~/.zshrc");
 }
 
-fn cmd_run(command: Vec<String>, runtime: Option<String>, services: Vec<String>, mount_cwd: bool, memory: u64) {
+async fn cmd_run(command: Vec<String>, runtime: Option<String>, services: Vec<String>, mount_cwd: bool, memory: u64) {
     use agentbox_daemon::pod::intent::IntentParser;
-    use agentbox_daemon::pod::types::MountSpec;
+    use agentbox_daemon::pod::machine::MachineManager;
+    use agentbox_daemon::pod::podman::PodmanProvider;
+    use agentbox_daemon::pod::provider::PodProvider;
+    use agentbox_daemon::pod::types::{ExecRequest, MountSpec};
 
+    // 1. Check if podman is available
+    match Command::new("podman").arg("--version").output() {
+        Ok(output) if output.status.success() => {
+            let ver = String::from_utf8_lossy(&output.stdout);
+            eprintln!("Using {}", ver.trim());
+        }
+        _ => {
+            eprintln!("Error: podman not found. Install it:");
+            eprintln!("  macOS: brew install podman && podman machine init && podman machine start");
+            eprintln!("  Linux: https://podman.io/docs/installation");
+            std::process::exit(1);
+        }
+    }
+
+    // 2. On macOS, ensure podman machine is running
+    let machine = MachineManager::new();
+    if machine.needs_vm() {
+        eprintln!("Checking podman machine...");
+        if let Err(e) = machine.ensure_ready().await {
+            eprintln!("Error: failed to start podman machine: {}", e);
+            std::process::exit(1);
+        }
+    }
+
+    // 3. Create PodmanProvider
+    let agentbox_sock = socket_path().to_string_lossy().to_string();
+    let shim_binary = find_shim_binary()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|| {
+            eprintln!("warning: agentbox-shim binary not found, shim injection will be skipped");
+            eprintln!("hint: run `cargo build -p agentbox-shim` first");
+            String::new()
+        });
+
+    let provider = PodmanProvider::new(agentbox_sock.clone(), shim_binary.clone());
+
+    // 4. Generate pod ID via ulid (first 12 chars for readability)
+    let pod_id = ulid::Ulid::new().to_string().to_lowercase();
+    let pod_id_short = &pod_id[..12];
+
+    // 5. Build PodSpec
     let parser = IntentParser::new();
     let mut spec = parser.from_run_args(
         &command,
@@ -464,15 +537,9 @@ fn cmd_run(command: Vec<String>, runtime: Option<String>, services: Vec<String>,
         &services,
         memory,
     );
+    spec.name = format!("sb-{}", pod_id_short);
 
-    // Generate a short pod id
-    let pod_id: String = format!("{:08x}", std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u32);
-    spec.name = format!("sb-{}", pod_id);
-
-    // Mount current working directory → /workspace
+    // 6. Add critical mounts
     if mount_cwd {
         if let Ok(cwd) = std::env::current_dir() {
             spec.mounts.push(MountSpec {
@@ -483,52 +550,197 @@ fn cmd_run(command: Vec<String>, runtime: Option<String>, services: Vec<String>,
         }
     }
 
-    // Mount agentbox socket into pod
     let sock = socket_path();
     spec.mounts.push(MountSpec {
         host_path: sock,
         container_path: "/run/agentbox.sock".to_string(),
-        read_only: false,
+        read_only: true,
     });
 
-    // Print spec summary
-    let ws = &spec.containers[0];
-    println!("Creating sandbox...");
-    println!("  name:    {}", spec.name);
-    println!("  image:   {}", ws.image);
-    if let Some(ref cmd) = ws.command {
-        println!("  command: {}", cmd.join(" "));
+    if !shim_binary.is_empty() {
+        spec.mounts.push(MountSpec {
+            host_path: PathBuf::from(&shim_binary),
+            container_path: "/usr/local/bin/agentbox-shim".to_string(),
+            read_only: true,
+        });
     }
-    println!("  memory:  {} MB", memory);
+
+    // 7. Print progress and create pod
+    let ws_image = spec.containers[0].image.clone();
+    println!("Creating sandbox pod {}...", spec.name);
+    println!("  Image: {}", ws_image);
 
     if spec.containers.len() > 1 {
-        println!("  sidecars:");
-        for c in &spec.containers[1..] {
-            println!("         - {} ({})", c.name, c.image);
-        }
+        let sidecars: Vec<String> = spec.containers[1..]
+            .iter()
+            .map(|c| format!("{} ({})", c.name, c.image))
+            .collect();
+        println!("  Sidecars: {}", sidecars.join(", "));
+    }
+
+    for m in &spec.mounts {
+        let ro = if m.read_only { " (ro)" } else { "" };
+        println!("  Mount: {} -> {}{}", m.host_path.display(), m.container_path, ro);
     }
 
     if !spec.env.is_empty() {
-        println!("  env:");
         for (k, v) in &spec.env {
-            println!("         {}={}", k, v);
+            println!("  Env: {}={}", k, v);
         }
     }
 
-    if !spec.mounts.is_empty() {
-        println!("  mounts:");
-        for m in &spec.mounts {
-            let ro = if m.read_only { " (ro)" } else { "" };
-            println!("         {} → {}{}", m.host_path.display(), m.container_path, ro);
+    println!("  Agentbox: socket + shims injected");
+
+    let pod_name = spec.name.clone();
+    match provider.create(pod_id_short, &spec).await {
+        Ok(_session) => {
+            println!("Pod {} created and running.", pod_name);
+        }
+        Err(e) => {
+            eprintln!("Error: failed to create pod: {}", e);
+            std::process::exit(1);
         }
     }
 
-    println!();
-    println!("Pod created. To exec: podman exec -it {} bash", spec.name);
-
+    // 8. If command was provided, run it
     if !command.is_empty() {
         println!();
-        println!("[would exec: {} in {}]", command.join(" "), spec.name);
+        println!("Running: {}", command.join(" "));
+        println!("--- output ---");
+
+        let exec_req = ExecRequest {
+            command: command.clone(),
+            working_dir: Some("/workspace".to_string()),
+            env: HashMap::new(),
+            timeout_seconds: None,
+        };
+
+        match provider.exec(pod_id_short, &exec_req).await {
+            Ok(result) => {
+                if !result.stdout.is_empty() {
+                    print!("{}", result.stdout);
+                }
+                if !result.stderr.is_empty() {
+                    eprint!("{}", result.stderr);
+                }
+                println!("--- exit code: {} ---", result.exit_code);
+
+                // Cleanup prompt
+                eprint!("Destroy pod {}? [Y/n] ", pod_name);
+                io::stderr().flush().ok();
+                let mut input = String::new();
+                if io::stdin().read_line(&mut input).is_ok() {
+                    let answer = input.trim().to_lowercase();
+                    if answer.is_empty() || answer == "y" || answer == "yes" {
+                        if let Err(e) = provider.destroy(pod_id_short).await {
+                            eprintln!("Warning: failed to destroy pod: {}", e);
+                        } else {
+                            println!("Pod {} destroyed.", pod_name);
+                        }
+                    } else {
+                        println!("Pod {} left running.", pod_name);
+                    }
+                }
+
+                if result.exit_code != 0 {
+                    std::process::exit(result.exit_code);
+                }
+            }
+            Err(e) => {
+                eprintln!("Error: failed to run command: {}", e);
+                std::process::exit(1);
+            }
+        }
+    } else {
+        // 9. No command: print interactive instructions
+        println!();
+        println!("Pod running. Connect with:");
+        println!("  podman exec -it {}-workspace bash", pod_name);
+        println!();
+        println!("Stop with:");
+        println!("  agentbox stop-pod {}", pod_name);
+    }
+}
+
+async fn cmd_stop_pod(pod_id: String) {
+    let raw_id = pod_id.strip_prefix("sb-").unwrap_or(&pod_id);
+    let pod_name = format!("sb-{}", raw_id);
+
+    eprintln!("Stopping pod {}...", pod_name);
+
+    match Command::new("podman").args(["pod", "rm", "-f", &pod_name]).output() {
+        Ok(o) if o.status.success() => {
+            println!("Pod {} removed.", pod_name);
+        }
+        Ok(o) => {
+            let stderr = String::from_utf8_lossy(&o.stderr);
+            eprintln!("Error: failed to remove pod {}: {}", pod_name, stderr.trim());
+            std::process::exit(1);
+        }
+        Err(e) => {
+            eprintln!("Error: podman not found or failed: {}", e);
+            std::process::exit(1);
+        }
+    }
+}
+
+async fn cmd_pods() {
+    match Command::new("podman")
+        .args(["pod", "ls", "--format", "json", "--filter", "label=agentbox=true"])
+        .output()
+    {
+        Ok(o) if o.status.success() => {
+            let stdout = String::from_utf8_lossy(&o.stdout);
+            let json_str = stdout.trim();
+
+            if json_str.is_empty() || json_str == "[]" {
+                println!("No sandbox pods running.");
+                return;
+            }
+
+            let pods: Vec<serde_json::Value> = match serde_json::from_str(json_str) {
+                Ok(p) => p,
+                Err(e) => {
+                    eprintln!("Error: failed to parse pod list: {}", e);
+                    std::process::exit(1);
+                }
+            };
+
+            if pods.is_empty() {
+                println!("No sandbox pods running.");
+                return;
+            }
+
+            println!("{:<24} {:<12} {:<8} {}", "NAME", "STATUS", "CTRS", "CREATED");
+            println!("{}", "-".repeat(64));
+
+            for pod in &pods {
+                let name = pod["Name"].as_str().unwrap_or("-");
+                let status = pod["Status"].as_str().unwrap_or("-");
+                let containers = pod["Containers"]
+                    .as_array()
+                    .map(|a| a.len())
+                    .or_else(|| pod["NumberOfContainers"].as_u64().map(|n| n as usize))
+                    .unwrap_or(0);
+                let created = pod["Created"]
+                    .as_str()
+                    .map(|s| if s.len() > 19 { &s[..19] } else { s })
+                    .unwrap_or("-");
+
+                println!("{:<24} {:<12} {:<8} {}", name, status, containers, created);
+            }
+        }
+        Ok(o) => {
+            let stderr = String::from_utf8_lossy(&o.stderr);
+            eprintln!("Error: {}", stderr.trim());
+            std::process::exit(1);
+        }
+        Err(e) => {
+            eprintln!("Error: podman not found: {}", e);
+            eprintln!("  macOS: brew install podman && podman machine init && podman machine start");
+            eprintln!("  Linux: https://podman.io/docs/installation");
+            std::process::exit(1);
+        }
     }
 }
 
@@ -577,7 +789,496 @@ fn cmd_allow(domain: String) {
 // Main
 // ---------------------------------------------------------------------------
 
-fn main() {
+fn cmd_why() {
+    let db_path = audit_db_path();
+    if !db_path.exists() {
+        eprintln!("no audit log found at {}", db_path.display());
+        eprintln!("hint: start the daemon first with `agentbox start`");
+        std::process::exit(1);
+    }
+
+    let conn = Connection::open(&db_path).expect("failed to open audit db");
+
+    let result = conn.query_row(
+        "SELECT timestamp, command, bucket, decision, user_response_ms, cwd
+         FROM audit_log
+         WHERE decision != 'allowed'
+         ORDER BY timestamp DESC
+         LIMIT 1",
+        [],
+        |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, Option<i64>>(4)?,
+                row.get::<_, String>(5)?,
+            ))
+        },
+    );
+
+    match result {
+        Ok((timestamp, command, bucket, decision, response_ms, cwd)) => {
+            let ago = format_time_ago(&timestamp);
+
+            println!();
+            println!("Last intercepted action ({}):", ago);
+            println!("  Command:  {}", command);
+            println!("  Bucket:   {}", bucket);
+            println!("  Decision: {}", format_decision(&decision, response_ms));
+            println!("  Dir:      {}", cwd);
+            println!("  Reason:   {}", explain_reason(&command, &bucket));
+            println!();
+            println!("Why: {}", explain_why(&command, &bucket, &decision));
+            println!();
+
+            // Suggest override
+            let binary = command.split_whitespace().next().unwrap_or(&command);
+            println!("To always allow this command in this repo:");
+            println!("  agentbox allow-command \"{}\" --in {}", binary, cwd);
+        }
+        Err(rusqlite::Error::QueryReturnedNoRows) => {
+            println!("No blocked or denied actions found in the audit log.");
+            println!("All intercepted commands have been allowed so far.");
+        }
+        Err(e) => {
+            eprintln!("failed to query audit log: {}", e);
+            std::process::exit(1);
+        }
+    }
+}
+
+fn format_time_ago(timestamp: &str) -> String {
+    let ts = if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(timestamp) {
+        dt.with_timezone(&Utc)
+    } else if let Ok(dt) = NaiveDateTime::parse_from_str(timestamp, "%Y-%m-%d %H:%M:%S") {
+        dt.and_utc()
+    } else {
+        return timestamp.to_string();
+    };
+
+    let now = Utc::now();
+    let diff = now.signed_duration_since(ts);
+
+    if diff.num_seconds() < 60 {
+        "just now".to_string()
+    } else if diff.num_minutes() < 60 {
+        let m = diff.num_minutes();
+        format!("{} minute{} ago", m, if m == 1 { "" } else { "s" })
+    } else if diff.num_hours() < 24 {
+        let h = diff.num_hours();
+        format!("{} hour{} ago", h, if h == 1 { "" } else { "s" })
+    } else {
+        let d = diff.num_days();
+        format!("{} day{} ago", d, if d == 1 { "" } else { "s" })
+    }
+}
+
+fn format_decision(decision: &str, response_ms: Option<i64>) -> String {
+    match decision {
+        "denied" => {
+            if let Some(ms) = response_ms {
+                format!("denied (user tapped Deny, {:.1}s)", ms as f64 / 1000.0)
+            } else {
+                "denied (user tapped Deny)".to_string()
+            }
+        }
+        "blocked" => "blocked (instant deny)".to_string(),
+        "timed_out" => "denied (timed out, no response)".to_string(),
+        "approved" => {
+            if let Some(ms) = response_ms {
+                format!("approved ({:.1}s)", ms as f64 / 1000.0)
+            } else {
+                "approved".to_string()
+            }
+        }
+        other => other.to_string(),
+    }
+}
+
+fn explain_reason(command: &str, bucket: &str) -> String {
+    let parts: Vec<&str> = command.split_whitespace().collect();
+    let binary = parts.first().copied().unwrap_or("");
+
+    match (binary, bucket) {
+        ("git", "approve") => {
+            if command.contains("--force") || command.contains("-f") {
+                "git push to remote -- force push detected".to_string()
+            } else {
+                "git push to remote repository".to_string()
+            }
+        }
+        ("rm", "block") => "rm -rf targeting root or home directory".to_string(),
+        ("rm", "approve") => "rm targeting files outside workspace".to_string(),
+        ("ssh", _) | ("scp", _) => format!("{} to remote host", binary),
+        ("psql", _) | ("mysql", _) | ("sqlite3", _) => "database client invocation".to_string(),
+        ("curl", _) | ("wget", _) => "network egress to unknown domain".to_string(),
+        ("npm", _) | ("cargo", _) | ("gem", _) if command.contains("publish") => {
+            "package publish".to_string()
+        }
+        ("chmod", _) | ("chown", _) => "file permission/ownership change".to_string(),
+        ("kill", _) | ("killall", _) | ("pkill", _) => "process termination".to_string(),
+        ("docker", _) | ("podman", _) => "container mutation".to_string(),
+        ("kubectl", _) | ("helm", _) => "cluster mutation".to_string(),
+        ("dd", _) => "raw disk/device write tool".to_string(),
+        ("mkfs", _) | ("diskutil", _) => "disk format/erase command".to_string(),
+        ("csrutil", _) | ("spctl", _) => "system security settings modification".to_string(),
+        ("cat", _) | ("head", _) | ("tail", _) => {
+            "reading sensitive/credential file".to_string()
+        }
+        ("osascript", _) => "AppleScript execution".to_string(),
+        ("gh", _) => "visible GitHub operation".to_string(),
+        _ => format!("{} -- classified as {}", binary, bucket),
+    }
+}
+
+fn explain_why(command: &str, bucket: &str, decision: &str) -> String {
+    let binary = command.split_whitespace().next().unwrap_or("");
+
+    let risk = match binary {
+        "git" if command.contains("push") => {
+            if command.contains("--force") || command.contains("-f") {
+                "Force pushing rewrites remote history and can destroy\n     teammates' work."
+            } else {
+                "Pushing code to a remote repository makes changes visible\n     to others and potentially deploys code."
+            }
+        }
+        "rm" if bucket == "block" => {
+            "Recursively deleting root or home directory would destroy\n     your entire system or all personal files."
+        }
+        "rm" => {
+            "Deleting files outside the current project could affect\n     other work or system stability."
+        }
+        "ssh" | "scp" => {
+            "Remote access can execute commands on other machines\n     or transfer sensitive data."
+        }
+        "psql" | "mysql" | "sqlite3" => {
+            "Database operations can modify or destroy data\n     that may be difficult or impossible to recover."
+        }
+        "curl" | "wget" => {
+            "Network requests can exfiltrate data or interact\n     with external services in unexpected ways."
+        }
+        "dd" => "dd writes raw data directly to devices and can\n     overwrite entire disks without warning.",
+        "chmod" | "chown" => {
+            "Changing file permissions can expose sensitive files\n     or lock you out of your own system."
+        }
+        "kill" | "killall" => {
+            "Terminating processes can interrupt critical services\n     or cause data loss."
+        }
+        "docker" | "podman" => {
+            "Container mutations can affect running services\n     or expose host resources."
+        }
+        "kubectl" | "helm" => {
+            "Cluster mutations can affect production workloads\n     and potentially cause outages."
+        }
+        _ => "This action was classified as potentially dangerous\n     based on Agentbox's default policy rules.",
+    };
+
+    let action = match decision {
+        "blocked" => "Agentbox blocked this action immediately.",
+        "denied" => "Agentbox required phone approval,\n     which was denied.",
+        "timed_out" => {
+            "Agentbox required phone approval,\n     but no response was received within the timeout."
+        }
+        _ => "Agentbox intercepted this action.",
+    };
+
+    format!("{}\n     {}", risk, action)
+}
+
+fn cmd_policy() {
+    println!();
+    println!("BLOCK (instant deny, no notification):");
+    println!("  rm -rf / or ~    mkfs    diskutil erase    csrutil/spctl    dd");
+    println!("  git push --force to main/master");
+    println!();
+    println!("APPROVE (phone notification required):");
+    println!("  git push         ssh/scp           curl/wget (unknown domains)");
+    println!("  psql/mysql       sqlite3           npm/cargo/gem publish");
+    println!("  chmod/chown      kill/killall      docker (mutations)");
+    println!("  kubectl (mutations)  gh pr/issue   osascript");
+    println!("  cat .env/.ssh/.aws");
+    println!();
+    println!("ALLOW (pass through, <50ms):");
+    println!("  Everything else -- ls, cat, git commit, npm install, cargo build...");
+    println!();
+
+    // Read config for overrides
+    let cfg = fs::read_to_string(config_path())
+        .ok()
+        .and_then(|s| s.parse::<toml::Table>().ok());
+
+    // Allowed domains
+    let domains: Vec<String> = cfg
+        .as_ref()
+        .and_then(|t| t.get("network"))
+        .and_then(|v| v.as_table())
+        .and_then(|nt| nt.get("allowed_domains"))
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    // Always-allow overrides
+    let always_allow: Vec<String> = cfg
+        .as_ref()
+        .and_then(|t| t.get("overrides"))
+        .and_then(|v| v.as_table())
+        .and_then(|nt| nt.get("always_allow"))
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    // Always-block overrides
+    let always_block: Vec<String> = cfg
+        .as_ref()
+        .and_then(|t| t.get("overrides"))
+        .and_then(|v| v.as_table())
+        .and_then(|nt| nt.get("always_block"))
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    println!("OVERRIDES:");
+    if domains.is_empty() {
+        println!("  Allowed domains: (none)");
+    } else {
+        println!("  Allowed domains: {}", domains.join(", "));
+    }
+    if always_allow.is_empty() {
+        println!("  Always allow:    (none)");
+    } else {
+        println!("  Always allow:    {}", always_allow.join(", "));
+    }
+    if always_block.is_empty() {
+        println!("  Always block:    (none)");
+    } else {
+        println!("  Always block:    {}", always_block.join(", "));
+    }
+
+    println!();
+
+    // Audit event count
+    let db_path = audit_db_path();
+    let event_count = if db_path.exists() {
+        Connection::open(&db_path)
+            .ok()
+            .and_then(|c| {
+                c.query_row("SELECT COUNT(*) FROM audit_log", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .ok()
+            })
+            .unwrap_or(0)
+    } else {
+        0
+    };
+
+    println!("Config: {}", config_path().display());
+    println!(
+        "Audit:  {} ({} events)",
+        audit_db_path().display(),
+        event_count
+    );
+}
+
+fn cmd_history(show_all: bool, bucket_filter: Option<String>, json_output: bool) {
+    let db_path = audit_db_path();
+    if !db_path.exists() {
+        eprintln!("no audit log found at {}", db_path.display());
+        eprintln!("hint: start the daemon first with `agentbox start`");
+        std::process::exit(1);
+    }
+
+    let conn = Connection::open(&db_path).expect("failed to open audit db");
+
+    // Build query
+    let today_str = Utc::now().format("%Y-%m-%d").to_string();
+    let mut sql = String::from(
+        "SELECT timestamp, bucket, decision, command, user_response_ms
+         FROM audit_log WHERE 1=1",
+    );
+
+    if !show_all {
+        sql.push_str(&format!(" AND timestamp LIKE '{}%'", today_str));
+    }
+    if let Some(ref b) = bucket_filter {
+        sql.push_str(&format!(" AND bucket = '{}'", b));
+    }
+    sql.push_str(" ORDER BY timestamp ASC");
+
+    let mut stmt = conn.prepare(&sql).expect("failed to prepare query");
+
+    struct HistoryRow {
+        timestamp: String,
+        bucket: String,
+        decision: String,
+        command: String,
+        user_response_ms: Option<i64>,
+    }
+
+    let rows = stmt
+        .query_map([], |row| {
+            Ok(HistoryRow {
+                timestamp: row.get(0)?,
+                bucket: row.get(1)?,
+                decision: row.get(2)?,
+                command: row.get(3)?,
+                user_response_ms: row.get(4)?,
+            })
+        })
+        .expect("failed to query audit log");
+
+    let events: Vec<HistoryRow> = rows.filter_map(|r| r.ok()).collect();
+
+    if json_output {
+        println!("[");
+        for (i, event) in events.iter().enumerate() {
+            let comma = if i < events.len() - 1 { "," } else { "" };
+            let response_ms = event
+                .user_response_ms
+                .map(|ms| ms.to_string())
+                .unwrap_or_else(|| "null".to_string());
+            println!(
+                "  {{\"timestamp\":\"{}\",\"bucket\":\"{}\",\"decision\":\"{}\",\"command\":\"{}\",\"user_response_ms\":{}}}{}",
+                event.timestamp,
+                event.bucket,
+                event.decision,
+                event.command.replace('\\', "\\\\").replace('"', "\\\""),
+                response_ms,
+                comma
+            );
+        }
+        println!("]");
+        return;
+    }
+
+    if events.is_empty() {
+        if show_all {
+            println!("No events in the audit log.");
+        } else {
+            println!("No events today. Use --all to see all history.");
+        }
+        return;
+    }
+
+    // Group by date, print timeline
+    let mut current_date = String::new();
+    let mut total: usize = 0;
+    let mut allowed: usize = 0;
+    let mut approved: usize = 0;
+    let mut blocked: usize = 0;
+    let mut approval_times: Vec<f64> = Vec::new();
+
+    for event in &events {
+        let date = if event.timestamp.len() >= 10 {
+            &event.timestamp[..10]
+        } else {
+            &event.timestamp
+        };
+
+        if date != current_date {
+            if !current_date.is_empty() {
+                println!();
+            }
+            current_date = date.to_string();
+            let label = if date == today_str {
+                "Today".to_string()
+            } else {
+                date.to_string()
+            };
+            println!("{}", label);
+            println!("{}", "\u{2501}".repeat(50));
+        }
+
+        let time_display = if event.timestamp.len() >= 16 {
+            &event.timestamp[11..16]
+        } else {
+            &event.timestamp
+        };
+
+        let bucket_label = match event.bucket.as_str() {
+            "allow" => "ALLOW  ",
+            "approve" => "APPROVE",
+            "block" => "BLOCK  ",
+            _ => "       ",
+        };
+
+        let cmd_display = if event.command.len() > 40 {
+            format!("{}...", &event.command[..37])
+        } else {
+            event.command.clone()
+        };
+
+        let suffix = match event.bucket.as_str() {
+            "block" => " \u{26d4} instant deny".to_string(),
+            "approve" => {
+                let time_part = event
+                    .user_response_ms
+                    .map(|ms| format!("{:.1}s", ms as f64 / 1000.0))
+                    .unwrap_or_default();
+                match event.decision.as_str() {
+                    "approved" => {
+                        if time_part.is_empty() {
+                            " -> approved".to_string()
+                        } else {
+                            format!(" -> approved ({})", time_part)
+                        }
+                    }
+                    "denied" => " -> denied (user)".to_string(),
+                    "timed_out" => " -> denied (timeout)".to_string(),
+                    _ => String::new(),
+                }
+            }
+            _ => String::new(),
+        };
+
+        println!(
+            "{}  {}  {:<40}{}",
+            time_display, bucket_label, cmd_display, suffix
+        );
+
+        // Update stats
+        total += 1;
+        match event.bucket.as_str() {
+            "allow" => allowed += 1,
+            "approve" => {
+                approved += 1;
+                if let Some(ms) = event.user_response_ms {
+                    approval_times.push(ms as f64);
+                }
+            }
+            "block" => blocked += 1,
+            _ => {}
+        }
+    }
+
+    // Print stats
+    println!();
+    println!(
+        "Stats: {} total | {} allowed | {} approved | {} blocked",
+        total, allowed, approved, blocked
+    );
+    if !approval_times.is_empty() {
+        let avg: f64 = approval_times.iter().sum::<f64>() / approval_times.len() as f64;
+        println!("Avg approval time: {:.1}s", avg / 1000.0);
+    }
+}
+
+#[tokio::main]
+async fn main() {
     let cli = Cli::parse();
 
     match cli.command {
@@ -597,6 +1298,11 @@ fn main() {
             services,
             mount_cwd,
             memory,
-        } => cmd_run(command, runtime, services, mount_cwd, memory),
+        } => cmd_run(command, runtime, services, mount_cwd, memory).await,
+        Commands::StopPod { pod_id } => cmd_stop_pod(pod_id).await,
+        Commands::Pods => cmd_pods().await,
+        Commands::Why => cmd_why(),
+        Commands::Policy => cmd_policy(),
+        Commands::History { all, bucket, json } => cmd_history(all, bucket, json),
     }
 }

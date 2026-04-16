@@ -136,7 +136,7 @@ async fn handle_connection(
         parent_process: Some(req.parent_process.clone()),
         pid: req.pid,
     };
-    let classification = classify::classify(&ctx);
+    let classification = classify::classify_default(&ctx);
     let real_binary = find_real_binary(&req.binary);
 
     // Handle per-bucket

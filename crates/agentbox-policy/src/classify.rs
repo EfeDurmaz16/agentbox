@@ -36,15 +36,39 @@ pub struct Classification {
     pub notification_summary: Option<String>,
 }
 
-/// Classify a command into a policy bucket.
-pub fn classify(ctx: &CommandContext) -> Classification {
-    // Block rules checked first (most restrictive)
-    if let Some(c) = crate::rules::check_block(ctx) {
+/// Policy configuration for context-rich classification.
+#[derive(Debug, Clone, Default)]
+pub struct PolicyConfig {
+    /// Current workspace/project root (commands within this are less risky)
+    pub workspace: Option<String>,
+    /// Domains that don't need network approval
+    pub allowed_domains: Vec<String>,
+    /// Commands that are always allowed (user overrides)
+    pub always_allow: Vec<String>,
+    /// Commands that are always blocked (user overrides)
+    pub always_block: Vec<String>,
+}
+
+/// Classify a command into a policy bucket using default (empty) config.
+/// Kept for backward compatibility.
+pub fn classify_default(ctx: &CommandContext) -> Classification {
+    classify(ctx, &PolicyConfig::default())
+}
+
+/// Classify a command into a policy bucket with policy configuration.
+pub fn classify(ctx: &CommandContext, config: &PolicyConfig) -> Classification {
+    // Config overrides checked first (user-defined always-block / always-allow / domain allowlist)
+    if let Some(c) = crate::rules::check_config_overrides(ctx, config) {
         return c;
     }
 
-    // Approve rules checked second
-    if let Some(c) = crate::rules::check_approve(ctx) {
+    // Block rules checked next (most restrictive)
+    if let Some(c) = crate::rules::check_block(ctx, config) {
+        return c;
+    }
+
+    // Approve rules checked last
+    if let Some(c) = crate::rules::check_approve(ctx, config) {
         return c;
     }
 
