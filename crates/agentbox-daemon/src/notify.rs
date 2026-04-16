@@ -118,35 +118,29 @@ impl NtfyClient {
     // -----------------------------------------------------------------------
 
     /// POST the notification to the ntfy topic.
+    ///
+    /// Uses header-based approach for proper button rendering on iOS/Android.
+    /// The message body is plain text; title, tags, and actions are sent as headers.
     async fn send_notification(&self, req: &NotificationRequest) -> Result<()> {
         let topic_url = format!("{}/{}", self.server, self.topic);
 
-        let body = NtfyPublish {
-            topic: self.topic.clone(),
-            title: req.title.clone(),
-            message: req.message.clone(),
-            tags: req.tags.clone(),
-            actions: vec![
-                NtfyAction {
-                    action: "http".into(),
-                    label: "Approve".into(),
-                    url: topic_url.clone(),
-                    method: "POST".into(),
-                    body: "approved".into(),
-                },
-                NtfyAction {
-                    action: "http".into(),
-                    label: "Deny".into(),
-                    url: topic_url.clone(),
-                    method: "POST".into(),
-                    body: "denied".into(),
-                },
-            ],
-        };
+        // Actions header format: http, Approve, https://ntfy.sh/topic, method=POST, body=approved
+        let actions_header = format!(
+            "http, Approve, {topic_url}, method=POST, body=approved; http, Deny, {topic_url}, method=POST, body=denied"
+        );
+
+        let tags_header = req.tags.join(",");
 
         info!(topic = %self.topic, title = %req.title, "Sending approval notification");
 
-        let resp = self.http.post(&topic_url).json(&body).send().await?;
+        let resp = self.http
+            .post(&topic_url)
+            .header("Title", &req.title)
+            .header("Tags", &tags_header)
+            .header("Actions", &actions_header)
+            .body(req.message.clone())
+            .send()
+            .await?;
 
         if !resp.status().is_success() {
             let status = resp.status().as_u16();
@@ -391,11 +385,11 @@ mod tests {
 
         client.send_approval(&req).await.unwrap();
 
+        // With header-based approach, the POST body is the plain message text.
+        // Actions (Approve/Deny) are sent as HTTP headers, not in the body.
         let bodies = mock.bodies.lock().await;
         assert!(!bodies.is_empty());
         let first = &bodies[0];
-        assert!(first.contains("Approve"), "body should contain Approve action");
-        assert!(first.contains("Deny"), "body should contain Deny action");
-        assert!(first.contains("my-topic"), "body should reference topic");
+        assert!(first.contains("Agent wants to git push"), "body should contain the message text");
     }
 }
