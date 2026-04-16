@@ -1,0 +1,10 @@
+[package]
+name = "agentbox-client"
+version.workspace = true
+edition.workspace = true
+description = "Lightweight client for the Agentbox daemon — use from Switchboard, agit, or any Rust project"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }

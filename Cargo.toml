@@ -4,6 +4,7 @@ members = [
     "crates/agentbox-shim",
     "crates/agentbox-cli",
     "crates/agentbox-policy",
+    "crates/agentbox-client",
 ]
 resolver = "2"
 
