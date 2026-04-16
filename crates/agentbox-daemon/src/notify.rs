@@ -109,8 +109,9 @@ impl NtfyClient {
     /// within the configured timeout.
     pub async fn send_approval(&self, req: &NotificationRequest) -> Result<ApprovalResult> {
         let sent_at = now_epoch();
-        self.send_notification(req).await?;
-        self.poll_response(sent_at).await
+        let request_id = format!("req-{:x}", sent_at ^ std::process::id() as u64);
+        self.send_notification(req, &request_id).await?;
+        self.poll_response(sent_at, &request_id).await
     }
 
     // -----------------------------------------------------------------------
@@ -121,12 +122,14 @@ impl NtfyClient {
     ///
     /// Uses header-based approach for proper button rendering on iOS/Android.
     /// The message body is plain text; title, tags, and actions are sent as headers.
-    async fn send_notification(&self, req: &NotificationRequest) -> Result<()> {
+    async fn send_notification(&self, req: &NotificationRequest, request_id: &str) -> Result<()> {
         let topic_url = format!("{}/{}", self.server, self.topic);
 
-        // Actions header format: http, Approve, https://ntfy.sh/topic, method=POST, body=approved
+        // Each button POSTs "{request_id}:approved" or "{request_id}:denied".
+        // The poll loop only accepts messages matching this request_id,
+        // so a late Deny tap after Approve was already accepted is ignored.
         let actions_header = format!(
-            "http, Approve, {topic_url}, method=POST, body=approved; http, Deny, {topic_url}, method=POST, body=denied"
+            "http, Approve, {topic_url}, method=POST, body={request_id}:approved; http, Deny, {topic_url}, method=POST, body={request_id}:denied"
         );
 
         let tags_header = req.tags.join(",");
@@ -156,9 +159,12 @@ impl NtfyClient {
     ///
     /// Uses HTTP polling (`?poll=1&since=<ts>`) in a loop with a 2-second
     /// interval until the timeout expires.
-    async fn poll_response(&self, since: u64) -> Result<ApprovalResult> {
+    async fn poll_response(&self, since: u64, request_id: &str) -> Result<ApprovalResult> {
         let deadline = tokio::time::Instant::now() + self.timeout;
         let poll_interval = Duration::from_secs(2);
+
+        let approve_token = format!("{}:approved", request_id);
+        let deny_token = format!("{}:denied", request_id);
 
         loop {
             if tokio::time::Instant::now() >= deadline {
@@ -185,11 +191,23 @@ impl NtfyClient {
 
                 if let Ok(msg) = serde_json::from_str::<NtfyMessage>(line) {
                     let body = msg.message.trim().to_lowercase();
-                    if body == "approved" {
-                        info!(topic = %self.topic, "User approved the action");
+
+                    // Only accept responses matching our request_id.
+                    // This prevents a late Deny from overriding a previous Approve.
+                    if body == approve_token {
+                        info!(topic = %self.topic, %request_id, "User approved the action");
+                        return Ok(ApprovalResult::Approved);
+                    } else if body == deny_token {
+                        info!(topic = %self.topic, %request_id, "User denied the action");
+                        return Ok(ApprovalResult::Denied);
+                    }
+                    // Also accept bare "approved"/"denied" for backward compat
+                    // (e.g., manual testing via curl)
+                    else if body == "approved" {
+                        info!(topic = %self.topic, "User approved (legacy format)");
                         return Ok(ApprovalResult::Approved);
                     } else if body == "denied" {
-                        info!(topic = %self.topic, "User denied the action");
+                        info!(topic = %self.topic, "User denied (legacy format)");
                         return Ok(ApprovalResult::Denied);
                     }
                 }
