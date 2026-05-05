@@ -1,34 +1,49 @@
 # Agentbox
 
-**2FA for AI agent actions.** A local daemon that lets autonomous agents run free on your machine for safe operations, and intercepts dangerous actions with a phone approval gate.
+**Local-first guarded minipods for coding agents.** Agentbox gives AI coding agents a task-scoped execution environment on your machine, then wraps that environment with command interception, policy checks, out-of-band approval, and a local audit trail.
 
-Your agent runs free. We catch the dangerous stuff.
+The wedge is not "2FA for agents" and it is not a generic Docker wrapper. It is a lightweight local runtime for agent work: create an isolated pod when you need one, inject Agentbox shims into the environment, let safe commands pass through, require approval for risky operations, block destructive operations outright, and keep the run inspectable afterward.
 
-## The Problem
+The validated core today is the control loop: **task environment -> shim -> daemon -> policy -> approval -> audit**. Phone approval is one transport inside that loop.
 
-AI agents (OpenClaw, Hermes, Claude Code, Codex) run 24/7 on personal machines. People are so afraid of destructive actions that they buy dedicated Mac Minis ($599) as physical isolation. Meanwhile, the majority runs agents with zero governance.
+## Why
 
-Agentbox replaces the $599 Mac Mini with a daemon that costs nothing.
+AI agents (Claude Code, Codex, Cursor, Aider) run 24/7 on personal machines. Most developers choose between two bad defaults: let the agent run directly in their real shell and repo, or push the work into a heavy remote sandbox they do not control.
+
+Agentbox aims at the missing local layer: guarded, task-scoped minipods for agent work. A coding agent should be able to run in a small local execution cell with the right filesystem, services, and tools, while dangerous side effects still go through policy and audit before they touch the host.
+
+The interception primitive is what makes the sandbox agent-aware instead of just container-shaped. PATH-mediated calls to commands such as `git push`, `ssh`, `curl`, `psql`, or `rm` outside the workspace pass through the daemon. The classifier inspects the full context -- command name, arguments, current working directory, environment -- and routes to one of three buckets:
+
+- **Allow**: pass through under 50ms. Examples: `ls`, `cat`, `git commit`, `npm install`, `cargo build`.
+- **Approve**: phone notification via ntfy, wait for tap. Examples: `git push`, `ssh`, `curl`, `psql`, `rm` outside the workspace.
+- **Block**: instant deny, no notification. Examples: `rm -rf /`, `dd`, `mkfs`, `git push --force main`.
+
+The policy engine ships with conservative defaults and supports local configuration for allowlists, blocklists, workspace boundaries, and approval timeouts.
 
 ## How It Works
 
 ```
-Agent calls "git push"
-     |
-     v
-PATH shim intercepts ──> Daemon classifies
-                              |
-                    +---------+---------+
-                    |         |         |
-                  ALLOW    APPROVE    BLOCK
-                    |         |         |
-                 <50ms    Phone      Instant
-                 pass    notif.      deny
-                through  wait for
-                         tap
+Agent task
+  |
+  +-- direct shell mode: your current workspace
+  |
+  +-- pod mode: local Podman minipod with mounted workspace/services
+        |
+        v
+PATH shim intercepts high-risk commands
+        |
+        v
+Rust daemon classifies with command + args + cwd + environment
+        |
+        +--> ALLOW    pass through
+        +--> APPROVE  ask out-of-band, then continue or deny
+        +--> BLOCK    deny immediately
+        |
+        v
+SQLite audit log records the decision
 ```
 
-**Three buckets, zero config:**
+**Three buckets, local policy:**
 
 | Bucket | What happens | Examples |
 |--------|-------------|----------|
@@ -127,9 +142,9 @@ ntfy_server = "https://ntfy.sh"       # or self-host: https://your-server.com
 approval_timeout_secs = 120            # 30-600 seconds
 ```
 
-## Sandbox Mode (Pod Runtime)
+## Guarded Minipods (Experimental Pod Runtime)
 
-Run agents in isolated containers. The agent can't touch your host filesystem.
+Run agents in local Podman-backed minipods while still routing selected commands through Agentbox policy. This path exists in the CLI and Podman provider and is the product direction, but the most mature validated path today remains the shim -> daemon -> policy -> approval -> audit loop.
 
 ```bash
 # Run an agent in a sandbox
@@ -147,7 +162,7 @@ agentbox stop-pod sb-a1b2c3
 
 **Requires:** [Podman](https://podman.io) (`brew install podman` on macOS)
 
-**How isolation works:**
+**How guarded minipods work:**
 - Agent runs inside a container with isolated filesystem and network
 - Agentbox daemon socket is bind-mounted into the pod (the ONLY host connection)
 - Shim binaries are injected into the pod's PATH
@@ -169,9 +184,9 @@ agentbox history         # Rich timeline view with stats
 agentbox why             # Explain the last block/deny
 agentbox policy          # Show current policy posture
 
-agentbox run <command>   # Run agent in isolated sandbox pod
-agentbox pods            # List running sandbox pods
-agentbox stop-pod <id>   # Remove a sandbox pod
+agentbox run <command>   # Run agent in a guarded local minipod
+agentbox pods            # List running minipods
+agentbox stop-pod <id>   # Remove a minipod
 ```
 
 ## Policy Engine
@@ -207,7 +222,7 @@ approval_timeout_secs = 120
 agentbox/
   crates/
     agentbox-policy/     # Risk classification engine (38 tests)
-    agentbox-daemon/     # Unix socket server + audit + ntfy + pod runtime
+    agentbox-daemon/     # Unix socket server + audit + ntfy + minipod runtime
     agentbox-shim/       # Single binary, symlinked per command
     agentbox-cli/        # User-facing commands
     agentbox-client/     # Lightweight client for other Rust projects
@@ -232,7 +247,7 @@ agentbox/
 | Phase | What | Status |
 |-------|------|--------|
 | v0.1 | PATH shim daemon + phone approval | Done |
-| v0.2 | Pod sandbox runtime (podman) | Done |
+| v0.2 | Guarded minipod runtime (podman) | Experimental |
 | v0.3 | Context-rich policy engine | Done |
 | v1.0 | macOS Endpoint Security (kernel-level, bypass-proof) | Planned |
 | v1.5 | MCP Governance Proxy (protocol-level interception) | Planned |
@@ -242,12 +257,12 @@ agentbox/
 | Alternative | Problem |
 |-------------|---------|
 | Mac Mini ($599) | Expensive, sync friction, separate machine |
-| Docker/VM | Manual setup, not agent-aware, no approval flow |
+| Docker/VM | Manual setup, not agent-aware, no approval flow or local audit model |
 | OpenAI Agents SDK guardrails | Only works with OpenAI SDK agents |
 | Enterprise governance (Palo Alto, Microsoft) | $$$$, team setup, cloud-dependent |
 | Nothing (YOLO) | Your agent will `rm -rf` something at 3am |
 
-Agentbox: **local-first, zero-config, agent-agnostic, brew-installable.**
+Agentbox: **local-first, agent-aware, policy-bound, audit-first minipods.**
 
 ## Tech Stack
 
