@@ -21,16 +21,20 @@ implemented yet.
 | Runtime session store | Shipped | Runtime sessions persist to a local JSON store. |
 | Runtime manager | Shipped | Provider create, exec, status refresh, destroy, session persistence, and evidence events share one daemon-owned manager. |
 | Minipod manifest CLI | Shipped | `agentbox minipod-spec` generates and validates a deny-by-default manifest. |
+| Runtime provider registry | Shipped | `RuntimeProviderRegistry` can resolve local providers and native descriptors. |
+| Runtime provider listing | Shipped | `agentbox providers` reports shipped, experimental, unavailable, and planned provider surfaces. |
+| Podman runtime adapter | Shipped | The older Podman backend now has a `RuntimeProvider` adapter; `agentbox run` still uses the legacy path until the next migration slice. |
+| Native provider descriptors | Shipped | macOS, Linux, and Windows provider candidates expose capability metadata while returning unavailable for execution. |
 
 ## Runtime Backends
 
 | Backend | Status | Notes |
 |---------|--------|-------|
 | Direct host with shims | Shipped | Strongest validated path today. It governs host-impacting shell commands but does not isolate all process behavior. |
-| Podman minipods | Experimental | Existing `agentbox run`, `agentbox pods`, and `agentbox stop-pod` use the older Podman path. It still needs full `RuntimeProvider` wiring and smoke proof. |
-| macOS native boundary | Planned | Candidate surfaces include Apple Virtualization for Linux cells, Endpoint Security for host-event enforcement, and Network Extension for egress governance. |
-| Linux native boundary | Planned | Candidate surfaces include namespaces, cgroups, Landlock, seccomp, eBPF, nftables, and overlayfs. |
-| Windows native boundary | Planned | Candidate surfaces include Job Objects, AppContainer, WFP, ETW, and Windows sandbox primitives. |
+| Podman minipods | Experimental | Existing `agentbox run`, `agentbox pods`, and `agentbox stop-pod` use the older path; a `RuntimeProvider` adapter now exists, but CLI migration and smoke proof remain. |
+| macOS native boundary | Descriptor only | Candidate surfaces include Apple Virtualization for Linux cells, Endpoint Security for host-event enforcement, and Network Extension for egress governance. Execution intentionally returns unavailable. |
+| Linux native boundary | Descriptor only | Candidate surfaces include namespaces, cgroups, Landlock, seccomp, eBPF, nftables, and overlayfs. Execution intentionally returns unavailable. |
+| Windows native boundary | Descriptor only | Candidate surfaces include Job Objects, AppContainer, WFP, ETW, and Windows sandbox primitives. Execution intentionally returns unavailable. |
 
 ## Current Direction
 
