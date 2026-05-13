@@ -1661,7 +1661,7 @@ fn cmd_minipod_spec(
 }
 
 fn parse_read_only_mount(raw: &str) -> agentbox_daemon::runtime::types::MountRule {
-    use agentbox_daemon::runtime::types::{MountMode, MountRule};
+    use agentbox_daemon::runtime::types::{MountKind, MountMode, MountRule};
 
     let Some((host_path, guest_path)) = raw.split_once(':') else {
         eprintln!("error: invalid --mount-ro value `{}`", raw);
@@ -1678,6 +1678,7 @@ fn parse_read_only_mount(raw: &str) -> agentbox_daemon::runtime::types::MountRul
         host_path: PathBuf::from(host_path),
         guest_path: guest_path.to_string(),
         mode: MountMode::ReadOnly,
+        kind: MountKind::ReadOnlyHost,
     }
 }
 

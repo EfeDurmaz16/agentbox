@@ -34,6 +34,17 @@ pub enum MountMode {
     ReadWrite,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MountKind {
+    Workspace,
+    #[default]
+    ReadOnlyHost,
+    Credential,
+    SystemBridge,
+    ServiceData,
+    Custom(String),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SensitivePathClass {
     Ssh,
@@ -50,6 +61,8 @@ pub struct MountRule {
     pub host_path: PathBuf,
     pub guest_path: String,
     pub mode: MountMode,
+    #[serde(default)]
+    pub kind: MountKind,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -340,5 +353,30 @@ mod tests {
         assert_eq!(session.name, spec.name);
         assert_eq!(session.provider, "podman");
         assert!(matches!(session.status, RuntimeStatus::Creating));
+    }
+
+    #[test]
+    fn mount_rule_carries_boundary_kind() {
+        let mount = MountRule {
+            host_path: "/tmp/config".into(),
+            guest_path: "/mnt/config".into(),
+            mode: MountMode::ReadOnly,
+            kind: MountKind::Credential,
+        };
+
+        assert!(matches!(mount.kind, MountKind::Credential));
+    }
+
+    #[test]
+    fn old_mount_rules_default_to_read_only_host_kind() {
+        let json = serde_json::json!({
+            "host_path": "/tmp/readme",
+            "guest_path": "/mnt/readme",
+            "mode": "ReadOnly"
+        });
+
+        let mount: MountRule = serde_json::from_value(json).unwrap();
+
+        assert!(matches!(mount.kind, MountKind::ReadOnlyHost));
     }
 }

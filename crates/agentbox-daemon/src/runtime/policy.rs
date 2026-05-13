@@ -139,6 +139,7 @@ mod tests {
                 host_path: "/tmp/agentbox-secret/key".into(),
                 guest_path: "/secret/key".into(),
                 mode: MountMode::ReadWrite,
+                kind: Default::default(),
             }],
             ..FilesystemPolicy::workspace("/tmp/agentbox-work")
         };
@@ -161,6 +162,7 @@ mod tests {
                 host_path: "/tmp/agentbox-secret/key".into(),
                 guest_path: "/secret/key".into(),
                 mode: MountMode::ReadOnly,
+                kind: Default::default(),
             }],
             ..FilesystemPolicy::workspace("/tmp/agentbox-work")
         };
@@ -185,6 +187,7 @@ mod tests {
             host_path: ssh_path,
             guest_path: "/secrets/id_ed25519".into(),
             mode: MountMode::ReadOnly,
+            kind: Default::default(),
         });
 
         let reason = rejection_reason(validate_minipod_spec(&spec));
@@ -205,6 +208,7 @@ mod tests {
                 host_path: "/tmp/agentbox-secret/key".into(),
                 guest_path: "/secret/key".into(),
                 mode: MountMode::ReadOnly,
+                kind: Default::default(),
             }],
             ..FilesystemPolicy::workspace("/tmp/agentbox-work")
         };
@@ -232,6 +236,7 @@ mod tests {
                 host_path: "/tmp/agentbox-work/../agentbox-secret/key".into(),
                 guest_path: "/secret/key".into(),
                 mode: MountMode::ReadOnly,
+                kind: Default::default(),
             }],
             ..FilesystemPolicy::workspace("/tmp/agentbox-work")
         };
@@ -254,6 +259,7 @@ mod tests {
                 host_path: "/tmp/agentbox-work/../agentbox-secret/key".into(),
                 guest_path: "/secret/key".into(),
                 mode: MountMode::ReadOnly,
+                kind: Default::default(),
             }],
             ..FilesystemPolicy::workspace("/tmp/agentbox-work")
         };
