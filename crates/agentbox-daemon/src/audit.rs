@@ -37,6 +37,7 @@ pub struct AuditEvent {
 
 impl AuditEvent {
     /// Create a new AuditEvent with auto-generated ULID and timestamp.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         agent_pid: i64,
         agent_name: Option<String>,

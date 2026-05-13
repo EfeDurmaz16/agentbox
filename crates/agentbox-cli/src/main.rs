@@ -200,6 +200,7 @@ fn find_shim_binary() -> Option<PathBuf> {
 // Commands
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::zombie_processes)]
 fn cmd_start() {
     ensure_dir(&agentbox_dir());
 
@@ -267,7 +268,7 @@ fn cmd_stop() {
 }
 
 fn cmd_status() {
-    let running = read_pid().map_or(false, |pid| process_alive(pid));
+    let running = read_pid().is_some_and(process_alive);
 
     if running {
         let pid = read_pid().unwrap();
@@ -344,7 +345,7 @@ fn cmd_doctor() {
         "start the daemon once to generate config.toml",
     ));
 
-    let daemon_running = read_pid().map_or(false, process_alive);
+    let daemon_running = read_pid().is_some_and(process_alive);
     checks.push(doctor_check(
         "daemon process",
         daemon_running,
@@ -523,10 +524,7 @@ fn cmd_audit(limit: usize, bucket: Option<String>, tail: bool) {
 }
 
 fn print_audit_header() {
-    println!(
-        "{:<14} {:<9} {:<10} {}",
-        "TIME", "BUCKET", "DECISION", "COMMAND"
-    );
+    println!("{:<14} {:<9} {:<10} COMMAND", "TIME", "BUCKET", "DECISION");
 }
 
 /// Query and print audit events. Returns the max rowid seen (for tail mode).
@@ -908,10 +906,7 @@ async fn cmd_pods() {
                 return;
             }
 
-            println!(
-                "{:<24} {:<12} {:<8} {}",
-                "NAME", "STATUS", "CTRS", "CREATED"
-            );
+            println!("{:<24} {:<12} {:<8} CREATED", "NAME", "STATUS", "CTRS");
             println!("{}", "-".repeat(64));
 
             for pod in &pods {

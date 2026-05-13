@@ -221,24 +221,21 @@ pub fn check_approve(ctx: &CommandContext, config: &PolicyConfig) -> Option<Clas
         }
         "git" => {
             let subcommand = ctx.args.first().map(|s| s.as_str()).unwrap_or("");
-            match subcommand {
-                "push" => {
-                    let is_force = ctx
-                        .args
-                        .iter()
-                        .any(|a| a == "--force" || a == "-f" || a == "--force-with-lease");
-                    let summary = if is_force {
-                        "Agent wants to FORCE PUSH to remote repository"
-                    } else {
-                        "Agent wants to push code to remote repository"
-                    };
-                    return Some(Classification {
-                        bucket: Bucket::Approve,
-                        reason: "git push to remote".into(),
-                        notification_summary: Some(summary.into()),
-                    });
-                }
-                _ => {}
+            if subcommand == "push" {
+                let is_force = ctx
+                    .args
+                    .iter()
+                    .any(|a| a == "--force" || a == "-f" || a == "--force-with-lease");
+                let summary = if is_force {
+                    "Agent wants to FORCE PUSH to remote repository"
+                } else {
+                    "Agent wants to push code to remote repository"
+                };
+                return Some(Classification {
+                    bucket: Bucket::Approve,
+                    reason: "git push to remote".into(),
+                    notification_summary: Some(summary.into()),
+                });
             }
         }
         "ssh" | "scp" => {

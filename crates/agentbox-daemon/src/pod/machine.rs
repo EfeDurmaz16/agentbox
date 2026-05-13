@@ -151,6 +151,12 @@ impl MachineManager {
     }
 }
 
+impl Default for MachineManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[derive(Debug)]
 enum MachineState {
     Running,

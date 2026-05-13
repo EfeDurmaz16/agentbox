@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use reqwest::Client;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use thiserror::Error;
 use tracing::{debug, info, warn};
 
@@ -46,24 +46,6 @@ pub struct NotificationRequest {
 // ---------------------------------------------------------------------------
 // Internal ntfy JSON structures
 // ---------------------------------------------------------------------------
-
-#[derive(Serialize)]
-struct NtfyPublish {
-    topic: String,
-    title: String,
-    message: String,
-    tags: Vec<String>,
-    actions: Vec<NtfyAction>,
-}
-
-#[derive(Serialize)]
-struct NtfyAction {
-    action: String,
-    label: String,
-    url: String,
-    method: String,
-    body: String,
-}
 
 /// A single message returned when polling the ntfy topic.
 #[derive(Deserialize, Debug)]
