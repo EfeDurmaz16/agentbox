@@ -467,6 +467,15 @@ fn cmd_doctor() {
         podman_version().unwrap_or_else(|| "not found".to_string()),
         "install Podman; on macOS also run `podman machine init && podman machine start`",
     ));
+    if cfg!(target_os = "macos") {
+        let machine = podman_machine_status();
+        checks.push(doctor_check(
+            "podman machine",
+            machine.ok,
+            machine.detail,
+            machine.fix,
+        ));
+    }
 
     println!("Agentbox doctor");
     println!("{}", "-".repeat(64));
@@ -547,6 +556,51 @@ fn podman_version() -> Option<String> {
         return None;
     }
     Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+struct PodmanMachineDoctor {
+    ok: bool,
+    detail: String,
+    fix: &'static str,
+}
+
+fn podman_machine_status() -> PodmanMachineDoctor {
+    let output = match Command::new("podman").args(["machine", "inspect"]).output() {
+        Ok(output) => output,
+        Err(_) => {
+            return PodmanMachineDoctor {
+                ok: false,
+                detail: "podman not found".to_string(),
+                fix: "install Podman, then run `podman machine init && podman machine start`",
+            };
+        }
+    };
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let fix = if stderr.contains("no machine") || stderr.contains("not exist") {
+            "run `podman machine init && podman machine start`"
+        } else {
+            "run `podman machine inspect` for details, then start or recreate the machine"
+        };
+        return PodmanMachineDoctor {
+            ok: false,
+            detail: stderr.trim().to_string(),
+            fix,
+        };
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let running = stdout.contains("\"State\": \"running\"") || stdout.contains("\"Running\": true");
+    PodmanMachineDoctor {
+        ok: running,
+        detail: if running {
+            "running".to_string()
+        } else {
+            "installed but stopped".to_string()
+        },
+        fix: "run `podman machine start`",
+    }
 }
 
 fn cmd_audit(limit: usize, bucket: Option<String>, tail: bool) {
