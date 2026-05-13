@@ -51,3 +51,6 @@ agent intent
 
 Podman is allowed to remain a compatibility backend, but the architecture should
 not depend on it as the only enforcement layer.
+
+See [macOS minipod limitations](macos-minipod-limitations.md) for the current
+VM-backed boundary and native enforcement gap.

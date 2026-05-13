@@ -205,6 +205,8 @@ agentbox stop-pod sb-a1b2c3
 See [docs/product-direction.md](docs/product-direction.md) and
 [docs/status-matrix.md](docs/status-matrix.md) for current shipped status, and
 [docs/roadmap-100-issues.md](docs/roadmap-100-issues.md) for the current sprint direction.
+For macOS specifically, see
+[docs/macos-minipod-limitations.md](docs/macos-minipod-limitations.md).
 
 ## CLI Commands
 
