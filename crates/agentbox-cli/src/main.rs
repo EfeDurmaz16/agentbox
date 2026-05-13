@@ -34,6 +34,8 @@ enum Commands {
     Stop,
     /// Show daemon status
     Status,
+    /// Run local readiness checks for daemon, shims, policy, audit, and minipods
+    Doctor,
     /// Query audit log
     Audit {
         /// Number of events to show
@@ -319,6 +321,180 @@ fn cmd_status() {
     } else {
         println!("shims:   (not installed, run `agentbox install`)");
     }
+}
+
+fn cmd_doctor() {
+    let mut checks = Vec::new();
+
+    checks.push(doctor_check(
+        "agentbox directory",
+        agentbox_dir().is_dir(),
+        format!("{}", agentbox_dir().display()),
+        "run `agentbox start` or `agentbox install` to initialize ~/.agentbox",
+    ));
+
+    let config_ok = fs::read_to_string(config_path())
+        .ok()
+        .and_then(|s| toml::from_str::<toml::Table>(&s).ok())
+        .is_some();
+    checks.push(doctor_check(
+        "config file",
+        config_ok,
+        format!("{}", config_path().display()),
+        "start the daemon once to generate config.toml",
+    ));
+
+    let daemon_running = read_pid().map_or(false, process_alive);
+    checks.push(doctor_check(
+        "daemon process",
+        daemon_running,
+        read_pid()
+            .map(|pid| format!("pid {pid}"))
+            .unwrap_or_else(|| "no pid file".to_string()),
+        "run `agentbox start`",
+    ));
+
+    checks.push(doctor_check(
+        "daemon socket",
+        socket_path().exists(),
+        format!("{}", socket_path().display()),
+        "run `agentbox start`; remove stale pid/socket files if the daemon crashed",
+    ));
+
+    checks.push(doctor_check(
+        "agentbox-daemon binary",
+        find_daemon_binary().is_some(),
+        find_daemon_binary()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "not found".to_string()),
+        "run `cargo build --release` or put agentbox-daemon on PATH",
+    ));
+
+    checks.push(doctor_check(
+        "agentbox-shim binary",
+        find_shim_binary().is_some(),
+        find_shim_binary()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "not found".to_string()),
+        "run `cargo build --release` or put agentbox-shim on PATH",
+    ));
+
+    let shim_count = installed_shim_count();
+    checks.push(doctor_check(
+        "installed shims",
+        shim_count >= 20,
+        format!("{shim_count} shims in {}", shims_dir().display()),
+        "run `agentbox install`",
+    ));
+
+    checks.push(doctor_check(
+        "shim PATH priority",
+        shims_first_in_path(),
+        std::env::var("PATH").unwrap_or_default(),
+        "prepend `export PATH=\"$HOME/.agentbox/shims:$PATH\"` to your shell profile",
+    ));
+
+    let audit_status = audit_event_count()
+        .map(|count| format!("{count} events"))
+        .unwrap_or_else(|| "audit db missing or unreadable".to_string());
+    checks.push(doctor_check(
+        "audit database",
+        audit_event_count().is_some(),
+        audit_status,
+        "start the daemon and run one intercepted command",
+    ));
+
+    let podman_available = Command::new("podman")
+        .arg("--version")
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false);
+    checks.push(doctor_check(
+        "podman provider",
+        podman_available,
+        podman_version().unwrap_or_else(|| "not found".to_string()),
+        "install Podman; on macOS also run `podman machine init && podman machine start`",
+    ));
+
+    println!("Agentbox doctor");
+    println!("{}", "-".repeat(64));
+
+    let mut failed = 0;
+    for check in &checks {
+        let marker = if check.ok { "ok" } else { "fail" };
+        println!("{:<6} {:<24} {}", marker, check.name, check.detail);
+        if !check.ok {
+            println!("       fix: {}", check.fix);
+            failed += 1;
+        }
+    }
+
+    println!("{}", "-".repeat(64));
+    println!("summary: {} ok, {} failed", checks.len() - failed, failed);
+
+    if failed > 0 {
+        std::process::exit(1);
+    }
+}
+
+struct DoctorCheck {
+    name: &'static str,
+    ok: bool,
+    detail: String,
+    fix: &'static str,
+}
+
+fn doctor_check(name: &'static str, ok: bool, detail: String, fix: &'static str) -> DoctorCheck {
+    DoctorCheck {
+        name,
+        ok,
+        detail,
+        fix,
+    }
+}
+
+fn installed_shim_count() -> usize {
+    fs::read_dir(shims_dir())
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| {
+            let path = entry.path();
+            path.is_symlink() || path.is_file()
+        })
+        .count()
+}
+
+fn shims_first_in_path() -> bool {
+    let Some(paths) = std::env::var_os("PATH") else {
+        return false;
+    };
+    let Some(first) = std::env::split_paths(&paths).next() else {
+        return false;
+    };
+    first == shims_dir()
+}
+
+fn audit_event_count() -> Option<i64> {
+    let db_path = audit_db_path();
+    if !db_path.exists() {
+        return None;
+    }
+
+    Connection::open(db_path)
+        .ok()?
+        .query_row("SELECT COUNT(*) FROM audit_log", [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .ok()
+}
+
+fn podman_version() -> Option<String> {
+    let output = Command::new("podman").arg("--version").output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
 fn cmd_audit(limit: usize, bucket: Option<String>, tail: bool) {
@@ -1309,6 +1485,7 @@ async fn main() {
         Commands::Start => cmd_start(),
         Commands::Stop => cmd_stop(),
         Commands::Status => cmd_status(),
+        Commands::Doctor => cmd_doctor(),
         Commands::Audit {
             limit,
             bucket,
