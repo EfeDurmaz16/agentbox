@@ -173,11 +173,7 @@ impl PodmanProvider {
     }
 
     /// Start a sidecar container within the pod.
-    async fn start_sidecar(
-        &self,
-        id: &str,
-        container: &ContainerSpec,
-    ) -> Result<(), PodError> {
+    async fn start_sidecar(&self, id: &str, container: &ContainerSpec) -> Result<(), PodError> {
         let pod_name = Self::pod_name(id);
         let container_name = Self::container_name(id, &container.name);
 
@@ -287,7 +283,9 @@ impl PodProvider for PodmanProvider {
     }
 
     async fn is_available(&self) -> bool {
-        Self::run_podman(&["info", "--format", "json"]).await.is_ok()
+        Self::run_podman(&["info", "--format", "json"])
+            .await
+            .is_ok()
     }
 
     async fn create(&self, id: &str, spec: &PodSpec) -> Result<PodSession, PodError> {
@@ -368,10 +366,7 @@ impl PodProvider for PodmanProvider {
             let duration = std::time::Duration::from_secs(timeout_secs);
             tokio::time::timeout(duration, async {
                 let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-                Command::new("podman")
-                    .args(&arg_refs)
-                    .output()
-                    .await
+                Command::new("podman").args(&arg_refs).output().await
             })
             .await
             .map_err(|_| PodError::Timeout(timeout_secs))?
@@ -397,14 +392,8 @@ impl PodProvider for PodmanProvider {
 
     async fn status(&self, id: &str) -> Result<PodStatus, PodError> {
         let pod_name = Self::pod_name(id);
-        let output = Self::run_podman(&[
-            "pod",
-            "inspect",
-            &pod_name,
-            "--format",
-            "{{.State}}",
-        ])
-        .await;
+        let output =
+            Self::run_podman(&["pod", "inspect", &pod_name, "--format", "{{.State}}"]).await;
 
         match output {
             Ok(state) => {
@@ -480,9 +469,7 @@ mod tests {
                     name: "postgres".to_string(),
                     image: "postgres:16-alpine".to_string(),
                     command: None,
-                    env: HashMap::from([
-                        ("POSTGRES_PASSWORD".to_string(), "test".to_string()),
-                    ]),
+                    env: HashMap::from([("POSTGRES_PASSWORD".to_string(), "test".to_string())]),
                     ports: vec![PortMapping {
                         container_port: 5432,
                         host_port: None,

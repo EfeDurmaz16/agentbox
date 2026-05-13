@@ -266,10 +266,7 @@ mod tests {
     }
 
     /// Send a ShimRequest to the socket and read back the ShimResponse.
-    async fn send_request(
-        socket_path: &str,
-        req: &serde_json::Value,
-    ) -> ShimResponse {
+    async fn send_request(socket_path: &str, req: &serde_json::Value) -> ShimResponse {
         let stream = UnixStream::connect(socket_path).await.unwrap();
         let (reader, mut writer) = stream.into_split();
 

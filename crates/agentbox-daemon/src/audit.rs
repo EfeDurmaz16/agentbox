@@ -147,7 +147,8 @@ impl AuditStore {
         )?;
 
         let rows = stmt.query_map(params![limit as i64], row_to_event)?;
-        rows.collect::<std::result::Result<Vec<_>, _>>().map_err(AuditError::from)
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(AuditError::from)
     }
 
     /// Return the last `limit` events filtered by bucket.
@@ -162,7 +163,8 @@ impl AuditStore {
         )?;
 
         let rows = stmt.query_map(params![bucket, limit as i64], row_to_event)?;
-        rows.collect::<std::result::Result<Vec<_>, _>>().map_err(AuditError::from)
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(AuditError::from)
     }
 }
 
@@ -218,10 +220,18 @@ mod tests {
     fn query_by_bucket() {
         let store = AuditStore::in_memory().unwrap();
 
-        store.log_event(&make_event("allow", "allowed", "ls -la")).unwrap();
-        store.log_event(&make_event("approve", "approved", "git push")).unwrap();
-        store.log_event(&make_event("block", "blocked", "rm -rf /")).unwrap();
-        store.log_event(&make_event("approve", "denied", "ssh root@prod")).unwrap();
+        store
+            .log_event(&make_event("allow", "allowed", "ls -la"))
+            .unwrap();
+        store
+            .log_event(&make_event("approve", "approved", "git push"))
+            .unwrap();
+        store
+            .log_event(&make_event("block", "blocked", "rm -rf /"))
+            .unwrap();
+        store
+            .log_event(&make_event("approve", "denied", "ssh root@prod"))
+            .unwrap();
 
         let approve_events = store.query_by_bucket("approve", 10).unwrap();
         assert_eq!(approve_events.len(), 2);
@@ -239,7 +249,9 @@ mod tests {
         let store = AuditStore::in_memory().unwrap();
 
         for i in 0..10 {
-            store.log_event(&make_event("allow", "allowed", &format!("cmd-{i}"))).unwrap();
+            store
+                .log_event(&make_event("allow", "allowed", &format!("cmd-{i}")))
+                .unwrap();
         }
 
         let recent = store.recent(3).unwrap();
@@ -273,7 +285,10 @@ mod tests {
         assert_eq!(got.bucket, "approve");
         assert_eq!(got.decision, "timed_out");
         assert_eq!(got.user_response_ms, Some(120000));
-        assert_eq!(got.parent_process.as_deref(), Some("/usr/local/bin/python3"));
+        assert_eq!(
+            got.parent_process.as_deref(),
+            Some("/usr/local/bin/python3")
+        );
     }
 
     #[test]

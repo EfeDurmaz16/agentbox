@@ -362,9 +362,8 @@ fn print_audit_events(
 ) -> i64 {
     let conn = Connection::open(db_path).expect("failed to open audit db");
 
-    let mut sql = String::from(
-        "SELECT rowid, timestamp, bucket, decision, command FROM audit_log WHERE 1=1",
-    );
+    let mut sql =
+        String::from("SELECT rowid, timestamp, bucket, decision, command FROM audit_log WHERE 1=1");
 
     if let Some(ref b) = bucket {
         sql.push_str(&format!(" AND bucket = '{}'", b));
@@ -482,7 +481,13 @@ fn cmd_install() {
     println!("  source ~/.zshrc");
 }
 
-async fn cmd_run(command: Vec<String>, runtime: Option<String>, services: Vec<String>, mount_cwd: bool, memory: u64) {
+async fn cmd_run(
+    command: Vec<String>,
+    runtime: Option<String>,
+    services: Vec<String>,
+    mount_cwd: bool,
+    memory: u64,
+) {
     use agentbox_daemon::pod::intent::IntentParser;
     use agentbox_daemon::pod::machine::MachineManager;
     use agentbox_daemon::pod::podman::PodmanProvider;
@@ -497,7 +502,9 @@ async fn cmd_run(command: Vec<String>, runtime: Option<String>, services: Vec<St
         }
         _ => {
             eprintln!("Error: podman not found. Install it:");
-            eprintln!("  macOS: brew install podman && podman machine init && podman machine start");
+            eprintln!(
+                "  macOS: brew install podman && podman machine init && podman machine start"
+            );
             eprintln!("  Linux: https://podman.io/docs/installation");
             std::process::exit(1);
         }
@@ -531,12 +538,7 @@ async fn cmd_run(command: Vec<String>, runtime: Option<String>, services: Vec<St
 
     // 5. Build PodSpec
     let parser = IntentParser::new();
-    let mut spec = parser.from_run_args(
-        &command,
-        runtime.as_deref(),
-        &services,
-        memory,
-    );
+    let mut spec = parser.from_run_args(&command, runtime.as_deref(), &services, memory);
     spec.name = format!("sb-{}", pod_id_short);
 
     // 6. Add critical mounts
@@ -580,7 +582,12 @@ async fn cmd_run(command: Vec<String>, runtime: Option<String>, services: Vec<St
 
     for m in &spec.mounts {
         let ro = if m.read_only { " (ro)" } else { "" };
-        println!("  Mount: {} -> {}{}", m.host_path.display(), m.container_path, ro);
+        println!(
+            "  Mount: {} -> {}{}",
+            m.host_path.display(),
+            m.container_path,
+            ro
+        );
     }
 
     if !spec.env.is_empty() {
@@ -668,13 +675,20 @@ async fn cmd_stop_pod(pod_id: String) {
 
     eprintln!("Stopping pod {}...", pod_name);
 
-    match Command::new("podman").args(["pod", "rm", "-f", &pod_name]).output() {
+    match Command::new("podman")
+        .args(["pod", "rm", "-f", &pod_name])
+        .output()
+    {
         Ok(o) if o.status.success() => {
             println!("Pod {} removed.", pod_name);
         }
         Ok(o) => {
             let stderr = String::from_utf8_lossy(&o.stderr);
-            eprintln!("Error: failed to remove pod {}: {}", pod_name, stderr.trim());
+            eprintln!(
+                "Error: failed to remove pod {}: {}",
+                pod_name,
+                stderr.trim()
+            );
             std::process::exit(1);
         }
         Err(e) => {
@@ -686,7 +700,14 @@ async fn cmd_stop_pod(pod_id: String) {
 
 async fn cmd_pods() {
     match Command::new("podman")
-        .args(["pod", "ls", "--format", "json", "--filter", "label=agentbox=true"])
+        .args([
+            "pod",
+            "ls",
+            "--format",
+            "json",
+            "--filter",
+            "label=agentbox=true",
+        ])
         .output()
     {
         Ok(o) if o.status.success() => {
@@ -711,7 +732,10 @@ async fn cmd_pods() {
                 return;
             }
 
-            println!("{:<24} {:<12} {:<8} {}", "NAME", "STATUS", "CTRS", "CREATED");
+            println!(
+                "{:<24} {:<12} {:<8} {}",
+                "NAME", "STATUS", "CTRS", "CREATED"
+            );
             println!("{}", "-".repeat(64));
 
             for pod in &pods {
@@ -737,7 +761,9 @@ async fn cmd_pods() {
         }
         Err(e) => {
             eprintln!("Error: podman not found: {}", e);
-            eprintln!("  macOS: brew install podman && podman machine init && podman machine start");
+            eprintln!(
+                "  macOS: brew install podman && podman machine init && podman machine start"
+            );
             eprintln!("  Linux: https://podman.io/docs/installation");
             std::process::exit(1);
         }
@@ -924,9 +950,7 @@ fn explain_reason(command: &str, bucket: &str) -> String {
         ("dd", _) => "raw disk/device write tool".to_string(),
         ("mkfs", _) | ("diskutil", _) => "disk format/erase command".to_string(),
         ("csrutil", _) | ("spctl", _) => "system security settings modification".to_string(),
-        ("cat", _) | ("head", _) | ("tail", _) => {
-            "reading sensitive/credential file".to_string()
-        }
+        ("cat", _) | ("head", _) | ("tail", _) => "reading sensitive/credential file".to_string(),
         ("osascript", _) => "AppleScript execution".to_string(),
         ("gh", _) => "visible GitHub operation".to_string(),
         _ => format!("{} -- classified as {}", binary, bucket),

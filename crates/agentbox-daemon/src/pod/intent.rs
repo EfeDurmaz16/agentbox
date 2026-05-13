@@ -152,10 +152,7 @@ impl IntentParser {
             });
 
             // Environment variable for workspace to connect to the sidecar
-            pod_env.insert(
-                svc.env_key.to_string(),
-                svc.env_value_template.to_string(),
-            );
+            pod_env.insert(svc.env_key.to_string(), svc.env_value_template.to_string());
         }
 
         PodSpec {
@@ -234,10 +231,7 @@ impl IntentParser {
                     role: ContainerRole::Sidecar,
                 });
 
-                pod_env.insert(
-                    svc.env_key.to_string(),
-                    svc.env_value_template.to_string(),
-                );
+                pod_env.insert(svc.env_key.to_string(), svc.env_value_template.to_string());
             }
         }
 
@@ -388,7 +382,10 @@ mod tests {
 
         let ws = &spec.containers[0];
         assert_eq!(ws.image, "node:22-slim");
-        assert_eq!(ws.command, Some(vec!["npm".to_string(), "test".to_string()]));
+        assert_eq!(
+            ws.command,
+            Some(vec!["npm".to_string(), "test".to_string()])
+        );
         assert_eq!(spec.resources.memory_bytes, 512 * 1024 * 1024);
     }
 

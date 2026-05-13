@@ -1,5 +1,5 @@
-pub mod types;
-pub mod provider;
-pub mod machine;
 pub mod intent;
+pub mod machine;
 pub mod podman;
+pub mod provider;
+pub mod types;

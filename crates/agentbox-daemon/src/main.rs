@@ -35,7 +35,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Write PID file.
     let pid_path = config::config_dir().join("agentbox.pid");
     std::fs::write(&pid_path, std::process::id().to_string())?;
-    info!(pid = std::process::id(), "wrote PID file: {}", pid_path.display());
+    info!(
+        pid = std::process::id(),
+        "wrote PID file: {}",
+        pid_path.display()
+    );
 
     let socket_path = cfg.socket_path.clone();
 

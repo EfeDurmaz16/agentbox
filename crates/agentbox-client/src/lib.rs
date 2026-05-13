@@ -154,8 +154,7 @@ impl AgentboxClient {
             ));
         }
 
-        let mut stream = UnixStream::connect(&self.socket_path)
-            .map_err(ClientError::Connect)?;
+        let mut stream = UnixStream::connect(&self.socket_path).map_err(ClientError::Connect)?;
 
         stream.set_read_timeout(Some(self.timeout)).ok();
         stream.set_write_timeout(Some(Duration::from_secs(5))).ok();

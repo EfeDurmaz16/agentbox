@@ -136,7 +136,8 @@ impl NtfyClient {
 
         info!(topic = %self.topic, title = %req.title, "Sending approval notification");
 
-        let resp = self.http
+        let resp = self
+            .http
             .post(&topic_url)
             .header("Title", &req.title)
             .header("Tags", &tags_header)
@@ -172,10 +173,7 @@ impl NtfyClient {
                 return Ok(ApprovalResult::TimedOut);
             }
 
-            let url = format!(
-                "{}/{}/json?poll=1&since={}",
-                self.server, self.topic, since
-            );
+            let url = format!("{}/{}/json?poll=1&since={}", self.server, self.topic, since);
 
             debug!(%url, "Polling for response");
 
@@ -213,10 +211,8 @@ impl NtfyClient {
                 }
             }
 
-            tokio::time::sleep_until(
-                (tokio::time::Instant::now() + poll_interval).min(deadline),
-            )
-            .await;
+            tokio::time::sleep_until((tokio::time::Instant::now() + poll_interval).min(deadline))
+                .await;
         }
     }
 }
@@ -278,11 +274,7 @@ mod tests {
                         let is_get = raw.starts_with("GET ");
 
                         // Extract body (after double CRLF).
-                        let body = raw
-                            .split("\r\n\r\n")
-                            .nth(1)
-                            .unwrap_or("")
-                            .to_string();
+                        let body = raw.split("\r\n\r\n").nth(1).unwrap_or("").to_string();
 
                         if is_get {
                             let payload = p.lock().await.clone();
@@ -408,6 +400,9 @@ mod tests {
         let bodies = mock.bodies.lock().await;
         assert!(!bodies.is_empty());
         let first = &bodies[0];
-        assert!(first.contains("Agent wants to git push"), "body should contain the message text");
+        assert!(
+            first.contains("Agent wants to git push"),
+            "body should contain the message text"
+        );
     }
 }

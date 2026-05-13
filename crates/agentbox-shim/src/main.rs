@@ -83,7 +83,11 @@ fn get_parent_process_name() -> String {
     // Use proc_pidpath to get the executable path of the parent process.
     // This is the simplest reliable API on macOS (libproc.h).
     extern "C" {
-        fn proc_pidpath(pid: libc::c_int, buffer: *mut libc::c_char, buffersize: u32) -> libc::c_int;
+        fn proc_pidpath(
+            pid: libc::c_int,
+            buffer: *mut libc::c_char,
+            buffersize: u32,
+        ) -> libc::c_int;
     }
 
     let mut buf = [0u8; libc::PATH_MAX as usize];

@@ -12,7 +12,10 @@ fn extract_domain(url: &str) -> Option<String> {
     let host_port = without_scheme.split('/').next().unwrap_or(without_scheme);
     let host_port = host_port.split('?').next().unwrap_or(host_port);
     let host = if host_port.contains(':') {
-        host_port.rsplit_once(':').map(|(h, _)| h).unwrap_or(host_port)
+        host_port
+            .rsplit_once(':')
+            .map(|(h, _)| h)
+            .unwrap_or(host_port)
     } else {
         host_port
     };
@@ -37,8 +40,7 @@ fn command_matches_pattern(ctx: &CommandContext, pattern: &str) -> bool {
     if parts.len() == 1 {
         ctx.binary == parts[0]
     } else {
-        ctx.binary == parts[0]
-            && ctx.args.first().map(|s| s.as_str()) == Some(parts[1])
+        ctx.binary == parts[0] && ctx.args.first().map(|s| s.as_str()) == Some(parts[1])
     }
 }
 
@@ -46,7 +48,10 @@ fn command_matches_pattern(ctx: &CommandContext, pattern: &str) -> bool {
 /// - If command matches always_block → Block
 /// - If command matches always_allow → Allow
 /// - If it's a network command and domain is in allowed_domains → Allow
-pub fn check_config_overrides(ctx: &CommandContext, config: &PolicyConfig) -> Option<Classification> {
+pub fn check_config_overrides(
+    ctx: &CommandContext,
+    config: &PolicyConfig,
+) -> Option<Classification> {
     // Always-block overrides (highest priority)
     for pattern in &config.always_block {
         if command_matches_pattern(ctx, pattern) {
@@ -99,12 +104,16 @@ pub fn check_block(ctx: &CommandContext, config: &PolicyConfig) -> Option<Classi
         "rm" => {
             // rm -rf / or rm -rf ~ or rm -rf $HOME
             let has_recursive_force = ctx.args.iter().any(|a| {
-                if !a.starts_with('-') { return false; }
+                if !a.starts_with('-') {
+                    return false;
+                }
                 a.contains('r') && a.contains('f')
             });
 
             let targets_root = ctx.args.iter().any(|a| {
-                if a.starts_with('-') { return false; }
+                if a.starts_with('-') {
+                    return false;
+                }
                 let trimmed = a.trim_end_matches('/');
                 trimmed.is_empty() // "/" trimmed becomes ""
                     || trimmed == "/"
@@ -122,7 +131,10 @@ pub fn check_block(ctx: &CommandContext, config: &PolicyConfig) -> Option<Classi
             }
         }
         "mkfs" | "diskutil" => {
-            if args_joined.contains("eraseDisk") || args_joined.contains("eraseVolume") || ctx.binary == "mkfs" {
+            if args_joined.contains("eraseDisk")
+                || args_joined.contains("eraseVolume")
+                || ctx.binary == "mkfs"
+            {
                 return Some(Classification {
                     bucket: Bucket::Block,
                     reason: "disk format/erase command".into(),
@@ -148,17 +160,21 @@ pub fn check_block(ctx: &CommandContext, config: &PolicyConfig) -> Option<Classi
             // git push --force to main/master → Block
             let subcommand = ctx.args.first().map(|s| s.as_str()).unwrap_or("");
             if subcommand == "push" {
-                let is_force = ctx.args.iter().any(|a| {
-                    a == "--force" || a == "-f" || a == "--force-with-lease"
-                });
+                let is_force = ctx
+                    .args
+                    .iter()
+                    .any(|a| a == "--force" || a == "-f" || a == "--force-with-lease");
                 if is_force {
                     let targets_protected = ctx.args.iter().any(|a| {
                         !a.starts_with('-')
                             && a != "push"
                             && a != "origin"
-                            && (a == "main" || a == "master"
-                                || a.ends_with("/main") || a.ends_with("/master")
-                                || a.starts_with("main:") || a.starts_with("master:"))
+                            && (a == "main"
+                                || a == "master"
+                                || a.ends_with("/main")
+                                || a.ends_with("/master")
+                                || a.starts_with("main:")
+                                || a.starts_with("master:"))
                     });
                     if targets_protected {
                         return Some(Classification {
@@ -186,7 +202,9 @@ pub fn check_approve(ctx: &CommandContext, config: &PolicyConfig) -> Option<Clas
             let workspace = config.workspace.as_deref().unwrap_or(&ctx.cwd);
 
             let outside_workspace = ctx.args.iter().any(|a| {
-                if a.starts_with('-') { return false; }
+                if a.starts_with('-') {
+                    return false;
+                }
                 !a.starts_with(workspace)
             });
             if outside_workspace {
@@ -205,7 +223,10 @@ pub fn check_approve(ctx: &CommandContext, config: &PolicyConfig) -> Option<Clas
             let subcommand = ctx.args.first().map(|s| s.as_str()).unwrap_or("");
             match subcommand {
                 "push" => {
-                    let is_force = ctx.args.iter().any(|a| a == "--force" || a == "-f" || a == "--force-with-lease");
+                    let is_force = ctx
+                        .args
+                        .iter()
+                        .any(|a| a == "--force" || a == "-f" || a == "--force-with-lease");
                     let summary = if is_force {
                         "Agent wants to FORCE PUSH to remote repository"
                     } else {
@@ -221,7 +242,12 @@ pub fn check_approve(ctx: &CommandContext, config: &PolicyConfig) -> Option<Clas
             }
         }
         "ssh" | "scp" => {
-            let target = ctx.args.iter().find(|a| !a.starts_with('-')).cloned().unwrap_or_default();
+            let target = ctx
+                .args
+                .iter()
+                .find(|a| !a.starts_with('-'))
+                .cloned()
+                .unwrap_or_default();
             return Some(Classification {
                 bucket: Bucket::Approve,
                 reason: format!("{} to remote host", ctx.binary),
@@ -241,7 +267,12 @@ pub fn check_approve(ctx: &CommandContext, config: &PolicyConfig) -> Option<Clas
         }
         "curl" | "wget" => {
             // Network egress — if we reach here, domain was NOT in allowlist
-            let url = ctx.args.iter().find(|a| a.starts_with("http")).cloned().unwrap_or_default();
+            let url = ctx
+                .args
+                .iter()
+                .find(|a| a.starts_with("http"))
+                .cloned()
+                .unwrap_or_default();
             return Some(Classification {
                 bucket: Bucket::Approve,
                 reason: "network egress".into(),
@@ -253,7 +284,10 @@ pub fn check_approve(ctx: &CommandContext, config: &PolicyConfig) -> Option<Clas
                 return Some(Classification {
                     bucket: Bucket::Approve,
                     reason: "package publish".into(),
-                    notification_summary: Some(format!("Agent wants to publish package via {}", ctx.binary)),
+                    notification_summary: Some(format!(
+                        "Agent wants to publish package via {}",
+                        ctx.binary
+                    )),
                 });
             }
         }
@@ -261,17 +295,28 @@ pub fn check_approve(ctx: &CommandContext, config: &PolicyConfig) -> Option<Clas
             return Some(Classification {
                 bucket: Bucket::Approve,
                 reason: "AppleScript execution (can control other apps)".into(),
-                notification_summary: Some("Agent wants to run AppleScript (can control macOS apps)".into()),
+                notification_summary: Some(
+                    "Agent wants to run AppleScript (can control macOS apps)".into(),
+                ),
             });
         }
         "cat" | "head" | "tail" | "less" | "more" | "vim" | "nano" | "code" => {
             // Reading/editing credential/secret files requires approval
             let sensitive_patterns = [
-                ".env", ".ssh/", ".aws/", ".config/", ".gnupg/",
-                "credentials", "secrets", "token", ".netrc",
+                ".env",
+                ".ssh/",
+                ".aws/",
+                ".config/",
+                ".gnupg/",
+                "credentials",
+                "secrets",
+                "token",
+                ".netrc",
             ];
             let reads_sensitive = ctx.args.iter().any(|a| {
-                if a.starts_with('-') { return false; }
+                if a.starts_with('-') {
+                    return false;
+                }
                 let lower = a.to_lowercase();
                 sensitive_patterns.iter().any(|p| lower.contains(p))
             });
@@ -287,7 +332,11 @@ pub fn check_approve(ctx: &CommandContext, config: &PolicyConfig) -> Option<Clas
                     notification_summary: Some(format!(
                         "Agent wants to {} sensitive file: {}",
                         verb,
-                        files.iter().map(|f| f.as_str()).collect::<Vec<_>>().join(", ")
+                        files
+                            .iter()
+                            .map(|f| f.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
                     )),
                 });
             }
@@ -298,7 +347,8 @@ pub fn check_approve(ctx: &CommandContext, config: &PolicyConfig) -> Option<Clas
                 reason: format!("{} — file permission/ownership change", ctx.binary),
                 notification_summary: Some(format!(
                     "Agent wants to change permissions: {} {}",
-                    ctx.binary, ctx.args.join(" ")
+                    ctx.binary,
+                    ctx.args.join(" ")
                 )),
             });
         }
@@ -308,7 +358,8 @@ pub fn check_approve(ctx: &CommandContext, config: &PolicyConfig) -> Option<Clas
                 reason: format!("{} — process termination", ctx.binary),
                 notification_summary: Some(format!(
                     "Agent wants to terminate process: {} {}",
-                    ctx.binary, ctx.args.join(" ")
+                    ctx.binary,
+                    ctx.args.join(" ")
                 )),
             });
         }
@@ -322,7 +373,8 @@ pub fn check_approve(ctx: &CommandContext, config: &PolicyConfig) -> Option<Clas
                         reason: format!("docker {} — container mutation", subcommand),
                         notification_summary: Some(format!(
                             "Agent wants to run: {} {} {}",
-                            ctx.binary, subcommand,
+                            ctx.binary,
+                            subcommand,
                             ctx.args.get(1).unwrap_or(&String::new())
                         )),
                     });
@@ -339,7 +391,8 @@ pub fn check_approve(ctx: &CommandContext, config: &PolicyConfig) -> Option<Clas
                         reason: format!("{} {} — cluster mutation", ctx.binary, subcommand),
                         notification_summary: Some(format!(
                             "Agent wants to run: {} {}",
-                            ctx.binary, ctx.args.join(" ")
+                            ctx.binary,
+                            ctx.args.join(" ")
                         )),
                     });
                 }
@@ -646,9 +699,18 @@ mod tests {
 
     #[test]
     fn test_extract_domain_basic() {
-        assert_eq!(extract_domain("https://api.github.com/repos"), Some("api.github.com".into()));
-        assert_eq!(extract_domain("http://localhost:8080/path"), Some("localhost".into()));
+        assert_eq!(
+            extract_domain("https://api.github.com/repos"),
+            Some("api.github.com".into())
+        );
+        assert_eq!(
+            extract_domain("http://localhost:8080/path"),
+            Some("localhost".into())
+        );
         assert_eq!(extract_domain("not-a-url"), None);
-        assert_eq!(extract_domain("https://example.com"), Some("example.com".into()));
+        assert_eq!(
+            extract_domain("https://example.com"),
+            Some("example.com".into())
+        );
     }
 }

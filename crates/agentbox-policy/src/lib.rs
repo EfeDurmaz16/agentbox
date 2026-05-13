@@ -4,6 +4,5 @@
 /// - Fast (called on every shim invocation)
 /// - Deterministic (no network, no LLM, no randomness)
 /// - Conservative (when in doubt, approve rather than allow)
-
 pub mod classify;
 pub mod rules;
