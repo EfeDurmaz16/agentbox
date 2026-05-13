@@ -30,7 +30,10 @@ impl RuntimeManager {
     }
 
     pub async fn create(&self, spec: &MinipodSpec) -> Result<RuntimeSession, RuntimeError> {
-        validate_minipod_spec(spec)?;
+        if let Err(error) = validate_minipod_spec(spec) {
+            self.audit_manifest_rejection(spec, &error)?;
+            return Err(error);
+        }
 
         if !self.provider.is_available().await {
             return Err(RuntimeError::Unavailable(self.provider.name().to_string()));
@@ -162,6 +165,27 @@ impl RuntimeManager {
             decision.to_string(),
             user_response_ms,
             parent_process,
+        );
+
+        self.audit
+            .log_event(&event)
+            .map_err(|e| RuntimeError::Internal(e.to_string()))
+    }
+
+    fn audit_manifest_rejection(
+        &self,
+        spec: &MinipodSpec,
+        error: &RuntimeError,
+    ) -> Result<(), RuntimeError> {
+        let event = AuditEvent::new(
+            0,
+            Some(spec.agent.name.clone()),
+            format!("runtime.validate {}", spec.id),
+            spec.filesystem.workspace_host_path.display().to_string(),
+            "filesystem".to_string(),
+            format!("rejected:{error}"),
+            None,
+            Some(self.provider.name().to_string()),
         );
 
         self.audit
@@ -304,5 +328,21 @@ mod tests {
         let audit = manager.audit.recent(1).unwrap();
         assert_eq!(audit[0].decision, "destroyed");
         assert!(audit[0].command.contains("runtime.destroy"));
+    }
+
+    #[tokio::test]
+    async fn rejected_manifest_records_filesystem_evidence() {
+        let manager = manager("manifest-rejection");
+        let mut spec = MinipodSpec::for_agent_task("hermes", "/tmp/agentbox-work");
+        spec.credentials.inherit_host_env = true;
+
+        let err = manager.create(&spec).await.unwrap_err();
+
+        assert!(matches!(err, RuntimeError::ManifestRejected(_)));
+        let audit = manager.audit.recent(1).unwrap();
+        assert_eq!(audit[0].bucket, "filesystem");
+        assert!(audit[0].decision.contains("rejected:"));
+        assert!(audit[0].command.contains("runtime.validate"));
+        assert!(audit[0].event_hash.is_some());
     }
 }
