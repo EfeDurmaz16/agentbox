@@ -109,6 +109,19 @@ enum Commands {
         #[arg(long, default_value_t = 100)]
         limit: usize,
     },
+    /// Generate a governed minipod manifest for an agent task
+    MinipodSpec {
+        /// Agent command/name, e.g. openclaw, hermes, codex, aspendos
+        agent: String,
+
+        /// Workspace directory exposed to the minipod
+        #[arg(long)]
+        workspace: Option<PathBuf>,
+
+        /// Network domain allowed without first-contact approval
+        #[arg(long = "allow-domain")]
+        allow_domains: Vec<String>,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -1517,6 +1530,34 @@ fn cmd_evidence(limit: usize) {
     }
 }
 
+fn cmd_minipod_spec(agent: String, workspace: Option<PathBuf>, allow_domains: Vec<String>) {
+    use agentbox_daemon::runtime::policy::validate_minipod_spec;
+    use agentbox_daemon::runtime::types::{MinipodSpec, NetworkMode};
+
+    let workspace = workspace.unwrap_or_else(|| {
+        std::env::current_dir().unwrap_or_else(|_| {
+            eprintln!("error: failed to determine current directory");
+            std::process::exit(1);
+        })
+    });
+    let mut spec = MinipodSpec::for_agent_task(agent, workspace);
+
+    if !allow_domains.is_empty() {
+        spec.network.mode = NetworkMode::AllowListed;
+        spec.network.allowed_domains = allow_domains;
+    }
+
+    if let Err(e) = validate_minipod_spec(&spec) {
+        eprintln!("error: generated minipod manifest is invalid: {}", e);
+        std::process::exit(1);
+    }
+
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&spec).expect("failed to serialize minipod manifest")
+    );
+}
+
 fn ensure_evidence_columns(conn: &Connection) {
     let columns: Vec<String> = conn
         .prepare("PRAGMA table_info(audit_log)")
@@ -1568,5 +1609,10 @@ async fn main() {
         Commands::Policy => cmd_policy(),
         Commands::History { all, bucket, json } => cmd_history(all, bucket, json),
         Commands::Evidence { limit } => cmd_evidence(limit),
+        Commands::MinipodSpec {
+            agent,
+            workspace,
+            allow_domains,
+        } => cmd_minipod_spec(agent, workspace, allow_domains),
     }
 }
