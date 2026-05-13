@@ -122,6 +122,8 @@ enum Commands {
         #[arg(long = "allow-domain")]
         allow_domains: Vec<String>,
     },
+    /// List runtime providers and their current implementation status
+    Providers,
 }
 
 // ---------------------------------------------------------------------------
@@ -1558,6 +1560,57 @@ fn cmd_minipod_spec(agent: String, workspace: Option<PathBuf>, allow_domains: Ve
     );
 }
 
+fn cmd_providers() {
+    use agentbox_daemon::runtime::registry::RuntimeProviderRegistry;
+
+    println!(
+        "{:<18} {:<10} {:<14} CAPABILITIES",
+        "PROVIDER", "PLATFORM", "STATUS"
+    );
+    println!("{}", "-".repeat(90));
+    println!(
+        "{:<18} {:<10} {:<14} shim, policy, approval, audit",
+        "direct-host",
+        std::env::consts::OS,
+        "shipped"
+    );
+
+    let podman_status = if Command::new("podman")
+        .arg("--version")
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
+    {
+        "experimental"
+    } else {
+        "unavailable"
+    };
+    println!(
+        "{:<18} {:<10} {:<14} container isolation, shim bridge",
+        "podman", "linux-vm", podman_status
+    );
+
+    let registry = RuntimeProviderRegistry::with_native_descriptors();
+    for name in registry.names() {
+        let provider = registry
+            .get(name)
+            .expect("provider name came from registry");
+        let capabilities = provider
+            .capabilities()
+            .iter()
+            .map(|capability| format!("{capability:?}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        println!(
+            "{:<18} {:<10} {:<14} {}",
+            provider.name(),
+            provider.platform(),
+            "planned",
+            capabilities
+        );
+    }
+}
+
 fn ensure_evidence_columns(conn: &Connection) {
     let columns: Vec<String> = conn
         .prepare("PRAGMA table_info(audit_log)")
@@ -1614,5 +1667,6 @@ async fn main() {
             workspace,
             allow_domains,
         } => cmd_minipod_spec(agent, workspace, allow_domains),
+        Commands::Providers => cmd_providers(),
     }
 }
