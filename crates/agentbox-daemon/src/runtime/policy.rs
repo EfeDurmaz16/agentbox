@@ -171,6 +171,28 @@ mod tests {
     }
 
     #[test]
+    fn default_sensitive_paths_are_denied_without_grants() {
+        let mut spec = spec();
+        let ssh_path = spec
+            .filesystem
+            .protected_paths
+            .iter()
+            .find(|protected| matches!(protected.class, SensitivePathClass::Ssh))
+            .expect("default protected paths should include ssh")
+            .path
+            .join("id_ed25519");
+        spec.filesystem.mounts.push(MountRule {
+            host_path: ssh_path,
+            guest_path: "/secrets/id_ed25519".into(),
+            mode: MountMode::ReadOnly,
+        });
+
+        let reason = rejection_reason(validate_minipod_spec(&spec));
+
+        assert!(reason.contains("file grant"));
+    }
+
+    #[test]
     fn protected_read_only_mount_with_file_grant_is_valid() {
         let mut spec = spec();
         spec.filesystem = FilesystemPolicy {
