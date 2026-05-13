@@ -1590,11 +1590,19 @@ fn cmd_providers() {
         "podman", "linux-vm", podman_status
     );
 
-    let registry = RuntimeProviderRegistry::with_native_descriptors();
+    let registry = RuntimeProviderRegistry::with_local_providers(
+        socket_path().to_string_lossy().into_owned(),
+        find_shim_binary()
+            .map(|path| path.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+    );
     for name in registry.names() {
         let provider = registry
             .get(name)
             .expect("provider name came from registry");
+        if provider.name() == "podman" {
+            continue;
+        }
         let capabilities = provider
             .capabilities()
             .iter()
