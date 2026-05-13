@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use crate::runtime::provider::{RuntimeError, RuntimeProvider};
 use crate::runtime::providers::native::{NativeProvider, NativeProviderKind};
+use crate::runtime::providers::podman::PodmanRuntimeProvider;
 
 #[derive(Default)]
 pub struct RuntimeProviderRegistry {
@@ -55,6 +56,18 @@ impl RuntimeProviderRegistry {
 
     pub fn with_native_descriptors() -> Self {
         let mut registry = Self::new();
+        registry.register(Arc::new(NativeProvider::new(NativeProviderKind::MacOs)));
+        registry.register(Arc::new(NativeProvider::new(NativeProviderKind::Linux)));
+        registry.register(Arc::new(NativeProvider::new(NativeProviderKind::Windows)));
+        registry
+    }
+
+    pub fn with_local_providers(agentbox_socket: String, shim_binary: String) -> Self {
+        let mut registry = Self::new();
+        registry.register(Arc::new(PodmanRuntimeProvider::new(
+            agentbox_socket,
+            shim_binary,
+        )));
         registry.register(Arc::new(NativeProvider::new(NativeProviderKind::MacOs)));
         registry.register(Arc::new(NativeProvider::new(NativeProviderKind::Linux)));
         registry.register(Arc::new(NativeProvider::new(NativeProviderKind::Windows)));
@@ -165,5 +178,19 @@ mod tests {
             vec!["native-linux", "native-macos", "native-windows"]
         );
         assert_eq!(registry.get("native-macos").unwrap().platform(), "macos");
+    }
+
+    #[test]
+    fn local_provider_set_includes_podman_adapter_and_native_candidates() {
+        let registry = RuntimeProviderRegistry::with_local_providers(
+            "/tmp/agentbox.sock".into(),
+            "/tmp/agentbox-shim".into(),
+        );
+
+        assert_eq!(registry.default_provider().unwrap().name(), "podman");
+        assert_eq!(
+            registry.names(),
+            vec!["native-linux", "native-macos", "native-windows", "podman"]
+        );
     }
 }
