@@ -97,9 +97,10 @@ pub async fn run_socket_server(
         let (stream, _addr) = listener.accept().await?;
         let audit = Arc::clone(&audit);
         let ntfy = Arc::clone(&ntfy);
+        let config = config.clone();
 
         tokio::spawn(async move {
-            if let Err(e) = handle_connection(stream, &audit, &ntfy).await {
+            if let Err(e) = handle_connection(stream, &config, &audit, &ntfy).await {
                 error!(error = %e, "Error handling connection");
             }
         });
@@ -109,6 +110,7 @@ pub async fn run_socket_server(
 /// Handle a single shim connection end-to-end.
 async fn handle_connection(
     stream: tokio::net::UnixStream,
+    config: &Config,
     audit: &AuditStore,
     ntfy: &NtfyClient,
 ) -> Result<(), SocketError> {
@@ -136,7 +138,7 @@ async fn handle_connection(
         parent_process: Some(req.parent_process.clone()),
         pid: req.pid,
     };
-    let classification = classify::classify_default(&ctx);
+    let classification = classify::classify(&ctx, &config.to_policy_config());
     let real_binary = find_real_binary(&req.binary);
 
     // Handle per-bucket
@@ -260,7 +262,10 @@ mod tests {
             ntfy_server: "https://ntfy.sh".to_string(),
             approval_timeout_secs: 120,
             shim_dir: "/tmp/agentbox-shims".to_string(),
+            workspace: None,
             allowed_domains: vec![],
+            always_allow: vec![],
+            always_block: vec![],
             log_level: "debug".to_string(),
         }
     }
@@ -350,6 +355,40 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].bucket, "block");
         assert_eq!(events[0].decision, "blocked");
+
+        let _ = std::fs::remove_file(&sock);
+    }
+
+    #[tokio::test]
+    async fn config_allowlist_affects_socket_decision() {
+        let sock = tmp_socket_path();
+        let mut config = test_config(&sock);
+        config.allowed_domains = vec!["example.com".to_string()];
+        let audit = Arc::new(AuditStore::in_memory().unwrap());
+        let ntfy = Arc::new(NtfyClient::new("https://ntfy.sh", "unused", 5));
+
+        let audit_clone = Arc::clone(&audit);
+        tokio::spawn(async move {
+            run_socket_server(&config, audit_clone, ntfy).await.ok();
+        });
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let req = serde_json::json!({
+            "binary": "curl",
+            "args": ["https://api.example.com/v1"],
+            "cwd": "/home/user/project",
+            "parent_process": "node",
+            "pid": 4242
+        });
+
+        let resp = send_request(&sock, &req).await;
+        assert_eq!(resp.decision, "allowed");
+        assert!(resp.reason.contains("domain in allowlist"));
+
+        let events = audit.recent(10).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].bucket, "allow");
 
         let _ = std::fs::remove_file(&sock);
     }

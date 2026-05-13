@@ -1,6 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use agentbox_policy::classify::PolicyConfig;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -31,7 +32,14 @@ pub struct Config {
     pub ntfy_server: String,
     pub approval_timeout_secs: u64,
     pub shim_dir: String,
+    #[serde(default)]
+    pub workspace: Option<String>,
+    #[serde(default)]
     pub allowed_domains: Vec<String>,
+    #[serde(default)]
+    pub always_allow: Vec<String>,
+    #[serde(default)]
+    pub always_block: Vec<String>,
     pub log_level: String,
 }
 
@@ -55,8 +63,20 @@ impl Config {
             ntfy_server: "https://ntfy.sh".to_string(),
             approval_timeout_secs: 120,
             shim_dir: base.join("shims").to_string_lossy().into_owned(),
+            workspace: None,
             allowed_domains: Vec::new(),
+            always_allow: Vec::new(),
+            always_block: Vec::new(),
             log_level: "info".to_string(),
+        }
+    }
+
+    pub fn to_policy_config(&self) -> PolicyConfig {
+        PolicyConfig {
+            workspace: self.workspace.clone(),
+            allowed_domains: self.allowed_domains.clone(),
+            always_allow: self.always_allow.clone(),
+            always_block: self.always_block.clone(),
         }
     }
 }
@@ -151,7 +171,10 @@ mod tests {
         assert_eq!(config.approval_timeout_secs, 120);
         assert_eq!(config.ntfy_server, "https://ntfy.sh");
         assert_eq!(config.log_level, "info");
+        assert!(config.workspace.is_none());
         assert!(config.allowed_domains.is_empty());
+        assert!(config.always_allow.is_empty());
+        assert!(config.always_block.is_empty());
         assert!(config.ntfy_topic.starts_with("agentbox-"));
         assert!(config.socket_path.ends_with("agentbox.sock"));
         assert!(config.db_path.ends_with("audit.db"));
@@ -190,7 +213,10 @@ mod tests {
             ntfy_server: "https://my-ntfy.example.com".to_string(),
             approval_timeout_secs: 60,
             shim_dir: "/tmp/shims".to_string(),
+            workspace: Some("/tmp/workspace".to_string()),
             allowed_domains: vec!["github.com".to_string(), "api.openai.com".to_string()],
+            always_allow: vec!["git status".to_string()],
+            always_block: vec!["npm *".to_string()],
             log_level: "debug".to_string(),
         };
 
@@ -200,7 +226,10 @@ mod tests {
         let loaded = load_from(&base).unwrap();
         assert_eq!(loaded, custom);
         assert_eq!(loaded.approval_timeout_secs, 60);
+        assert_eq!(loaded.workspace.as_deref(), Some("/tmp/workspace"));
         assert_eq!(loaded.allowed_domains.len(), 2);
+        assert_eq!(loaded.always_allow, vec!["git status"]);
+        assert_eq!(loaded.always_block, vec!["npm *"]);
         assert_eq!(loaded.ntfy_server, "https://my-ntfy.example.com");
 
         let _ = fs::remove_dir_all(&base);
@@ -218,7 +247,10 @@ ntfy_topic = "test"
 ntfy_server = "https://ntfy.sh"
 approval_timeout_secs = 5
 shim_dir = "/tmp/shims"
+workspace = "/tmp/workspace"
 allowed_domains = []
+always_allow = []
+always_block = []
 log_level = "info"
 "#;
         fs::write(base.join("config.toml"), bad_toml).unwrap();
@@ -264,6 +296,22 @@ log_level = "info"
         assert!(base.join("shims").is_dir());
 
         let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn config_maps_to_policy_config() {
+        let mut config = Config::default_for_dir(&temp_base());
+        config.workspace = Some("/tmp/project".to_string());
+        config.allowed_domains = vec!["github.com".to_string()];
+        config.always_allow = vec!["git status".to_string()];
+        config.always_block = vec!["rm".to_string()];
+
+        let policy = config.to_policy_config();
+
+        assert_eq!(policy.workspace.as_deref(), Some("/tmp/project"));
+        assert_eq!(policy.allowed_domains, vec!["github.com"]);
+        assert_eq!(policy.always_allow, vec!["git status"]);
+        assert_eq!(policy.always_block, vec!["rm"]);
     }
 
     #[test]

@@ -958,15 +958,9 @@ fn cmd_allow(domain: String) {
         toml::Table::new()
     };
 
-    // Get or create [network] table
-    let network = config
-        .entry("network")
-        .or_insert_with(|| toml::Value::Table(toml::Table::new()))
-        .as_table_mut()
-        .expect("network should be a table");
-
-    // Get or create allowed_domains array
-    let domains = network
+    // Get or create top-level allowed_domains array. Older development builds
+    // used a nested [network] table; the daemon config is flat now.
+    let domains = config
         .entry("allowed_domains")
         .or_insert_with(|| toml::Value::Array(Vec::new()))
         .as_array_mut()
@@ -1212,9 +1206,7 @@ fn cmd_policy() {
     // Allowed domains
     let domains: Vec<String> = cfg
         .as_ref()
-        .and_then(|t| t.get("network"))
-        .and_then(|v| v.as_table())
-        .and_then(|nt| nt.get("allowed_domains"))
+        .and_then(|t| t.get("allowed_domains"))
         .and_then(|v| v.as_array())
         .map(|arr| {
             arr.iter()
@@ -1226,9 +1218,7 @@ fn cmd_policy() {
     // Always-allow overrides
     let always_allow: Vec<String> = cfg
         .as_ref()
-        .and_then(|t| t.get("overrides"))
-        .and_then(|v| v.as_table())
-        .and_then(|nt| nt.get("always_allow"))
+        .and_then(|t| t.get("always_allow"))
         .and_then(|v| v.as_array())
         .map(|arr| {
             arr.iter()
@@ -1240,9 +1230,7 @@ fn cmd_policy() {
     // Always-block overrides
     let always_block: Vec<String> = cfg
         .as_ref()
-        .and_then(|t| t.get("overrides"))
-        .and_then(|v| v.as_table())
-        .and_then(|nt| nt.get("always_block"))
+        .and_then(|t| t.get("always_block"))
         .and_then(|v| v.as_array())
         .map(|arr| {
             arr.iter()
