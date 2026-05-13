@@ -124,6 +124,15 @@ enum Commands {
     },
     /// List runtime providers and their current implementation status
     Providers,
+    /// Inspect persisted minipod session metadata
+    MinipodInspect {
+        /// Session id to inspect; omit to list all persisted sessions
+        session_id: Option<String>,
+
+        /// Emit JSON
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -1619,6 +1628,99 @@ fn cmd_providers() {
     }
 }
 
+fn cmd_minipod_inspect(session_id: Option<String>, json: bool) {
+    use agentbox_daemon::config;
+    use agentbox_daemon::runtime::session::RuntimeSessionStore;
+
+    let config = config::load().unwrap_or_else(|e| {
+        eprintln!("error: failed to load Agentbox config: {}", e);
+        std::process::exit(1);
+    });
+    let store = RuntimeSessionStore::new(config.session_store_path);
+
+    if let Some(session_id) = session_id {
+        let session = store.get(&session_id).unwrap_or_else(|e| {
+            eprintln!("error: failed to read runtime session store: {}", e);
+            std::process::exit(1);
+        });
+        let Some(session) = session else {
+            eprintln!("error: minipod session not found: {}", session_id);
+            std::process::exit(1);
+        };
+
+        if json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&session).expect("failed to serialize session")
+            );
+        } else {
+            print_minipod_session(&session);
+        }
+        return;
+    }
+
+    let sessions = store.list().unwrap_or_else(|e| {
+        eprintln!("error: failed to read runtime session store: {}", e);
+        std::process::exit(1);
+    });
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&sessions).expect("failed to serialize sessions")
+        );
+        return;
+    }
+
+    if sessions.is_empty() {
+        println!("No persisted minipod sessions.");
+        return;
+    }
+
+    println!(
+        "{:<28} {:<18} {:<12} {:<10} AGENT",
+        "SESSION", "NAME", "PROVIDER", "STATUS"
+    );
+    println!("{}", "-".repeat(88));
+    for session in &sessions {
+        println!(
+            "{:<28} {:<18} {:<12} {:<10} {}",
+            session.id,
+            session.name,
+            session.provider,
+            format!("{:?}", session.status),
+            session.spec.agent.name
+        );
+    }
+}
+
+fn print_minipod_session(session: &agentbox_daemon::runtime::types::RuntimeSession) {
+    println!("session:   {}", session.id);
+    println!("name:      {}", session.name);
+    println!("provider:  {}", session.provider);
+    println!("platform:  {}", session.platform);
+    println!("status:    {:?}", session.status);
+    println!("agent:     {}", session.spec.agent.name);
+    println!(
+        "workspace: {} -> {}",
+        session.spec.filesystem.workspace_host_path.display(),
+        session.spec.filesystem.workspace_guest_path
+    );
+    println!("network:   {:?}", session.spec.network.mode);
+    if session.spec.network.allowed_domains.is_empty() {
+        println!("domains:   (none)");
+    } else {
+        println!(
+            "domains:   {}",
+            session.spec.network.allowed_domains.join(", ")
+        );
+    }
+    println!("started:   {}", session.started_at.to_rfc3339());
+    if let Some(stopped_at) = session.stopped_at {
+        println!("stopped:   {}", stopped_at.to_rfc3339());
+    }
+}
+
 fn ensure_evidence_columns(conn: &Connection) {
     let columns: Vec<String> = conn
         .prepare("PRAGMA table_info(audit_log)")
@@ -1676,5 +1778,6 @@ async fn main() {
             allow_domains,
         } => cmd_minipod_spec(agent, workspace, allow_domains),
         Commands::Providers => cmd_providers(),
+        Commands::MinipodInspect { session_id, json } => cmd_minipod_inspect(session_id, json),
     }
 }
