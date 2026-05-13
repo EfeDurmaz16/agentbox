@@ -279,6 +279,16 @@ fn default_protected_paths() -> Vec<ProtectedPath> {
             class: SensitivePathClass::BrowserProfile,
             reason: "Browser and app profiles are not part of the task workspace".to_string(),
         },
+        ProtectedPath {
+            path: home.join("Library/Keychains"),
+            class: SensitivePathClass::Keychain,
+            reason: "macOS keychains require explicit mediation".to_string(),
+        },
+        ProtectedPath {
+            path: home.join(".env"),
+            class: SensitivePathClass::EnvFile,
+            reason: "environment files often contain secrets".to_string(),
+        },
     ]
 }
 
@@ -311,6 +321,9 @@ mod tests {
 
         assert!(classes.contains(&&SensitivePathClass::Ssh));
         assert!(classes.contains(&&SensitivePathClass::CloudCredentials));
+        assert!(classes.contains(&&SensitivePathClass::BrowserProfile));
+        assert!(classes.contains(&&SensitivePathClass::Keychain));
+        assert!(classes.contains(&&SensitivePathClass::EnvFile));
     }
 
     #[test]
