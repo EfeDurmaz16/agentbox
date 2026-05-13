@@ -17,7 +17,7 @@ use rusqlite::Connection;
 #[derive(Parser)]
 #[command(
     name = "agentbox",
-    about = "2FA for AI agent actions",
+    about = "Local governed minipods for autonomous agents",
     version,
     propagate_version = true
 )]
@@ -57,7 +57,7 @@ enum Commands {
         /// Domain to allow (e.g. api.example.com)
         domain: String,
     },
-    /// Run a command inside an isolated Agentbox sandbox pod
+    /// Run a command inside an isolated Agentbox minipod
     Run {
         /// Command to run (e.g., "openclaw start" or "npm test")
         command: Vec<String>,
@@ -78,12 +78,12 @@ enum Commands {
         #[arg(long, default_value = "1024")]
         memory: u64,
     },
-    /// Stop and remove a sandbox pod
+    /// Stop and remove a minipod
     StopPod {
         /// Pod ID (e.g., sb-a1b2c3)
         pod_id: String,
     },
-    /// List running sandbox pods
+    /// List running minipods
     Pods,
     /// Explain the last blocked or denied action
     Why,
@@ -762,7 +762,7 @@ async fn cmd_run(
 
     // 7. Print progress and create pod
     let ws_image = spec.containers[0].image.clone();
-    println!("Creating sandbox pod {}...", spec.name);
+    println!("Creating governed minipod {}...", spec.name);
     println!("  Image: {}", ws_image);
 
     if spec.containers.len() > 1 {
@@ -794,7 +794,7 @@ async fn cmd_run(
     let pod_name = spec.name.clone();
     match provider.create(pod_id_short, &spec).await {
         Ok(_session) => {
-            println!("Pod {} created and running.", pod_name);
+            println!("Minipod {} created and running.", pod_name);
         }
         Err(e) => {
             eprintln!("Error: failed to create pod: {}", e);
@@ -826,7 +826,7 @@ async fn cmd_run(
                 println!("--- exit code: {} ---", result.exit_code);
 
                 // Cleanup prompt
-                eprint!("Destroy pod {}? [Y/n] ", pod_name);
+                eprint!("Destroy minipod {}? [Y/n] ", pod_name);
                 io::stderr().flush().ok();
                 let mut input = String::new();
                 if io::stdin().read_line(&mut input).is_ok() {
@@ -835,10 +835,10 @@ async fn cmd_run(
                         if let Err(e) = provider.destroy(pod_id_short).await {
                             eprintln!("Warning: failed to destroy pod: {}", e);
                         } else {
-                            println!("Pod {} destroyed.", pod_name);
+                            println!("Minipod {} destroyed.", pod_name);
                         }
                     } else {
-                        println!("Pod {} left running.", pod_name);
+                        println!("Minipod {} left running.", pod_name);
                     }
                 }
 
@@ -854,7 +854,7 @@ async fn cmd_run(
     } else {
         // 9. No command: print interactive instructions
         println!();
-        println!("Pod running. Connect with:");
+        println!("Minipod running. Connect with:");
         println!("  podman exec -it {}-workspace bash", pod_name);
         println!();
         println!("Stop with:");
@@ -873,7 +873,7 @@ async fn cmd_stop_pod(pod_id: String) {
         .output()
     {
         Ok(o) if o.status.success() => {
-            println!("Pod {} removed.", pod_name);
+            println!("Minipod {} removed.", pod_name);
         }
         Ok(o) => {
             let stderr = String::from_utf8_lossy(&o.stderr);
@@ -908,7 +908,7 @@ async fn cmd_pods() {
             let json_str = stdout.trim();
 
             if json_str.is_empty() || json_str == "[]" {
-                println!("No sandbox pods running.");
+                println!("No minipods running.");
                 return;
             }
 
@@ -921,7 +921,7 @@ async fn cmd_pods() {
             };
 
             if pods.is_empty() {
-                println!("No sandbox pods running.");
+                println!("No minipods running.");
                 return;
             }
 
