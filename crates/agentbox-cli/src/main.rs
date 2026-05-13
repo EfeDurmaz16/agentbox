@@ -133,6 +133,19 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
+    /// Show logs for a Podman-backed minipod workspace container
+    MinipodLogs {
+        /// Session id or legacy sb-* pod id
+        session_id: String,
+
+        /// Follow logs
+        #[arg(long)]
+        follow: bool,
+
+        /// Number of trailing lines to show
+        #[arg(long)]
+        tail: Option<usize>,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -1721,6 +1734,34 @@ fn print_minipod_session(session: &agentbox_daemon::runtime::types::RuntimeSessi
     }
 }
 
+fn cmd_minipod_logs(session_id: String, follow: bool, tail: Option<usize>) {
+    let raw_id = session_id.strip_prefix("sb-").unwrap_or(&session_id);
+    let container = format!("sb-{}-workspace", raw_id);
+    let mut args = vec!["logs".to_string()];
+    if follow {
+        args.push("--follow".to_string());
+    }
+    if let Some(tail) = tail {
+        args.push("--tail".to_string());
+        args.push(tail.to_string());
+    }
+    args.push(container.clone());
+
+    let status = Command::new("podman")
+        .args(&args)
+        .status()
+        .unwrap_or_else(|e| {
+            eprintln!("error: failed to run podman logs: {}", e);
+            eprintln!("hint: minipod logs currently require the Podman-backed runtime");
+            std::process::exit(1);
+        });
+
+    if !status.success() {
+        eprintln!("error: podman logs failed for {}", container);
+        std::process::exit(status.code().unwrap_or(1));
+    }
+}
+
 fn ensure_evidence_columns(conn: &Connection) {
     let columns: Vec<String> = conn
         .prepare("PRAGMA table_info(audit_log)")
@@ -1779,5 +1820,10 @@ async fn main() {
         } => cmd_minipod_spec(agent, workspace, allow_domains),
         Commands::Providers => cmd_providers(),
         Commands::MinipodInspect { session_id, json } => cmd_minipod_inspect(session_id, json),
+        Commands::MinipodLogs {
+            session_id,
+            follow,
+            tail,
+        } => cmd_minipod_logs(session_id, follow, tail),
     }
 }
