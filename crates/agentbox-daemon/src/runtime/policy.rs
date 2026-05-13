@@ -32,6 +32,9 @@ pub fn validate_minipod_spec(spec: &MinipodSpec) -> Result<(), RuntimeError> {
         if mount.host_path.as_os_str().is_empty() {
             return reject("mount host path cannot be empty");
         }
+        if escapes_workspace_via_symlink(spec, &mount.host_path) {
+            return reject("mount path escapes workspace through symlink");
+        }
         if matches!(mount.mode, MountMode::ReadWrite) && is_protected_path(spec, &mount.host_path) {
             return reject("protected paths cannot be mounted read-write");
         }
@@ -59,6 +62,23 @@ fn has_matching_file_grant(spec: &MinipodSpec, path: &Path) -> bool {
         .grants
         .iter()
         .any(|grant| matches!(grant.kind, CredentialGrantKind::FileMount) && grant.target == path)
+}
+
+fn escapes_workspace_via_symlink(spec: &MinipodSpec, path: &Path) -> bool {
+    let workspace = normalize_path(&spec.filesystem.workspace_host_path);
+    let path = normalize_path(path);
+    if !path.starts_with(&workspace) {
+        return false;
+    }
+
+    let Ok(workspace_real) = std::fs::canonicalize(&workspace) else {
+        return false;
+    };
+    let Ok(path_real) = std::fs::canonicalize(&path) else {
+        return false;
+    };
+
+    !path_real.starts_with(workspace_real)
 }
 
 fn normalize_path(path: &Path) -> PathBuf {
@@ -272,5 +292,32 @@ mod tests {
         });
 
         validate_minipod_spec(&spec).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_mount_that_escapes_workspace_through_symlink() {
+        let base =
+            std::env::temp_dir().join(format!("agentbox-symlink-escape-{}", std::process::id()));
+        let workspace = base.join("workspace");
+        let outside = base.join("outside");
+        let link = workspace.join("outside-link");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::os::unix::fs::symlink(&outside, &link).unwrap();
+
+        let mut spec = MinipodSpec::for_agent_task("hermes", &workspace);
+        spec.filesystem.mounts.push(MountRule {
+            host_path: link,
+            guest_path: "/mnt/outside".into(),
+            mode: MountMode::ReadOnly,
+            kind: Default::default(),
+        });
+
+        let reason = rejection_reason(validate_minipod_spec(&spec));
+
+        assert!(reason.contains("symlink"));
+        let _ = std::fs::remove_dir_all(&base);
     }
 }
