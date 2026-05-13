@@ -23,7 +23,7 @@ implemented yet.
 | Minipod manifest CLI | Shipped | `agentbox minipod-spec` generates and validates a deny-by-default manifest. |
 | Runtime provider registry | Shipped | `RuntimeProviderRegistry` can resolve local providers and native descriptors. |
 | Runtime provider listing | Shipped | `agentbox providers` reports shipped, experimental, unavailable, and planned provider surfaces. |
-| Podman runtime adapter | Shipped | The older Podman backend now has a `RuntimeProvider` adapter; `agentbox run` still uses the legacy path until the next migration slice. |
+| Podman runtime adapter | Shipped | `agentbox run` now routes through `RuntimeManager` and the Podman `RuntimeProvider` adapter, creating governed runtime sessions and evidence events. |
 | Native provider descriptors | Shipped | macOS, Linux, and Windows provider candidates expose capability metadata while returning unavailable for execution. |
 
 ## Runtime Backends
@@ -31,7 +31,7 @@ implemented yet.
 | Backend | Status | Notes |
 |---------|--------|-------|
 | Direct host with shims | Shipped | Strongest validated path today. It governs host-impacting shell commands but does not isolate all process behavior. |
-| Podman minipods | Experimental | Existing `agentbox run`, `agentbox pods`, and `agentbox stop-pod` use the older path; a `RuntimeProvider` adapter now exists, but CLI migration and smoke proof remain. |
+| Podman minipods | Experimental | `agentbox run` uses the daemon-owned runtime manager path. `agentbox pods` and `agentbox stop-pod` still use the older Podman CLI path, and live socket/shim smoke proof remains open. |
 | macOS native boundary | Descriptor only | Candidate surfaces include Apple Virtualization for Linux cells, Endpoint Security for host-event enforcement, and Network Extension for egress governance. Execution intentionally returns unavailable. |
 | Linux native boundary | Descriptor only | Candidate surfaces include namespaces, cgroups, Landlock, seccomp, eBPF, nftables, and overlayfs. Execution intentionally returns unavailable. |
 | Windows native boundary | Descriptor only | Candidate surfaces include Job Objects, AppContainer, WFP, ETW, and Windows sandbox primitives. Execution intentionally returns unavailable. |
