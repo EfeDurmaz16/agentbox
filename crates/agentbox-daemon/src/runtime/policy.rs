@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
 
 use crate::runtime::provider::RuntimeError;
 use crate::runtime::types::{CredentialGrantKind, MinipodSpec, MountMode, NetworkMode};
@@ -46,18 +46,37 @@ pub fn validate_minipod_spec(spec: &MinipodSpec) -> Result<(), RuntimeError> {
 }
 
 fn is_protected_path(spec: &MinipodSpec, path: &Path) -> bool {
+    let path = normalize_path(path);
     spec.filesystem
         .protected_paths
         .iter()
-        .any(|protected| path.starts_with(&protected.path))
+        .any(|protected| path.starts_with(normalize_path(&protected.path)))
 }
 
 fn has_matching_file_grant(spec: &MinipodSpec, path: &Path) -> bool {
-    let path = path.to_string_lossy();
+    let path = normalize_path(path).to_string_lossy().to_string();
     spec.credentials
         .grants
         .iter()
         .any(|grant| matches!(grant.kind, CredentialGrantKind::FileMount) && grant.target == path)
+}
+
+fn normalize_path(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+
+    for component in path.components() {
+        match component {
+            Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+            Component::RootDir => normalized.push(component.as_os_str()),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            Component::Normal(part) => normalized.push(part),
+        }
+    }
+
+    normalized
 }
 
 fn reject<T>(reason: impl Into<String>) -> Result<T, RuntimeError> {
@@ -162,6 +181,55 @@ mod tests {
             }],
             mounts: vec![MountRule {
                 host_path: "/tmp/agentbox-secret/key".into(),
+                guest_path: "/secret/key".into(),
+                mode: MountMode::ReadOnly,
+            }],
+            ..FilesystemPolicy::workspace("/tmp/agentbox-work")
+        };
+        spec.credentials.grants.push(CredentialGrant {
+            name: "secret-key".into(),
+            kind: CredentialGrantKind::FileMount,
+            target: "/tmp/agentbox-secret/key".into(),
+            one_time: true,
+            requires_approval: true,
+        });
+
+        validate_minipod_spec(&spec).unwrap();
+    }
+
+    #[test]
+    fn protected_path_checks_normalize_dot_dot_segments() {
+        let mut spec = spec();
+        spec.filesystem = FilesystemPolicy {
+            protected_paths: vec![ProtectedPath {
+                path: "/tmp/agentbox-secret".into(),
+                class: SensitivePathClass::Custom("secret".into()),
+                reason: "test secret".into(),
+            }],
+            mounts: vec![MountRule {
+                host_path: "/tmp/agentbox-work/../agentbox-secret/key".into(),
+                guest_path: "/secret/key".into(),
+                mode: MountMode::ReadOnly,
+            }],
+            ..FilesystemPolicy::workspace("/tmp/agentbox-work")
+        };
+
+        let reason = rejection_reason(validate_minipod_spec(&spec));
+
+        assert!(reason.contains("file grant"));
+    }
+
+    #[test]
+    fn file_grants_match_normalized_mount_paths() {
+        let mut spec = spec();
+        spec.filesystem = FilesystemPolicy {
+            protected_paths: vec![ProtectedPath {
+                path: "/tmp/agentbox-secret".into(),
+                class: SensitivePathClass::Custom("secret".into()),
+                reason: "test secret".into(),
+            }],
+            mounts: vec![MountRule {
+                host_path: "/tmp/agentbox-work/../agentbox-secret/key".into(),
                 guest_path: "/secret/key".into(),
                 mode: MountMode::ReadOnly,
             }],
