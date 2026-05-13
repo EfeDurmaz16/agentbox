@@ -3,6 +3,7 @@ use std::sync::Arc;
 use chrono::Utc;
 
 use crate::audit::{AuditEvent, AuditStore};
+use crate::runtime::policy::validate_minipod_spec;
 use crate::runtime::provider::{RuntimeError, RuntimeProvider};
 use crate::runtime::session::RuntimeSessionStore;
 use crate::runtime::types::{
@@ -29,6 +30,8 @@ impl RuntimeManager {
     }
 
     pub async fn create(&self, spec: &MinipodSpec) -> Result<RuntimeSession, RuntimeError> {
+        validate_minipod_spec(spec)?;
+
         if !self.provider.is_available().await {
             return Err(RuntimeError::Unavailable(self.provider.name().to_string()));
         }
