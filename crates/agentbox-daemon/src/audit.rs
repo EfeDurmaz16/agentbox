@@ -3,6 +3,7 @@ use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 use ulid::Ulid;
 
@@ -19,6 +20,7 @@ pub type Result<T> = std::result::Result<T, AuditError>;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuditEvent {
+    pub schema_version: i64,
     pub id: String,
     pub timestamp: String,
     pub agent_pid: i64,
@@ -29,6 +31,8 @@ pub struct AuditEvent {
     pub decision: String,
     pub user_response_ms: Option<i64>,
     pub parent_process: Option<String>,
+    pub prev_hash: Option<String>,
+    pub event_hash: Option<String>,
 }
 
 impl AuditEvent {
@@ -44,6 +48,7 @@ impl AuditEvent {
         parent_process: Option<String>,
     ) -> Self {
         Self {
+            schema_version: 2,
             id: Ulid::new().to_string(),
             timestamp: Utc::now().to_rfc3339(),
             agent_pid,
@@ -54,6 +59,8 @@ impl AuditEvent {
             decision,
             user_response_ms,
             parent_process,
+            prev_hash: None,
+            event_hash: None,
         }
     }
 }
@@ -74,6 +81,7 @@ impl AuditStore {
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS audit_log (
                 id                TEXT PRIMARY KEY,
+                schema_version    INTEGER NOT NULL DEFAULT 1,
                 timestamp         TEXT NOT NULL,
                 agent_pid         INTEGER NOT NULL,
                 agent_name        TEXT,
@@ -82,9 +90,12 @@ impl AuditStore {
                 bucket            TEXT NOT NULL,
                 decision          TEXT NOT NULL,
                 user_response_ms  INTEGER,
-                parent_process    TEXT
+                parent_process    TEXT,
+                prev_hash         TEXT,
+                event_hash        TEXT
             );",
         )?;
+        migrate_schema(&conn)?;
 
         Ok(Self { pool })
     }
@@ -98,6 +109,7 @@ impl AuditStore {
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS audit_log (
                 id                TEXT PRIMARY KEY,
+                schema_version    INTEGER NOT NULL DEFAULT 1,
                 timestamp         TEXT NOT NULL,
                 agent_pid         INTEGER NOT NULL,
                 agent_name        TEXT,
@@ -106,9 +118,12 @@ impl AuditStore {
                 bucket            TEXT NOT NULL,
                 decision          TEXT NOT NULL,
                 user_response_ms  INTEGER,
-                parent_process    TEXT
+                parent_process    TEXT,
+                prev_hash         TEXT,
+                event_hash        TEXT
             );",
         )?;
+        migrate_schema(&conn)?;
 
         Ok(Self { pool })
     }
@@ -116,12 +131,18 @@ impl AuditStore {
     /// Insert a single audit event.
     pub fn log_event(&self, event: &AuditEvent) -> Result<()> {
         let conn = self.pool.get()?;
+        let mut event = event.clone();
+        event.schema_version = 2;
+        event.prev_hash = latest_event_hash(&conn)?;
+        event.event_hash = Some(compute_event_hash(&event));
+
         conn.execute(
             "INSERT INTO audit_log
-                (id, timestamp, agent_pid, agent_name, command, cwd, bucket, decision, user_response_ms, parent_process)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                (id, schema_version, timestamp, agent_pid, agent_name, command, cwd, bucket, decision, user_response_ms, parent_process, prev_hash, event_hash)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
             params![
                 event.id,
+                event.schema_version,
                 event.timestamp,
                 event.agent_pid,
                 event.agent_name,
@@ -131,6 +152,8 @@ impl AuditStore {
                 event.decision,
                 event.user_response_ms,
                 event.parent_process,
+                event.prev_hash,
+                event.event_hash,
             ],
         )?;
         Ok(())
@@ -140,7 +163,7 @@ impl AuditStore {
     pub fn recent(&self, limit: usize) -> Result<Vec<AuditEvent>> {
         let conn = self.pool.get()?;
         let mut stmt = conn.prepare(
-            "SELECT id, timestamp, agent_pid, agent_name, command, cwd, bucket, decision, user_response_ms, parent_process
+            "SELECT id, schema_version, timestamp, agent_pid, agent_name, command, cwd, bucket, decision, user_response_ms, parent_process, prev_hash, event_hash
              FROM audit_log
              ORDER BY timestamp DESC
              LIMIT ?1",
@@ -155,7 +178,7 @@ impl AuditStore {
     pub fn query_by_bucket(&self, bucket: &str, limit: usize) -> Result<Vec<AuditEvent>> {
         let conn = self.pool.get()?;
         let mut stmt = conn.prepare(
-            "SELECT id, timestamp, agent_pid, agent_name, command, cwd, bucket, decision, user_response_ms, parent_process
+            "SELECT id, schema_version, timestamp, agent_pid, agent_name, command, cwd, bucket, decision, user_response_ms, parent_process, prev_hash, event_hash
              FROM audit_log
              WHERE bucket = ?1
              ORDER BY timestamp DESC
@@ -171,16 +194,97 @@ impl AuditStore {
 fn row_to_event(row: &rusqlite::Row) -> rusqlite::Result<AuditEvent> {
     Ok(AuditEvent {
         id: row.get(0)?,
-        timestamp: row.get(1)?,
-        agent_pid: row.get(2)?,
-        agent_name: row.get(3)?,
-        command: row.get(4)?,
-        cwd: row.get(5)?,
-        bucket: row.get(6)?,
-        decision: row.get(7)?,
-        user_response_ms: row.get(8)?,
-        parent_process: row.get(9)?,
+        schema_version: row.get(1)?,
+        timestamp: row.get(2)?,
+        agent_pid: row.get(3)?,
+        agent_name: row.get(4)?,
+        command: row.get(5)?,
+        cwd: row.get(6)?,
+        bucket: row.get(7)?,
+        decision: row.get(8)?,
+        user_response_ms: row.get(9)?,
+        parent_process: row.get(10)?,
+        prev_hash: row.get(11)?,
+        event_hash: row.get(12)?,
     })
+}
+
+fn migrate_schema(conn: &rusqlite::Connection) -> Result<()> {
+    let columns = table_columns(conn)?;
+
+    if !columns.iter().any(|c| c == "schema_version") {
+        conn.execute_batch(
+            "ALTER TABLE audit_log ADD COLUMN schema_version INTEGER NOT NULL DEFAULT 1;",
+        )?;
+    }
+    if !columns.iter().any(|c| c == "prev_hash") {
+        conn.execute_batch("ALTER TABLE audit_log ADD COLUMN prev_hash TEXT;")?;
+    }
+    if !columns.iter().any(|c| c == "event_hash") {
+        conn.execute_batch("ALTER TABLE audit_log ADD COLUMN event_hash TEXT;")?;
+    }
+
+    Ok(())
+}
+
+fn table_columns(conn: &rusqlite::Connection) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare("PRAGMA table_info(audit_log)")?;
+    let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
+    rows.collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(AuditError::from)
+}
+
+fn latest_event_hash(conn: &rusqlite::Connection) -> Result<Option<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT event_hash FROM audit_log
+         WHERE event_hash IS NOT NULL
+         ORDER BY rowid DESC
+         LIMIT 1",
+    )?;
+    let mut rows = stmt.query([])?;
+    if let Some(row) = rows.next()? {
+        Ok(row.get(0)?)
+    } else {
+        Ok(None)
+    }
+}
+
+fn compute_event_hash(event: &AuditEvent) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(event.schema_version.to_string());
+    hasher.update(b"\x1f");
+    hasher.update(&event.id);
+    hasher.update(b"\x1f");
+    hasher.update(&event.timestamp);
+    hasher.update(b"\x1f");
+    hasher.update(event.agent_pid.to_string());
+    hasher.update(b"\x1f");
+    hasher.update(event.agent_name.as_deref().unwrap_or(""));
+    hasher.update(b"\x1f");
+    hasher.update(&event.command);
+    hasher.update(b"\x1f");
+    hasher.update(&event.cwd);
+    hasher.update(b"\x1f");
+    hasher.update(&event.bucket);
+    hasher.update(b"\x1f");
+    hasher.update(&event.decision);
+    hasher.update(b"\x1f");
+    hasher.update(
+        event
+            .user_response_ms
+            .map(|ms| ms.to_string())
+            .unwrap_or_default(),
+    );
+    hasher.update(b"\x1f");
+    hasher.update(event.parent_process.as_deref().unwrap_or(""));
+    hasher.update(b"\x1f");
+    hasher.update(event.prev_hash.as_deref().unwrap_or(""));
+
+    hex_encode(&hasher.finalize())
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 #[cfg(test)]
@@ -214,6 +318,8 @@ mod tests {
         // Most recent first
         assert_eq!(recent[0].command, "git push origin main");
         assert_eq!(recent[1].command, "cat foo.txt");
+        assert_eq!(recent[0].schema_version, 2);
+        assert!(recent[0].event_hash.is_some());
     }
 
     #[test]
@@ -289,6 +395,8 @@ mod tests {
             got.parent_process.as_deref(),
             Some("/usr/local/bin/python3")
         );
+        assert_eq!(got.schema_version, 2);
+        assert!(got.event_hash.is_some());
     }
 
     #[test]
@@ -313,5 +421,27 @@ mod tests {
         assert!(got.agent_name.is_none());
         assert!(got.user_response_ms.is_none());
         assert!(got.parent_process.is_none());
+    }
+
+    #[test]
+    fn events_are_hash_chained() {
+        let store = AuditStore::in_memory().unwrap();
+
+        store
+            .log_event(&make_event("allow", "allowed", "ls"))
+            .unwrap();
+        store
+            .log_event(&make_event("block", "blocked", "rm -rf /"))
+            .unwrap();
+
+        let recent = store.recent(10).unwrap();
+        let newest = &recent[0];
+        let oldest = &recent[1];
+
+        assert!(oldest.prev_hash.is_none());
+        assert!(oldest.event_hash.is_some());
+        assert_eq!(newest.prev_hash, oldest.event_hash);
+        assert!(newest.event_hash.is_some());
+        assert_ne!(newest.event_hash, oldest.event_hash);
     }
 }
