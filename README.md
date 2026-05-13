@@ -1,16 +1,34 @@
 # Agentbox
 
-**Local-first guarded runtime for coding agents.** Agentbox gives AI coding agents a task-scoped execution cell on your machine, then wraps that cell with command interception, policy checks, out-of-band approval, and a local audit trail.
+**Local-first governed micro-runtime for autonomous agents.** Agentbox gives
+agents a task-scoped local minipod on your machine, then wraps that minipod with
+filesystem, network, credential, policy, approval, and evidence boundaries.
 
-The wedge is not "2FA for agents" and it is not a generic Docker wrapper. It is a lightweight guarded runtime for agent work: intercept the commands that can mutate the outside world, let safe operations pass through, require approval for risky operations, block destructive operations outright, and keep the run inspectable afterward.
+The wedge is not "2FA for agents" and it is not a generic Docker wrapper. The
+problem is that people run autonomous agents on their real machines, then buy
+separate hardware when they stop trusting those agents with local files,
+credentials, browser state, cloud CLIs, databases, deploys, or production
+repos. Agentbox aims to make that separation available locally as software.
 
-The validated core today is the control loop: **task environment -> shim -> daemon -> policy -> approval -> audit**. Local Podman minipods are the product direction and are currently experimental; phone approval is one transport inside the loop, not the whole product.
+The validated core today is the control loop: **shim -> daemon -> policy ->
+approval -> audit**. The product direction is broader: **agent task -> local
+minipod -> governed host boundary -> policy / approval / evidence**. Local
+Podman minipods are currently experimental until isolation, network, credential,
+and evidence behavior are proven end to end.
 
 ## Why
 
-AI agents (Claude Code, Codex, Cursor, Aider) run 24/7 on personal machines. Most developers choose between two bad defaults: let the agent run directly in their real shell and repo, or push the work into a heavy remote sandbox they do not control.
+Autonomous agents are no longer just coding helpers. Coding agents, browser
+agents, computer-use agents, personal workflow agents, DevOps agents, and
+general systems such as Aspendos-style agents all need to operate on local
+machines. Most users choose between two bad defaults: let the agent run directly
+in the real shell and home directory, or move the agent into a heavy remote
+sandbox they do not control.
 
-Agentbox aims at the missing local layer: a guarded, task-scoped runtime for agent work. A coding agent should be able to run in a small local execution cell with the right filesystem, services, and tools, while dangerous side effects still go through policy and audit before they touch the host.
+Agentbox aims at the missing local layer: a governed, task-scoped runtime for
+agent work. An agent should be able to run in a small local execution cell with
+the right workspace, services, and tools, while dangerous side effects still go
+through policy, approval, and audit before they touch the host.
 
 The interception primitive is what makes the sandbox agent-aware instead of just container-shaped. PATH-mediated calls to commands such as `git push`, `ssh`, `curl`, `psql`, or `rm` outside the workspace pass through the daemon. The classifier inspects the full context -- command name, arguments, current working directory, environment -- and routes to one of three buckets:
 
@@ -23,24 +41,24 @@ The policy engine ships with conservative defaults and supports local configurat
 ## How It Works
 
 ```
-Agent task
+Autonomous agent task
   |
-  +-- direct shell mode: your current workspace with Agentbox shims on PATH
+  +-- current validated mode: host workspace with Agentbox shims on PATH
   |
-  +-- experimental pod mode: local Podman minipod with mounted workspace/services
+  +-- product direction: local minipod with explicit boundaries
         |
         v
-PATH shim intercepts high-risk commands
+filesystem / network / credential / process / host-action boundary
         |
         v
-Rust daemon classifies with command + args + cwd + environment
+Rust daemon classifies command + args + cwd + environment + session policy
         |
         +--> ALLOW    pass through
         +--> APPROVE  ask out-of-band, then continue or deny
         +--> BLOCK    deny immediately
         |
         v
-SQLite audit log records the decision
+SQLite audit log and future evidence adapters record the decision
 ```
 
 **Three buckets, local policy:**
@@ -144,7 +162,11 @@ approval_timeout_secs = 120            # 30-600 seconds
 
 ## Guarded Minipods (Experimental Pod Runtime)
 
-Run agents in local Podman-backed minipods while still routing selected commands through Agentbox policy. This path exists in the CLI and Podman provider and is the product direction, but it should be treated as experimental. The most mature validated path today remains the shim -> daemon -> policy -> approval -> audit loop.
+Run agents in local Podman-backed minipods while routing selected host-impacting
+actions through Agentbox policy. This path exists in the CLI and Podman provider
+and is the product direction, but it should be treated as experimental. The most
+mature validated path today remains the shim -> daemon -> policy -> approval ->
+audit loop.
 
 ```bash
 # Run an agent in a sandbox
@@ -169,6 +191,18 @@ agentbox stop-pod sb-a1b2c3
 - Commands inside the pod still go through shim -> daemon -> policy check
 - Defense in depth: container isolation + command interception
 - Not bypass-proof yet; macOS Endpoint Security and protocol-level interception are roadmap items
+
+**What minipods still need before v0.2 is credible:**
+- persistent session lifecycle state
+- explicit mount, network, and credential policy
+- protected host path denial tests
+- smoke tests proving the shim and daemon socket work inside the minipod
+- evidence export for the full agent session
+- honest platform-specific bypass documentation
+
+See [docs/product-direction.md](docs/product-direction.md) and
+[docs/roadmap-100-issues.md](docs/roadmap-100-issues.md) for the current sprint
+direction.
 
 ## CLI Commands
 
