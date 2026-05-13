@@ -77,6 +77,10 @@ enum Commands {
         /// Resource limit: memory in MB (default: 1024)
         #[arg(long, default_value = "1024")]
         memory: u64,
+
+        /// Add a read-only host mount as host_path:guest_path
+        #[arg(long = "mount-ro")]
+        read_only_mounts: Vec<String>,
     },
     /// Stop and remove a minipod
     StopPod {
@@ -121,6 +125,10 @@ enum Commands {
         /// Network domain allowed without first-contact approval
         #[arg(long = "allow-domain")]
         allow_domains: Vec<String>,
+
+        /// Add a read-only host mount as host_path:guest_path
+        #[arg(long = "mount-ro")]
+        read_only_mounts: Vec<String>,
     },
     /// List runtime providers and their current implementation status
     Providers,
@@ -704,6 +712,7 @@ async fn cmd_run(
     services: Vec<String>,
     mount_cwd: bool,
     memory: u64,
+    read_only_mounts: Vec<String>,
 ) {
     use agentbox_daemon::audit::AuditStore;
     use agentbox_daemon::config;
@@ -803,6 +812,9 @@ async fn cmd_run(
         .iter()
         .filter_map(|service| service_spec(service))
         .collect();
+    for mount in read_only_mounts {
+        spec.filesystem.mounts.push(parse_read_only_mount(&mount));
+    }
 
     // 5. Print progress and create minipod through RuntimeManager
     let ws_image = spec
@@ -1612,7 +1624,12 @@ fn cmd_evidence(limit: usize) {
     }
 }
 
-fn cmd_minipod_spec(agent: String, workspace: Option<PathBuf>, allow_domains: Vec<String>) {
+fn cmd_minipod_spec(
+    agent: String,
+    workspace: Option<PathBuf>,
+    allow_domains: Vec<String>,
+    read_only_mounts: Vec<String>,
+) {
     use agentbox_daemon::runtime::policy::validate_minipod_spec;
     use agentbox_daemon::runtime::types::{MinipodSpec, NetworkMode};
 
@@ -1628,6 +1645,9 @@ fn cmd_minipod_spec(agent: String, workspace: Option<PathBuf>, allow_domains: Ve
         spec.network.mode = NetworkMode::AllowListed;
         spec.network.allowed_domains = allow_domains;
     }
+    for mount in read_only_mounts {
+        spec.filesystem.mounts.push(parse_read_only_mount(&mount));
+    }
 
     if let Err(e) = validate_minipod_spec(&spec) {
         eprintln!("error: generated minipod manifest is invalid: {}", e);
@@ -1638,6 +1658,27 @@ fn cmd_minipod_spec(agent: String, workspace: Option<PathBuf>, allow_domains: Ve
         "{}",
         serde_json::to_string_pretty(&spec).expect("failed to serialize minipod manifest")
     );
+}
+
+fn parse_read_only_mount(raw: &str) -> agentbox_daemon::runtime::types::MountRule {
+    use agentbox_daemon::runtime::types::{MountMode, MountRule};
+
+    let Some((host_path, guest_path)) = raw.split_once(':') else {
+        eprintln!("error: invalid --mount-ro value `{}`", raw);
+        eprintln!("hint: expected host_path:guest_path");
+        std::process::exit(1);
+    };
+    if host_path.trim().is_empty() || guest_path.trim().is_empty() {
+        eprintln!("error: invalid --mount-ro value `{}`", raw);
+        eprintln!("hint: host_path and guest_path must both be non-empty");
+        std::process::exit(1);
+    }
+
+    MountRule {
+        host_path: PathBuf::from(host_path),
+        guest_path: guest_path.to_string(),
+        mode: MountMode::ReadOnly,
+    }
 }
 
 fn cmd_providers() {
@@ -1864,7 +1905,18 @@ async fn main() {
             services,
             mount_cwd,
             memory,
-        } => cmd_run(command, runtime, services, mount_cwd, memory).await,
+            read_only_mounts,
+        } => {
+            cmd_run(
+                command,
+                runtime,
+                services,
+                mount_cwd,
+                memory,
+                read_only_mounts,
+            )
+            .await
+        }
         Commands::StopPod { pod_id } => cmd_stop_pod(pod_id).await,
         Commands::Pods => cmd_pods().await,
         Commands::Why => cmd_why(),
@@ -1875,7 +1927,8 @@ async fn main() {
             agent,
             workspace,
             allow_domains,
-        } => cmd_minipod_spec(agent, workspace, allow_domains),
+            read_only_mounts,
+        } => cmd_minipod_spec(agent, workspace, allow_domains, read_only_mounts),
         Commands::Providers => cmd_providers(),
         Commands::MinipodInspect { session_id, json } => cmd_minipod_inspect(session_id, json),
         Commands::MinipodLogs {
