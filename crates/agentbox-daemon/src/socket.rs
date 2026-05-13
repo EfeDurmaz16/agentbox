@@ -258,6 +258,7 @@ mod tests {
         Config {
             socket_path: socket_path.to_string(),
             db_path: ":memory:".to_string(),
+            session_store_path: ":memory:".to_string(),
             ntfy_topic: "test".to_string(),
             ntfy_server: "https://ntfy.sh".to_string(),
             approval_timeout_secs: 120,

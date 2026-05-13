@@ -28,6 +28,8 @@ pub enum ConfigError {
 pub struct Config {
     pub socket_path: String,
     pub db_path: String,
+    #[serde(default = "default_session_store_path")]
+    pub session_store_path: String,
     pub ntfy_topic: String,
     pub ntfy_server: String,
     pub approval_timeout_secs: u64,
@@ -59,6 +61,10 @@ impl Config {
         Self {
             socket_path: base.join("agentbox.sock").to_string_lossy().into_owned(),
             db_path: base.join("audit.db").to_string_lossy().into_owned(),
+            session_store_path: base
+                .join("runtime-sessions.json")
+                .to_string_lossy()
+                .into_owned(),
             ntfy_topic: format!("agentbox-{random_id}"),
             ntfy_server: "https://ntfy.sh".to_string(),
             approval_timeout_secs: 120,
@@ -92,6 +98,13 @@ pub fn config_dir() -> PathBuf {
     dirs::home_dir()
         .expect("could not determine home directory")
         .join(".agentbox")
+}
+
+fn default_session_store_path() -> String {
+    config_dir()
+        .join("runtime-sessions.json")
+        .to_string_lossy()
+        .into_owned()
 }
 
 /// Creates ~/.agentbox/ and ~/.agentbox/shims/ if they don't exist.
@@ -178,6 +191,7 @@ mod tests {
         assert!(config.ntfy_topic.starts_with("agentbox-"));
         assert!(config.socket_path.ends_with("agentbox.sock"));
         assert!(config.db_path.ends_with("audit.db"));
+        assert!(config.session_store_path.ends_with("runtime-sessions.json"));
         assert!(config.shim_dir.ends_with("shims"));
         assert!(config.validate().is_ok());
 
@@ -209,6 +223,7 @@ mod tests {
         let custom = Config {
             socket_path: "/tmp/custom.sock".to_string(),
             db_path: "/tmp/custom.db".to_string(),
+            session_store_path: "/tmp/runtime-sessions.json".to_string(),
             ntfy_topic: "my-topic".to_string(),
             ntfy_server: "https://my-ntfy.example.com".to_string(),
             approval_timeout_secs: 60,
@@ -226,6 +241,7 @@ mod tests {
         let loaded = load_from(&base).unwrap();
         assert_eq!(loaded, custom);
         assert_eq!(loaded.approval_timeout_secs, 60);
+        assert_eq!(loaded.session_store_path, "/tmp/runtime-sessions.json");
         assert_eq!(loaded.workspace.as_deref(), Some("/tmp/workspace"));
         assert_eq!(loaded.allowed_domains.len(), 2);
         assert_eq!(loaded.always_allow, vec!["git status"]);
@@ -243,6 +259,7 @@ mod tests {
         let bad_toml = r#"
 socket_path = "/tmp/test.sock"
 db_path = "/tmp/test.db"
+session_store_path = "/tmp/runtime-sessions.json"
 ntfy_topic = "test"
 ntfy_server = "https://ntfy.sh"
 approval_timeout_secs = 5
