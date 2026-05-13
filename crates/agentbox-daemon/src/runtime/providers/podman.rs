@@ -134,7 +134,7 @@ fn minipod_to_pod_spec(spec: &MinipodSpec) -> PodSpec {
 
     let mut containers = vec![ContainerSpec {
         name: "workspace".to_string(),
-        image: "ubuntu:24.04".to_string(),
+        image: workspace_image(spec),
         command: Some(spec.agent.command.clone()),
         env: HashMap::new(),
         ports: vec![],
@@ -172,6 +172,13 @@ fn minipod_to_pod_spec(spec: &MinipodSpec) -> PodSpec {
         timeout_seconds: spec.resources.timeout_seconds,
         labels,
     }
+}
+
+fn workspace_image(spec: &MinipodSpec) -> String {
+    spec.labels
+        .get("agentbox.runtime_image")
+        .cloned()
+        .unwrap_or_else(|| "ubuntu:24.04".to_string())
 }
 
 fn pod_session_to_runtime_session(session: PodSession, spec: MinipodSpec) -> RuntimeSession {
@@ -248,6 +255,7 @@ mod tests {
 
         assert_eq!(pod_spec.name, spec.name);
         assert_eq!(pod_spec.containers[0].name, "workspace");
+        assert_eq!(pod_spec.containers[0].image, "ubuntu:24.04");
         assert_eq!(
             pod_spec.containers[0].command,
             Some(vec!["hermes".to_string()])
@@ -256,6 +264,19 @@ mod tests {
         assert_eq!(pod_spec.network.allow_domains, vec!["api.openai.com"]);
         assert_eq!(pod_spec.labels.get("agentbox.session"), Some(&spec.id));
         assert_eq!(pod_spec.labels.get("purpose"), Some(&"test".to_string()));
+    }
+
+    #[test]
+    fn runtime_image_label_selects_workspace_image() {
+        let mut spec = MinipodSpec::for_agent_task("node", "/tmp/workspace");
+        spec.labels.insert(
+            "agentbox.runtime_image".to_string(),
+            "node:22-bookworm".to_string(),
+        );
+
+        let pod_spec = minipod_to_pod_spec(&spec);
+
+        assert_eq!(pod_spec.containers[0].image, "node:22-bookworm");
     }
 
     #[test]

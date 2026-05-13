@@ -705,11 +705,13 @@ async fn cmd_run(
     mount_cwd: bool,
     memory: u64,
 ) {
-    use agentbox_daemon::pod::intent::IntentParser;
+    use agentbox_daemon::audit::AuditStore;
+    use agentbox_daemon::config;
     use agentbox_daemon::pod::machine::MachineManager;
-    use agentbox_daemon::pod::podman::PodmanProvider;
-    use agentbox_daemon::pod::provider::PodProvider;
-    use agentbox_daemon::pod::types::{ExecRequest, MountSpec};
+    use agentbox_daemon::runtime::manager::RuntimeManager;
+    use agentbox_daemon::runtime::registry::RuntimeProviderRegistry;
+    use agentbox_daemon::runtime::session::RuntimeSessionStore;
+    use agentbox_daemon::runtime::types::{ExecCommand, MinipodSpec, ResourcePolicy};
 
     // 1. Check if podman is available
     match Command::new("podman").arg("--version").output() {
@@ -737,7 +739,7 @@ async fn cmd_run(
         }
     }
 
-    // 3. Create PodmanProvider
+    // 3. Create RuntimeManager with the Podman RuntimeProvider adapter
     let agentbox_sock = socket_path().to_string_lossy().to_string();
     let shim_binary = find_shim_binary()
         .map(|p| p.to_string_lossy().to_string())
@@ -747,99 +749,128 @@ async fn cmd_run(
             String::new()
         });
 
-    let provider = PodmanProvider::new(agentbox_sock.clone(), shim_binary.clone());
-
-    // 4. Generate pod ID via ulid (first 12 chars for readability)
-    let pod_id = ulid::Ulid::new().to_string().to_lowercase();
-    let pod_id_short = &pod_id[..12];
-
-    // 5. Build PodSpec
-    let parser = IntentParser::new();
-    let mut spec = parser.from_run_args(&command, runtime.as_deref(), &services, memory);
-    spec.name = format!("sb-{}", pod_id_short);
-
-    // 6. Add critical mounts
-    if mount_cwd {
-        if let Ok(cwd) = std::env::current_dir() {
-            spec.mounts.push(MountSpec {
-                host_path: cwd,
-                container_path: "/workspace".to_string(),
-                read_only: false,
-            });
-        }
-    }
-
-    let sock = socket_path();
-    spec.mounts.push(MountSpec {
-        host_path: sock,
-        container_path: "/run/agentbox.sock".to_string(),
-        read_only: true,
+    let config = config::load().unwrap_or_else(|e| {
+        eprintln!("Error: failed to load Agentbox config: {}", e);
+        std::process::exit(1);
     });
+    let registry = RuntimeProviderRegistry::with_local_providers(agentbox_sock, shim_binary);
+    let provider = registry.get("podman").unwrap_or_else(|e| {
+        eprintln!("Error: failed to resolve Podman runtime provider: {}", e);
+        std::process::exit(1);
+    });
+    let manager = RuntimeManager::new(
+        provider,
+        RuntimeSessionStore::new(config.session_store_path.clone()),
+        AuditStore::new(&config.db_path).unwrap_or_else(|e| {
+            eprintln!("Error: failed to open audit store: {}", e);
+            std::process::exit(1);
+        }),
+    );
 
-    if !shim_binary.is_empty() {
-        spec.mounts.push(MountSpec {
-            host_path: PathBuf::from(&shim_binary),
-            container_path: "/usr/local/bin/agentbox-shim".to_string(),
-            read_only: true,
-        });
+    // 4. Build governed MinipodSpec
+    let workspace = if mount_cwd {
+        std::env::current_dir().unwrap_or_else(|e| {
+            eprintln!("Error: failed to determine current directory: {}", e);
+            std::process::exit(1);
+        })
+    } else {
+        std::env::temp_dir()
+    };
+    let agent_name = command
+        .first()
+        .cloned()
+        .or_else(|| runtime.clone())
+        .unwrap_or_else(|| "agent".to_string());
+    let mut spec = MinipodSpec::for_agent_task(agent_name, workspace);
+    spec.agent.command = if command.is_empty() {
+        vec!["sleep".to_string(), "infinity".to_string()]
+    } else {
+        command.clone()
+    };
+    spec.resources = ResourcePolicy {
+        memory_bytes: memory * 1024 * 1024,
+        ..ResourcePolicy::default()
+    };
+    if let Some(runtime) = runtime.as_deref() {
+        spec.labels
+            .insert("agentbox.runtime".to_string(), runtime.to_string());
+        spec.labels.insert(
+            "agentbox.runtime_image".to_string(),
+            runtime_image(runtime).to_string(),
+        );
     }
+    spec.services = services
+        .iter()
+        .filter_map(|service| service_spec(service))
+        .collect();
 
-    // 7. Print progress and create pod
-    let ws_image = spec.containers[0].image.clone();
+    // 5. Print progress and create minipod through RuntimeManager
+    let ws_image = spec
+        .labels
+        .get("agentbox.runtime_image")
+        .cloned()
+        .unwrap_or_else(|| "ubuntu:24.04".to_string());
     println!("Creating governed minipod {}...", spec.name);
     println!("  Image: {}", ws_image);
 
-    if spec.containers.len() > 1 {
-        let sidecars: Vec<String> = spec.containers[1..]
+    if !spec.services.is_empty() {
+        let sidecars: Vec<String> = spec
+            .services
             .iter()
-            .map(|c| format!("{} ({})", c.name, c.image))
+            .map(|service| format!("{} ({})", service.name, service.image))
             .collect();
         println!("  Sidecars: {}", sidecars.join(", "));
     }
 
-    for m in &spec.mounts {
-        let ro = if m.read_only { " (ro)" } else { "" };
+    println!(
+        "  Mount: {} -> {} (rw)",
+        spec.filesystem.workspace_host_path.display(),
+        spec.filesystem.workspace_guest_path
+    );
+    for mount in &spec.filesystem.mounts {
+        let ro = if matches!(
+            mount.mode,
+            agentbox_daemon::runtime::types::MountMode::ReadOnly
+        ) {
+            " (ro)"
+        } else {
+            " (rw)"
+        };
         println!(
             "  Mount: {} -> {}{}",
-            m.host_path.display(),
-            m.container_path,
+            mount.host_path.display(),
+            mount.guest_path,
             ro
         );
     }
 
-    if !spec.env.is_empty() {
-        for (k, v) in &spec.env {
-            println!("  Env: {}={}", k, v);
-        }
-    }
-
     println!("  Agentbox: socket + shims injected");
 
-    let pod_name = spec.name.clone();
-    match provider.create(pod_id_short, &spec).await {
-        Ok(_session) => {
-            println!("Minipod {} created and running.", pod_name);
+    let session = match manager.create(&spec).await {
+        Ok(session) => {
+            println!("Minipod {} created and running.", session.name);
+            session
         }
         Err(e) => {
-            eprintln!("Error: failed to create pod: {}", e);
+            eprintln!("Error: failed to create minipod: {}", e);
             std::process::exit(1);
         }
-    }
+    };
 
-    // 8. If command was provided, run it
+    // 6. If command was provided, run it
     if !command.is_empty() {
         println!();
         println!("Running: {}", command.join(" "));
         println!("--- output ---");
 
-        let exec_req = ExecRequest {
-            command: command.clone(),
+        let exec_req = ExecCommand {
+            argv: command.clone(),
             working_dir: Some("/workspace".to_string()),
             env: HashMap::new(),
             timeout_seconds: None,
         };
 
-        match provider.exec(pod_id_short, &exec_req).await {
+        match manager.exec(&session.id, &exec_req).await {
             Ok(result) => {
                 if !result.stdout.is_empty() {
                     print!("{}", result.stdout);
@@ -850,19 +881,19 @@ async fn cmd_run(
                 println!("--- exit code: {} ---", result.exit_code);
 
                 // Cleanup prompt
-                eprint!("Destroy minipod {}? [Y/n] ", pod_name);
+                eprint!("Destroy minipod {}? [Y/n] ", session.name);
                 io::stderr().flush().ok();
                 let mut input = String::new();
                 if io::stdin().read_line(&mut input).is_ok() {
                     let answer = input.trim().to_lowercase();
                     if answer.is_empty() || answer == "y" || answer == "yes" {
-                        if let Err(e) = provider.destroy(pod_id_short).await {
-                            eprintln!("Warning: failed to destroy pod: {}", e);
+                        if let Err(e) = manager.destroy(&session.id).await {
+                            eprintln!("Warning: failed to destroy minipod: {}", e);
                         } else {
-                            println!("Minipod {} destroyed.", pod_name);
+                            println!("Minipod {} destroyed.", session.name);
                         }
                     } else {
-                        println!("Minipod {} left running.", pod_name);
+                        println!("Minipod {} left running.", session.name);
                     }
                 }
 
@@ -876,14 +907,41 @@ async fn cmd_run(
             }
         }
     } else {
-        // 9. No command: print interactive instructions
+        // 7. No command: print interactive instructions
         println!();
         println!("Minipod running. Connect with:");
-        println!("  podman exec -it {}-workspace bash", pod_name);
+        println!("  podman exec -it sb-{}-workspace bash", session.id);
         println!();
         println!("Stop with:");
-        println!("  agentbox stop-pod {}", pod_name);
+        println!("  agentbox stop-pod {}", session.id);
     }
+}
+
+fn runtime_image(runtime: &str) -> &'static str {
+    match runtime {
+        "node" => "node:22-bookworm",
+        "python" => "python:3.12-slim",
+        "rust" => "rust:1.82-slim",
+        "go" => "golang:1.23-bookworm",
+        "ruby" => "ruby:3.3-slim",
+        _ => "ubuntu:24.04",
+    }
+}
+
+fn service_spec(service: &str) -> Option<agentbox_daemon::runtime::types::ServiceSpec> {
+    let image = match service {
+        "postgres" => "postgres:16-alpine",
+        "redis" => "redis:7-alpine",
+        "mysql" => "mysql:8",
+        "mongo" => "mongo:7",
+        _ => return None,
+    };
+
+    Some(agentbox_daemon::runtime::types::ServiceSpec {
+        name: service.to_string(),
+        image: image.to_string(),
+        env: HashMap::new(),
+    })
 }
 
 async fn cmd_stop_pod(pod_id: String) {
