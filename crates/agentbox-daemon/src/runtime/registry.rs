@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use crate::runtime::provider::{RuntimeError, RuntimeProvider};
+use crate::runtime::providers::native::{NativeProvider, NativeProviderKind};
 
 #[derive(Default)]
 pub struct RuntimeProviderRegistry {
@@ -50,6 +51,14 @@ impl RuntimeProviderRegistry {
             .as_deref()
             .ok_or_else(|| RuntimeError::Unavailable("no runtime provider registered".into()))?;
         self.get(name)
+    }
+
+    pub fn with_native_descriptors() -> Self {
+        let mut registry = Self::new();
+        registry.register(Arc::new(NativeProvider::new(NativeProviderKind::MacOs)));
+        registry.register(Arc::new(NativeProvider::new(NativeProviderKind::Linux)));
+        registry.register(Arc::new(NativeProvider::new(NativeProviderKind::Windows)));
+        registry
     }
 }
 
@@ -145,5 +154,16 @@ mod tests {
         };
 
         assert!(matches!(err, RuntimeError::Unavailable(_)));
+    }
+
+    #[test]
+    fn native_descriptors_are_registered_without_claiming_availability() {
+        let registry = RuntimeProviderRegistry::with_native_descriptors();
+
+        assert_eq!(
+            registry.names(),
+            vec!["native-linux", "native-macos", "native-windows"]
+        );
+        assert_eq!(registry.get("native-macos").unwrap().platform(), "macos");
     }
 }

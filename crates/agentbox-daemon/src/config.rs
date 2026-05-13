@@ -30,6 +30,8 @@ pub struct Config {
     pub db_path: String,
     #[serde(default = "default_session_store_path")]
     pub session_store_path: String,
+    #[serde(default = "default_runtime_provider")]
+    pub runtime_provider: String,
     pub ntfy_topic: String,
     pub ntfy_server: String,
     pub approval_timeout_secs: u64,
@@ -65,6 +67,7 @@ impl Config {
                 .join("runtime-sessions.json")
                 .to_string_lossy()
                 .into_owned(),
+            runtime_provider: default_runtime_provider(),
             ntfy_topic: format!("agentbox-{random_id}"),
             ntfy_server: "https://ntfy.sh".to_string(),
             approval_timeout_secs: 120,
@@ -105,6 +108,10 @@ fn default_session_store_path() -> String {
         .join("runtime-sessions.json")
         .to_string_lossy()
         .into_owned()
+}
+
+fn default_runtime_provider() -> String {
+    "auto".to_string()
 }
 
 /// Creates ~/.agentbox/ and ~/.agentbox/shims/ if they don't exist.
@@ -184,6 +191,7 @@ mod tests {
         assert_eq!(config.approval_timeout_secs, 120);
         assert_eq!(config.ntfy_server, "https://ntfy.sh");
         assert_eq!(config.log_level, "info");
+        assert_eq!(config.runtime_provider, "auto");
         assert!(config.workspace.is_none());
         assert!(config.allowed_domains.is_empty());
         assert!(config.always_allow.is_empty());
@@ -224,6 +232,7 @@ mod tests {
             socket_path: "/tmp/custom.sock".to_string(),
             db_path: "/tmp/custom.db".to_string(),
             session_store_path: "/tmp/runtime-sessions.json".to_string(),
+            runtime_provider: "podman".to_string(),
             ntfy_topic: "my-topic".to_string(),
             ntfy_server: "https://my-ntfy.example.com".to_string(),
             approval_timeout_secs: 60,
@@ -242,6 +251,7 @@ mod tests {
         assert_eq!(loaded, custom);
         assert_eq!(loaded.approval_timeout_secs, 60);
         assert_eq!(loaded.session_store_path, "/tmp/runtime-sessions.json");
+        assert_eq!(loaded.runtime_provider, "podman");
         assert_eq!(loaded.workspace.as_deref(), Some("/tmp/workspace"));
         assert_eq!(loaded.allowed_domains.len(), 2);
         assert_eq!(loaded.always_allow, vec!["git status"]);
@@ -260,6 +270,7 @@ mod tests {
 socket_path = "/tmp/test.sock"
 db_path = "/tmp/test.db"
 session_store_path = "/tmp/runtime-sessions.json"
+runtime_provider = "auto"
 ntfy_topic = "test"
 ntfy_server = "https://ntfy.sh"
 approval_timeout_secs = 5
