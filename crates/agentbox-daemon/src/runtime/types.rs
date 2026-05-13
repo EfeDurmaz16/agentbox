@@ -173,6 +173,40 @@ impl Default for ResourcePolicy {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FileAccessMode {
+    Read,
+    Write,
+    ReadWrite,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ApprovalScope {
+    Once,
+    Command {
+        binary: String,
+        args_prefix: Vec<String>,
+    },
+    Path {
+        path: PathBuf,
+        access: FileAccessMode,
+    },
+    Domain {
+        domain: String,
+    },
+    Session {
+        session_id: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApprovalGrant {
+    pub id: String,
+    pub scope: ApprovalScope,
+    pub reason: String,
+    pub expires_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentProfile {
     pub name: String,
     pub kind: String,
@@ -378,5 +412,45 @@ mod tests {
         let mount: MountRule = serde_json::from_value(json).unwrap();
 
         assert!(matches!(mount.kind, MountKind::ReadOnlyHost));
+    }
+
+    #[test]
+    fn approval_scope_models_sensitive_file_access() {
+        let grant = ApprovalGrant {
+            id: "grant-1".to_string(),
+            scope: ApprovalScope::Path {
+                path: "/tmp/secret.env".into(),
+                access: FileAccessMode::Read,
+            },
+            reason: "agent needs one config file".to_string(),
+            expires_at: None,
+        };
+
+        assert!(matches!(
+            grant.scope,
+            ApprovalScope::Path {
+                access: FileAccessMode::Read,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn approval_scope_serializes_command_and_session_scopes() {
+        let scopes = vec![
+            ApprovalScope::Once,
+            ApprovalScope::Command {
+                binary: "cat".into(),
+                args_prefix: vec!["/tmp/secret.env".into()],
+            },
+            ApprovalScope::Session {
+                session_id: "session-1".into(),
+            },
+        ];
+
+        let encoded = serde_json::to_string(&scopes).unwrap();
+        let decoded: Vec<ApprovalScope> = serde_json::from_str(&encoded).unwrap();
+
+        assert_eq!(decoded, scopes);
     }
 }
