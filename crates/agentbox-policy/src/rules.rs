@@ -4,10 +4,8 @@ use crate::classify::{Bucket, Classification, CommandContext, PolicyConfig};
 fn extract_domain(url: &str) -> Option<String> {
     let without_scheme = if let Some(rest) = url.strip_prefix("https://") {
         rest
-    } else if let Some(rest) = url.strip_prefix("http://") {
-        rest
     } else {
-        return None;
+        url.strip_prefix("http://")?
     };
     let host_port = without_scheme.split('/').next().unwrap_or(without_scheme);
     let host_port = host_port.split('?').next().unwrap_or(host_port);
@@ -130,17 +128,16 @@ pub fn check_block(ctx: &CommandContext, config: &PolicyConfig) -> Option<Classi
                 });
             }
         }
-        "mkfs" | "diskutil" => {
+        "mkfs" | "diskutil"
             if args_joined.contains("eraseDisk")
                 || args_joined.contains("eraseVolume")
-                || ctx.binary == "mkfs"
-            {
-                return Some(Classification {
-                    bucket: Bucket::Block,
-                    reason: "disk format/erase command".into(),
-                    notification_summary: None,
-                });
-            }
+                || ctx.binary == "mkfs" =>
+        {
+            return Some(Classification {
+                bucket: Bucket::Block,
+                reason: "disk format/erase command".into(),
+                notification_summary: None,
+            });
         }
         "csrutil" | "spctl" => {
             return Some(Classification {
@@ -276,17 +273,15 @@ pub fn check_approve(ctx: &CommandContext, config: &PolicyConfig) -> Option<Clas
                 notification_summary: Some(format!("Agent wants to make HTTP request to {}", url)),
             });
         }
-        "npm" | "cargo" | "gem" => {
-            if ctx.args.first().map(|s| s.as_str()) == Some("publish") {
-                return Some(Classification {
-                    bucket: Bucket::Approve,
-                    reason: "package publish".into(),
-                    notification_summary: Some(format!(
-                        "Agent wants to publish package via {}",
-                        ctx.binary
-                    )),
-                });
-            }
+        "npm" | "cargo" | "gem" if ctx.args.first().map(|s| s.as_str()) == Some("publish") => {
+            return Some(Classification {
+                bucket: Bucket::Approve,
+                reason: "package publish".into(),
+                notification_summary: Some(format!(
+                    "Agent wants to publish package via {}",
+                    ctx.binary
+                )),
+            });
         }
         "osascript" => {
             return Some(Classification {
