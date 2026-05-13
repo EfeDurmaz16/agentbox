@@ -172,6 +172,9 @@ audit loop.
 # Run an agent in a sandbox
 agentbox run "openclaw start"
 
+# Generate the governed minipod manifest without starting a backend
+agentbox minipod-spec hermes --workspace . --allow-domain api.openai.com
+
 # With specific runtime and services
 agentbox run --runtime node --with postgres "npm test"
 
@@ -193,16 +196,15 @@ agentbox stop-pod sb-a1b2c3
 - Not bypass-proof yet; macOS Endpoint Security and protocol-level interception are roadmap items
 
 **What minipods still need before v0.2 is credible:**
-- persistent session lifecycle state
-- explicit mount, network, and credential policy
+- real backend wiring through the new runtime manager
+- provider conformance tests for Podman and future native providers
 - protected host path denial tests
 - smoke tests proving the shim and daemon socket work inside the minipod
-- evidence export for the full agent session
 - honest platform-specific bypass documentation
 
 See [docs/product-direction.md](docs/product-direction.md) and
-[docs/roadmap-100-issues.md](docs/roadmap-100-issues.md) for the current sprint
-direction.
+[docs/status-matrix.md](docs/status-matrix.md) for current shipped status, and
+[docs/roadmap-100-issues.md](docs/roadmap-100-issues.md) for the current sprint direction.
 
 ## CLI Commands
 
@@ -218,6 +220,9 @@ agentbox audit           # Query audit log (last 20 events)
 agentbox history         # Rich timeline view with stats
 agentbox why             # Explain the last block/deny
 agentbox policy          # Show current policy posture
+agentbox doctor          # Local readiness check for daemon, shims, audit, and providers
+agentbox evidence        # Export audit/evidence JSONL
+agentbox minipod-spec    # Generate and validate a governed minipod manifest
 
 agentbox run <command>   # Run agent in a guarded local minipod
 agentbox pods            # List running minipods
@@ -282,7 +287,7 @@ agentbox/
 | Phase | What | Status |
 |-------|------|--------|
 | v0.1 | PATH shim daemon + phone approval | Done |
-| v0.2 | Guarded minipod runtime (podman) | Experimental |
+| v0.2 | Guarded minipod runtime spine | In progress |
 | v0.3 | Context-rich policy engine | Done |
 | v1.0 | macOS Endpoint Security (kernel-level, bypass-proof) | Planned |
 | v1.5 | MCP Governance Proxy (protocol-level interception) | Planned |
@@ -306,7 +311,7 @@ Agentbox: **local-first, agent-aware, policy-bound, audit-first minipods.**
 - **DB:** SQLite (rusqlite, r2d2 pool, WAL mode)
 - **IPC:** Unix domain socket, JSON
 - **Notifications:** ntfy (free, self-hostable)
-- **Containers:** Podman (rootless, daemonless)
+- **Runtime:** Provider abstraction with experimental Podman path and planned native backends
 - **Build:** Cargo workspace (5 crates)
 
 ## License
