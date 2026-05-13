@@ -207,6 +207,8 @@ See [docs/product-direction.md](docs/product-direction.md) and
 [docs/roadmap-100-issues.md](docs/roadmap-100-issues.md) for the current sprint direction.
 For macOS specifically, see
 [docs/macos-minipod-limitations.md](docs/macos-minipod-limitations.md).
+For file boundaries, see
+[docs/safe-file-sharing.md](docs/safe-file-sharing.md).
 
 ## CLI Commands
 

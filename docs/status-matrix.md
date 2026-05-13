@@ -54,3 +54,5 @@ not depend on it as the only enforcement layer.
 
 See [macOS minipod limitations](macos-minipod-limitations.md) for the current
 VM-backed boundary and native enforcement gap.
+See [safe file sharing](safe-file-sharing.md) for current workspace, read-only
+mount, credential, and system bridge guidance.
