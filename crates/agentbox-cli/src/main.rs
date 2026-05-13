@@ -103,6 +103,12 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
+    /// Export tamper-evident audit events as JSONL
+    Evidence {
+        /// Number of events to export
+        #[arg(long, default_value_t = 100)]
+        limit: usize,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -1460,6 +1466,79 @@ fn cmd_history(show_all: bool, bucket_filter: Option<String>, json_output: bool)
     }
 }
 
+fn cmd_evidence(limit: usize) {
+    let db_path = audit_db_path();
+    if !db_path.exists() {
+        eprintln!("no audit log found at {}", db_path.display());
+        eprintln!("hint: start the daemon first with `agentbox start`");
+        std::process::exit(1);
+    }
+
+    let conn = Connection::open(&db_path).expect("failed to open audit db");
+    ensure_evidence_columns(&conn);
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, schema_version, timestamp, agent_pid, agent_name, command, cwd,
+                    bucket, decision, user_response_ms, parent_process, prev_hash, event_hash
+             FROM audit_log
+             ORDER BY timestamp ASC
+             LIMIT ?1",
+        )
+        .expect("failed to prepare evidence query");
+
+    let rows = stmt
+        .query_map([limit as i64], |row| {
+            Ok(serde_json::json!({
+                "id": row.get::<_, String>(0)?,
+                "schema_version": row.get::<_, i64>(1)?,
+                "timestamp": row.get::<_, String>(2)?,
+                "agent_pid": row.get::<_, i64>(3)?,
+                "agent_name": row.get::<_, Option<String>>(4)?,
+                "command": row.get::<_, String>(5)?,
+                "cwd": row.get::<_, String>(6)?,
+                "bucket": row.get::<_, String>(7)?,
+                "decision": row.get::<_, String>(8)?,
+                "user_response_ms": row.get::<_, Option<i64>>(9)?,
+                "parent_process": row.get::<_, Option<String>>(10)?,
+                "prev_hash": row.get::<_, Option<String>>(11)?,
+                "event_hash": row.get::<_, Option<String>>(12)?,
+            }))
+        })
+        .expect("failed to query evidence");
+
+    for row in rows {
+        match row {
+            Ok(value) => println!("{}", value),
+            Err(e) => {
+                eprintln!("failed to read evidence row: {}", e);
+                std::process::exit(1);
+            }
+        }
+    }
+}
+
+fn ensure_evidence_columns(conn: &Connection) {
+    let columns: Vec<String> = conn
+        .prepare("PRAGMA table_info(audit_log)")
+        .and_then(|mut stmt| {
+            let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
+            rows.collect::<std::result::Result<Vec<_>, _>>()
+        })
+        .unwrap_or_default();
+
+    if !columns.iter().any(|c| c == "schema_version") {
+        let _ = conn.execute_batch(
+            "ALTER TABLE audit_log ADD COLUMN schema_version INTEGER NOT NULL DEFAULT 1;",
+        );
+    }
+    if !columns.iter().any(|c| c == "prev_hash") {
+        let _ = conn.execute_batch("ALTER TABLE audit_log ADD COLUMN prev_hash TEXT;");
+    }
+    if !columns.iter().any(|c| c == "event_hash") {
+        let _ = conn.execute_batch("ALTER TABLE audit_log ADD COLUMN event_hash TEXT;");
+    }
+}
+
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
@@ -1488,5 +1567,6 @@ async fn main() {
         Commands::Why => cmd_why(),
         Commands::Policy => cmd_policy(),
         Commands::History { all, bucket, json } => cmd_history(all, bucket, json),
+        Commands::Evidence { limit } => cmd_evidence(limit),
     }
 }
