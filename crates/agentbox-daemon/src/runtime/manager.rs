@@ -1,8 +1,12 @@
 use std::sync::Arc;
 
+use agentbox_policy::classify::{self, Bucket, PolicyConfig};
 use chrono::Utc;
 
 use crate::audit::{AuditEvent, AuditStore};
+use crate::runtime::approval::{
+    command_context_for_session, consume_once_grant, grant_matches_command,
+};
 use crate::runtime::policy::validate_minipod_spec;
 use crate::runtime::provider::{RuntimeError, RuntimeProvider};
 use crate::runtime::session::RuntimeSessionStore;
@@ -66,15 +70,24 @@ impl RuntimeManager {
         session_id: &str,
         command: &ExecCommand,
     ) -> Result<CommandResult, RuntimeError> {
-        let session = self
+        let mut session = self
             .sessions
             .get(session_id)
             .map_err(|e| RuntimeError::Internal(e.to_string()))?
             .ok_or_else(|| RuntimeError::NotFound(session_id.to_string()))?;
 
+        let grant_id = self.enforce_exec_policy(&mut session, command)?;
+        if grant_id.is_some() {
+            self.sessions
+                .upsert(session.clone())
+                .map_err(|e| RuntimeError::Internal(e.to_string()))?;
+        }
+
         let result = self.provider.exec(session_id, command).await?;
         let command_text = format!("runtime.exec {} {}", session_id, command.argv.join(" "));
-        let decision = format!("exit_code:{}", result.exit_code);
+        let decision = grant_id
+            .map(|grant_id| format!("grant:{grant_id}:exit_code:{}", result.exit_code))
+            .unwrap_or_else(|| format!("exit_code:{}", result.exit_code));
 
         self.audit_runtime_event(
             &command_text,
@@ -189,6 +202,55 @@ impl RuntimeManager {
         self.sessions
             .list()
             .map_err(|e| RuntimeError::Internal(e.to_string()))
+    }
+
+    fn enforce_exec_policy(
+        &self,
+        session: &mut RuntimeSession,
+        command: &ExecCommand,
+    ) -> Result<Option<String>, RuntimeError> {
+        if command.argv.is_empty() {
+            return Err(RuntimeError::ManifestRejected(
+                "exec command cannot be empty".into(),
+            ));
+        }
+
+        let ctx = command_context_for_session(session, command);
+        let classification = classify::classify(
+            &ctx,
+            &PolicyConfig {
+                workspace: command
+                    .working_dir
+                    .clone()
+                    .or_else(|| Some(session.spec.filesystem.workspace_guest_path.clone())),
+                allowed_domains: session.spec.network.allowed_domains.clone(),
+                always_allow: vec![],
+                always_block: vec![],
+            },
+        );
+
+        match classification.bucket {
+            Bucket::Allow => Ok(None),
+            Bucket::Block => Err(RuntimeError::PolicyDenied(format!(
+                "blocked by runtime policy: {}",
+                classification.reason
+            ))),
+            Bucket::Approve => {
+                let grant_id = session
+                    .approval_grants
+                    .iter()
+                    .find(|grant| grant_matches_command(grant, session, command))
+                    .map(|grant| grant.id.clone())
+                    .ok_or_else(|| {
+                        RuntimeError::PolicyDenied(format!(
+                            "approval required by runtime policy: {}",
+                            classification.reason
+                        ))
+                    })?;
+                consume_once_grant(&mut session.approval_grants, &grant_id);
+                Ok(Some(grant_id))
+            }
+        }
     }
 
     fn audit_runtime_event(
@@ -363,6 +425,121 @@ mod tests {
         assert_eq!(audit[0].decision, "exit_code:0");
         assert!(audit[0].command.contains("runtime.exec"));
         assert_eq!(audit[0].prev_hash, audit[1].event_hash);
+    }
+
+    #[tokio::test]
+    async fn exec_requires_matching_grant_for_approve_bucket() {
+        let manager = manager("exec-approval-missing");
+        let spec = MinipodSpec::for_agent_task("openclaw", "/tmp/agentbox-work");
+        let session = manager.create(&spec).await.unwrap();
+        let command = ExecCommand {
+            argv: vec!["git".into(), "push".into(), "origin".into(), "main".into()],
+            working_dir: Some("/workspace".into()),
+            env: Default::default(),
+            timeout_seconds: None,
+        };
+
+        let err = manager.exec(&session.id, &command).await.unwrap_err();
+
+        assert!(matches!(err, RuntimeError::PolicyDenied(_)));
+    }
+
+    #[tokio::test]
+    async fn exec_uses_matching_command_scope_grant() {
+        let manager = manager("exec-command-grant");
+        let spec = MinipodSpec::for_agent_task("openclaw", "/tmp/agentbox-work");
+        let session = manager.create(&spec).await.unwrap();
+        manager
+            .add_session_approval_grant(
+                &session.id,
+                ApprovalGrant {
+                    id: "grant-git-push".into(),
+                    scope: ApprovalScope::Command {
+                        binary: "git".into(),
+                        args_prefix: vec!["push".into()],
+                    },
+                    reason: "operator approved git push for this session".into(),
+                    expires_at: None,
+                },
+            )
+            .unwrap();
+        let command = ExecCommand {
+            argv: vec!["git".into(), "push".into(), "origin".into(), "main".into()],
+            working_dir: Some("/workspace".into()),
+            env: Default::default(),
+            timeout_seconds: None,
+        };
+
+        let result = manager.exec(&session.id, &command).await.unwrap();
+
+        assert_eq!(result.stdout, "git push origin main");
+        let audit = manager.audit.recent(1).unwrap();
+        assert!(audit[0].decision.contains("grant:grant-git-push"));
+    }
+
+    #[tokio::test]
+    async fn exec_consumes_once_grant() {
+        let manager = manager("exec-once-grant");
+        let spec = MinipodSpec::for_agent_task("openclaw", "/tmp/agentbox-work");
+        let session = manager.create(&spec).await.unwrap();
+        manager
+            .add_session_approval_grant(
+                &session.id,
+                ApprovalGrant {
+                    id: "grant-once".into(),
+                    scope: ApprovalScope::Once,
+                    reason: "operator approved one risky command".into(),
+                    expires_at: None,
+                },
+            )
+            .unwrap();
+        let command = ExecCommand {
+            argv: vec!["git".into(), "push".into(), "origin".into(), "main".into()],
+            working_dir: Some("/workspace".into()),
+            env: Default::default(),
+            timeout_seconds: None,
+        };
+
+        manager.exec(&session.id, &command).await.unwrap();
+
+        assert!(manager
+            .session_approval_grants(&session.id)
+            .unwrap()
+            .is_empty());
+        let err = manager.exec(&session.id, &command).await.unwrap_err();
+        assert!(matches!(err, RuntimeError::PolicyDenied(_)));
+    }
+
+    #[tokio::test]
+    async fn exec_grants_do_not_bypass_block_bucket() {
+        let manager = manager("exec-block");
+        let spec = MinipodSpec::for_agent_task("openclaw", "/tmp/agentbox-work");
+        let session = manager.create(&spec).await.unwrap();
+        manager
+            .add_session_approval_grant(
+                &session.id,
+                ApprovalGrant {
+                    id: "grant-once".into(),
+                    scope: ApprovalScope::Once,
+                    reason: "operator approved one risky command".into(),
+                    expires_at: None,
+                },
+            )
+            .unwrap();
+        let command = ExecCommand {
+            argv: vec!["rm".into(), "-rf".into(), "/".into()],
+            working_dir: Some("/workspace".into()),
+            env: Default::default(),
+            timeout_seconds: None,
+        };
+
+        let err = manager.exec(&session.id, &command).await.unwrap_err();
+
+        assert!(matches!(err, RuntimeError::PolicyDenied(_)));
+        assert_eq!(
+            manager.session_approval_grants(&session.id).unwrap().len(),
+            1
+        );
     }
 
     #[tokio::test]

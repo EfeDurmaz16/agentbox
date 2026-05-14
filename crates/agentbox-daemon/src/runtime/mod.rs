@@ -1,3 +1,4 @@
+pub mod approval;
 pub mod manager;
 pub mod policy;
 pub mod provider;

@@ -20,7 +20,8 @@ implemented yet.
 | Manifest policy validation | Shipped | Unsafe host env inheritance, host network mode, and protected mounts are rejected before provider create. |
 | Runtime session store | Shipped | Runtime sessions persist to a local JSON store. |
 | Runtime manager | Shipped | Provider create, exec, status refresh, destroy, session persistence, and evidence events share one daemon-owned manager. |
-| Session-scoped approval grants | Shipped | Runtime sessions can carry approval grants that are persisted with the session and removed when the session is destroyed. Scope matching/enforcement is tracked separately. |
+| Session-scoped approval grants | Shipped | Runtime sessions can carry approval grants that are persisted with the session and removed when the session is destroyed. |
+| Approval scope enforcement | Shipped | Runtime manager exec enforces once, command, path, domain, and session approval grants for approve-bucket commands. Block-bucket commands cannot be grant-bypassed. |
 | Minipod manifest CLI | Shipped | `agentbox minipod-spec` generates and validates a deny-by-default manifest, including `--policy-bundle` task policy JSON files. |
 | Runtime provider registry | Shipped | `RuntimeProviderRegistry` can resolve AgentPod provider descriptors and compatibility providers. |
 | Runtime provider listing | Shipped | `agentbox providers` reports shipped, experimental, unavailable, and planned provider surfaces. |
