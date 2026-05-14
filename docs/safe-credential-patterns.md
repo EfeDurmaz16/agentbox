@@ -73,6 +73,19 @@ not a complete secret manager: a process that receives the env value can still
 print it, copy it, or pass it to children. Transcripts are redacted, but the
 main control is explicit least-privilege exposure.
 
+## Listing And Revoking Grants
+
+Operators can inspect and remove session credential grants:
+
+```sh
+agentbox credentials <session>
+agentbox credential-revoke <session> OPENAI_API_KEY
+```
+
+Revocation removes the grant from the persisted session manifest and records a
+credential audit event. It does not rotate the upstream credential, invalidate
+an external provider token, or erase any value already handed to a process.
+
 ## FIDES Authority Boundary
 
 Agentbox has a FIDES-compatible credential authority request shape. The default
