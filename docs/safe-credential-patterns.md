@@ -98,11 +98,14 @@ Operators can inspect and remove session credential grants:
 ```sh
 agentbox credentials <session>
 agentbox credential-revoke <session> OPENAI_API_KEY
+agentbox evidence --session <session> --credentials
 ```
 
 Revocation removes the grant from the persisted session manifest and records a
 credential audit event. It does not rotate the upstream credential, invalidate
 an external provider token, or erase any value already handed to a process.
+The credential evidence export prints redacted grant summaries and credential
+audit events as JSONL for review or archival.
 
 ## FIDES Authority Boundary
 

@@ -249,6 +249,10 @@ enum Commands {
         /// Export a session-scoped evidence bundle with redacted command transcripts
         #[arg(long)]
         session: Option<String>,
+
+        /// Export only session credential grants/events as JSONL
+        #[arg(long)]
+        credentials: bool,
     },
     /// Generate a governed minipod manifest for an agent task
     MinipodSpec {
@@ -2383,7 +2387,7 @@ fn cmd_history(show_all: bool, bucket_filter: Option<String>, json_output: bool)
     }
 }
 
-fn cmd_evidence(limit: usize, verify: bool, session: Option<String>) {
+fn cmd_evidence(limit: usize, verify: bool, session: Option<String>, credentials: bool) {
     let db_path = audit_db_path();
     if !db_path.exists() {
         eprintln!("no audit log found at {}", db_path.display());
@@ -2421,8 +2425,17 @@ fn cmd_evidence(limit: usize, verify: bool, session: Option<String>) {
         std::process::exit(1);
     }
 
+    if credentials && session.is_none() {
+        eprintln!("error: --credentials requires --session <id>");
+        std::process::exit(1);
+    }
+
     if let Some(session_id) = session {
-        cmd_session_evidence_bundle(&db_path, &session_id, limit);
+        if credentials {
+            cmd_session_credentials_evidence(&db_path, &session_id, limit);
+        } else {
+            cmd_session_evidence_bundle(&db_path, &session_id, limit);
+        }
         return;
     }
 
@@ -2470,6 +2483,42 @@ fn cmd_evidence(limit: usize, verify: bool, session: Option<String>) {
 }
 
 fn cmd_session_evidence_bundle(db_path: &PathBuf, session_id: &str, limit: usize) {
+    let bundle = load_session_evidence_bundle(db_path, session_id, limit);
+    println!(
+        "{}",
+        serde_json::to_string(&bundle).expect("failed to serialize session bundle")
+    );
+}
+
+fn cmd_session_credentials_evidence(db_path: &PathBuf, session_id: &str, limit: usize) {
+    let bundle = load_session_evidence_bundle(db_path, session_id, limit);
+    for grant in bundle.credential_grants {
+        println!(
+            "{}",
+            serde_json::json!({
+                "type": "credential_grant",
+                "session_id": session_id,
+                "grant": grant,
+            })
+        );
+    }
+    for event in bundle.credential_events {
+        println!(
+            "{}",
+            serde_json::json!({
+                "type": "credential_event",
+                "session_id": session_id,
+                "event": event,
+            })
+        );
+    }
+}
+
+fn load_session_evidence_bundle(
+    db_path: &PathBuf,
+    session_id: &str,
+    limit: usize,
+) -> agentbox_daemon::runtime::types::SessionEvidenceBundle {
     use agentbox_daemon::audit::AuditEvent;
     use agentbox_daemon::config;
     use agentbox_daemon::runtime::session::RuntimeSessionStore;
@@ -2529,11 +2578,7 @@ fn cmd_session_evidence_bundle(db_path: &PathBuf, session_id: &str, limit: usize
         eprintln!("failed to read session evidence row: {}", e);
         std::process::exit(1);
     });
-    let bundle = SessionEvidenceBundle::from_session_events(&session, &events);
-    println!(
-        "{}",
-        serde_json::to_string(&bundle).expect("failed to serialize session bundle")
-    );
+    SessionEvidenceBundle::from_session_events(&session, &events)
 }
 
 struct MinipodSpecOptions {
@@ -3502,7 +3547,8 @@ async fn main() {
             limit,
             verify,
             session,
-        } => cmd_evidence(limit, verify, session),
+            credentials,
+        } => cmd_evidence(limit, verify, session, credentials),
         Commands::MinipodSpec {
             agent,
             workspace,
