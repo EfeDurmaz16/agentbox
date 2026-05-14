@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use agentbox_policy::classify::{self, Bucket, PolicyConfig};
+use agentbox_policy::classify::{self, Bucket, Classification, PolicyConfig};
 use chrono::Utc;
 
 use crate::audit::{AuditEvent, AuditStore};
@@ -248,27 +248,79 @@ impl RuntimeManager {
         );
 
         match classification.bucket {
-            Bucket::Allow => Ok(None),
-            Bucket::Block => Err(RuntimeError::PolicyDenied(format!(
-                "blocked by runtime policy: {}",
-                classification.reason
-            ))),
+            Bucket::Allow => {
+                self.audit_network_boundary_if_needed(
+                    session,
+                    command,
+                    &classification,
+                    "allowed",
+                )?;
+                Ok(None)
+            }
+            Bucket::Block => {
+                self.audit_network_boundary_if_needed(
+                    session,
+                    command,
+                    &classification,
+                    "blocked",
+                )?;
+                Err(RuntimeError::PolicyDenied(format!(
+                    "blocked by runtime policy: {}",
+                    classification.reason
+                )))
+            }
             Bucket::Approve => {
-                let grant_id = session
+                let grant_id = match session
                     .approval_grants
                     .iter()
                     .find(|grant| grant_matches_command(grant, session, command))
                     .map(|grant| grant.id.clone())
-                    .ok_or_else(|| {
-                        RuntimeError::PolicyDenied(format!(
+                {
+                    Some(grant_id) => grant_id,
+                    None => {
+                        self.audit_network_boundary_if_needed(
+                            session,
+                            command,
+                            &classification,
+                            "approval_required",
+                        )?;
+                        return Err(RuntimeError::PolicyDenied(format!(
                             "approval required by runtime policy: {}",
                             classification.reason
-                        ))
-                    })?;
+                        )));
+                    }
+                };
                 consume_once_grant(&mut session.approval_grants, &grant_id);
+                self.audit_network_boundary_if_needed(
+                    session,
+                    command,
+                    &classification,
+                    &format!("approved:{grant_id}"),
+                )?;
                 Ok(Some(grant_id))
             }
         }
+    }
+
+    fn audit_network_boundary_if_needed(
+        &self,
+        session: &RuntimeSession,
+        command: &ExecCommand,
+        classification: &Classification,
+        decision: &str,
+    ) -> Result<(), RuntimeError> {
+        if !is_network_http_command(command) {
+            return Ok(());
+        }
+
+        self.audit_runtime_event(
+            &format!("network.boundary {}", command.argv.join(" ")),
+            session,
+            "network",
+            &format!("{decision}:{}", classification.reason),
+            None,
+            Some(self.provider.name().to_string()),
+        )
     }
 
     fn audit_runtime_event(
@@ -321,6 +373,16 @@ impl RuntimeManager {
             .log_event(&event)
             .map_err(|e| RuntimeError::Internal(e.to_string()))
     }
+}
+
+fn is_network_http_command(command: &ExecCommand) -> bool {
+    matches!(
+        command.argv.first().map(String::as_str),
+        Some("curl" | "wget")
+    ) && command.argv.iter().skip(1).any(|arg| {
+        let lower = arg.to_ascii_lowercase();
+        lower.starts_with("http://") || lower.starts_with("https://")
+    })
 }
 
 #[cfg(test)]
@@ -635,6 +697,74 @@ mod tests {
         assert!(err
             .to_string()
             .contains("localhost service access disabled"));
+    }
+
+    #[tokio::test]
+    async fn exec_records_network_boundary_evidence_for_allowed_http() {
+        let manager = manager("exec-network-allow-evidence");
+        let mut spec = MinipodSpec::for_agent_task("openclaw", "/tmp/agentbox-work");
+        spec.network.allowed_domains = vec!["api.openai.com".into()];
+        let session = manager.create(&spec).await.unwrap();
+        let command = ExecCommand {
+            argv: vec!["curl".into(), "https://api.openai.com/v1/models".into()],
+            working_dir: Some("/workspace".into()),
+            env: Default::default(),
+            timeout_seconds: None,
+        };
+
+        manager.exec(&session.id, &command).await.unwrap();
+
+        let audit = manager.audit.recent(3).unwrap();
+        assert_eq!(audit[1].bucket, "network");
+        assert!(audit[1].command.contains("network.boundary"));
+        assert!(audit[1].decision.contains("allowed:"));
+        assert_eq!(audit[0].bucket, "runtime");
+        assert_eq!(audit[0].prev_hash, audit[1].event_hash);
+    }
+
+    #[tokio::test]
+    async fn exec_records_network_boundary_evidence_for_blocked_http() {
+        let manager = manager("exec-network-block-evidence");
+        let mut spec = MinipodSpec::for_agent_task("openclaw", "/tmp/agentbox-work");
+        spec.network.denied_domains = vec!["metadata.google.internal".into()];
+        let session = manager.create(&spec).await.unwrap();
+        let command = ExecCommand {
+            argv: vec![
+                "curl".into(),
+                "https://metadata.google.internal/computeMetadata/v1".into(),
+            ],
+            working_dir: Some("/workspace".into()),
+            env: Default::default(),
+            timeout_seconds: None,
+        };
+
+        let err = manager.exec(&session.id, &command).await.unwrap_err();
+
+        assert!(matches!(err, RuntimeError::PolicyDenied(_)));
+        let audit = manager.audit.recent(2).unwrap();
+        assert_eq!(audit[0].bucket, "network");
+        assert!(audit[0].decision.contains("blocked:"));
+        assert!(audit[0].decision.contains("denylist"));
+    }
+
+    #[tokio::test]
+    async fn exec_records_network_boundary_evidence_for_required_approval() {
+        let manager = manager("exec-network-approval-evidence");
+        let spec = MinipodSpec::for_agent_task("openclaw", "/tmp/agentbox-work");
+        let session = manager.create(&spec).await.unwrap();
+        let command = ExecCommand {
+            argv: vec!["curl".into(), "https://unknown.example.test".into()],
+            working_dir: Some("/workspace".into()),
+            env: Default::default(),
+            timeout_seconds: None,
+        };
+
+        let err = manager.exec(&session.id, &command).await.unwrap_err();
+
+        assert!(matches!(err, RuntimeError::PolicyDenied(_)));
+        let audit = manager.audit.recent(2).unwrap();
+        assert_eq!(audit[0].bucket, "network");
+        assert!(audit[0].decision.contains("approval_required:"));
     }
 
     #[tokio::test]

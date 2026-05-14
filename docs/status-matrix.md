@@ -26,6 +26,7 @@ implemented yet.
 | First-contact network mode | Shipped | `ApprovalOnFirstContact` is a first-class minipod network mode exposed through `--network-mode first-contact`. |
 | Network denylist | Shipped | Minipod network policy and daemon policy config carry denied domains; denied network destinations are blocked before allowlists or approval grants. |
 | Localhost service policy | Shipped | Minipod manifests model localhost/loopback access and `--deny-localhost` makes runtime exec policy block loopback HTTP commands. |
+| Network boundary evidence | Shipped | Runtime exec records network-specific audit events for allowed, blocked, and approval-required HTTP boundary decisions. |
 | Minipod manifest CLI | Shipped | `agentbox minipod-spec` generates and validates a deny-by-default manifest, including `--policy-bundle` task policy JSON files. |
 | Runtime provider registry | Shipped | `RuntimeProviderRegistry` can resolve AgentPod provider descriptors and compatibility providers. |
 | Runtime provider listing | Shipped | `agentbox providers` reports shipped, experimental, unavailable, and planned provider surfaces. |
