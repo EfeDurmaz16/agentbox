@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::runtime::provider::RuntimeError;
-use crate::runtime::types::{ExecCommand, MinipodSpec, MountMode};
+use crate::runtime::types::{ExecCommand, MinipodSpec, MountMode, ResourcePolicy};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LinuxUserNamespacePlan {
@@ -241,6 +241,108 @@ impl LinuxPidNamespaceLauncher {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LinuxCgroupV2Plan {
+    pub schema_version: i64,
+    pub cgroup_name: String,
+    pub memory_max: String,
+    pub cpu_weight: u32,
+    pub pids_max: Option<u32>,
+    pub requires_linux: bool,
+}
+
+impl LinuxCgroupV2Plan {
+    pub fn from_resources(session_id: &str, resources: &ResourcePolicy) -> Self {
+        Self {
+            schema_version: 1,
+            cgroup_name: format!("agentbox-{session_id}"),
+            memory_max: resources.memory_bytes.to_string(),
+            cpu_weight: cpu_shares_to_cgroup_weight(resources.cpu_shares),
+            pids_max: None,
+            requires_linux: true,
+        }
+    }
+
+    pub fn writes(&self) -> Vec<LinuxCgroupV2Write> {
+        let mut writes = vec![
+            LinuxCgroupV2Write {
+                file: "memory.max".into(),
+                value: self.memory_max.clone(),
+            },
+            LinuxCgroupV2Write {
+                file: "cpu.weight".into(),
+                value: self.cpu_weight.to_string(),
+            },
+        ];
+
+        if let Some(pids_max) = self.pids_max {
+            writes.push(LinuxCgroupV2Write {
+                file: "pids.max".into(),
+                value: pids_max.to_string(),
+            });
+        }
+
+        writes
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LinuxCgroupV2Write {
+    pub file: String,
+    pub value: String,
+}
+
+pub struct LinuxCgroupV2Limiter;
+
+impl LinuxCgroupV2Limiter {
+    pub fn plan(
+        session_id: &str,
+        resources: &ResourcePolicy,
+    ) -> Result<LinuxCgroupV2Plan, RuntimeError> {
+        if session_id.trim().is_empty() {
+            return Err(RuntimeError::ManifestRejected(
+                "cgroup v2 session id cannot be empty".into(),
+            ));
+        }
+        if resources.memory_bytes == 0 {
+            return Err(RuntimeError::ManifestRejected(
+                "cgroup v2 memory limit cannot be zero".into(),
+            ));
+        }
+
+        Ok(LinuxCgroupV2Plan::from_resources(session_id, resources))
+    }
+
+    #[cfg(target_os = "linux")]
+    pub fn apply(
+        root: &std::path::Path,
+        plan: &LinuxCgroupV2Plan,
+        pid: u32,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let cgroup_dir = root.join(&plan.cgroup_name);
+        std::fs::create_dir_all(&cgroup_dir)?;
+        for write in plan.writes() {
+            std::fs::write(cgroup_dir.join(write.file), write.value)?;
+        }
+        std::fs::write(cgroup_dir.join("cgroup.procs"), pid.to_string())?;
+        Ok(())
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    pub fn apply(
+        _root: &std::path::Path,
+        _plan: &LinuxCgroupV2Plan,
+        _pid: u32,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        Err("Linux cgroups v2 are only available on Linux".into())
+    }
+}
+
+fn cpu_shares_to_cgroup_weight(cpu_shares: u32) -> u32 {
+    let weight = ((cpu_shares.max(2) as u64 * 10_000) / 262_144).max(1);
+    weight.min(10_000) as u32
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -369,6 +471,59 @@ mod tests {
     #[test]
     fn pid_namespace_spawn_is_explicitly_linux_only() {
         let err = LinuxPidNamespaceLauncher::spawn(&command(&["/bin/true"])).unwrap_err();
+
+        assert!(err.to_string().contains("only available on Linux"));
+    }
+
+    #[test]
+    fn cgroup_v2_plan_maps_resource_limits_to_filesystem_writes() {
+        let resources = ResourcePolicy {
+            memory_bytes: 536_870_912,
+            cpu_shares: 2048,
+            timeout_seconds: Some(30),
+        };
+
+        let plan = LinuxCgroupV2Limiter::plan("01agentboxsession", &resources).unwrap();
+
+        assert_eq!(plan.schema_version, 1);
+        assert_eq!(plan.cgroup_name, "agentbox-01agentboxsession");
+        assert_eq!(plan.memory_max, "536870912");
+        assert_eq!(plan.cpu_weight, 78);
+        assert!(plan.requires_linux);
+        assert_eq!(
+            plan.writes(),
+            vec![
+                LinuxCgroupV2Write {
+                    file: "memory.max".into(),
+                    value: "536870912".into(),
+                },
+                LinuxCgroupV2Write {
+                    file: "cpu.weight".into(),
+                    value: "78".into(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn cgroup_v2_plan_rejects_invalid_limits() {
+        let resources = ResourcePolicy {
+            memory_bytes: 0,
+            ..ResourcePolicy::default()
+        };
+
+        let err = LinuxCgroupV2Limiter::plan("01agentboxsession", &resources).unwrap_err();
+
+        assert!(matches!(err, RuntimeError::ManifestRejected(_)));
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn cgroup_v2_apply_is_explicitly_linux_only() {
+        let plan =
+            LinuxCgroupV2Limiter::plan("01agentboxsession", &ResourcePolicy::default()).unwrap();
+        let err = LinuxCgroupV2Limiter::apply(std::path::Path::new("/sys/fs/cgroup"), &plan, 1)
+            .unwrap_err();
 
         assert!(err.to_string().contains("only available on Linux"));
     }
