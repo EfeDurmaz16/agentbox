@@ -459,6 +459,28 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
+    /// Apply a pulled remote AgentPod workspace export to a local workspace
+    RemoteWorkspaceApply {
+        /// Directory produced by `agentbox remote-workspace-export`
+        #[arg(long = "export-dir")]
+        export_dir: PathBuf,
+
+        /// Local workspace directory to write into
+        #[arg(long)]
+        workspace: PathBuf,
+
+        /// Preview files and conflicts without writing
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Overwrite existing target files
+        #[arg(long)]
+        force: bool,
+
+        /// Emit JSON
+        #[arg(long)]
+        json: bool,
+    },
     /// Generate a native provider execution plan without running it
     NativePlan {
         /// Native provider: agentpod-linux
@@ -3002,6 +3024,30 @@ struct RemoteWorkspaceExportFile {
     bytes: usize,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+struct RemoteWorkspaceApplyReport {
+    schema_version: i64,
+    session_id: String,
+    worker_session_id: String,
+    export_dir: String,
+    workspace: String,
+    dry_run: bool,
+    force: bool,
+    applied_files: usize,
+    skipped_files: usize,
+    conflict_files: usize,
+    total_bytes: usize,
+    files: Vec<RemoteWorkspaceApplyFile>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct RemoteWorkspaceApplyFile {
+    path: String,
+    bytes: usize,
+    sha256: String,
+    action: String,
+}
+
 fn write_session_evidence_bundle_dir(
     bundle: &agentbox_daemon::runtime::types::SessionEvidenceBundle,
     output_dir: &Path,
@@ -3311,6 +3357,163 @@ fn prepare_remote_workspace_output_dir(output_dir: &Path, force: bool) -> Result
     }
     fs::create_dir_all(output_dir)
         .map_err(|e| format!("failed to create {}: {e}", output_dir.display()))
+}
+
+fn apply_remote_workspace_export_dir(
+    export_dir: &Path,
+    workspace: &Path,
+    dry_run: bool,
+    force: bool,
+) -> Result<RemoteWorkspaceApplyReport, String> {
+    let manifest = read_remote_workspace_export_manifest(export_dir)?;
+    verify_remote_workspace_export_dir(export_dir, &manifest)?;
+    if workspace.exists() && !workspace.is_dir() {
+        return Err("workspace path exists and is not a directory".to_string());
+    }
+
+    let mut files = Vec::with_capacity(manifest.files.len());
+    let mut conflict_files = 0_usize;
+    for file in &manifest.files {
+        let relative_path = safe_bundle_relative_path(&file.path)?;
+        let target_path = workspace.join(relative_path);
+        let target_exists = target_path.exists();
+        let action = if target_exists && !force {
+            conflict_files += 1;
+            "conflict"
+        } else if dry_run && target_exists {
+            "would-overwrite"
+        } else if dry_run {
+            "would-write"
+        } else if target_exists {
+            "overwritten"
+        } else {
+            "written"
+        };
+        files.push(RemoteWorkspaceApplyFile {
+            path: file.path.clone(),
+            bytes: file.bytes,
+            sha256: file.sha256.clone(),
+            action: action.to_string(),
+        });
+    }
+
+    if conflict_files > 0 && !dry_run {
+        return Err(format!(
+            "{conflict_files} target file(s) already exist; rerun with --force to overwrite"
+        ));
+    }
+
+    let mut applied_files = 0_usize;
+    let mut skipped_files = 0_usize;
+    if !dry_run {
+        fs::create_dir_all(workspace)
+            .map_err(|e| format!("failed to create {}: {e}", workspace.display()))?;
+        for file in &manifest.files {
+            let relative_path = safe_bundle_relative_path(&file.path)?;
+            let source_path = export_dir.join(&relative_path);
+            let target_path = workspace.join(&relative_path);
+            if target_path.exists() && !force {
+                skipped_files += 1;
+                continue;
+            }
+            if let Some(parent) = target_path.parent() {
+                fs::create_dir_all(parent)
+                    .map_err(|e| format!("failed to create {}: {e}", parent.display()))?;
+            }
+            fs::copy(&source_path, &target_path).map_err(|e| {
+                format!(
+                    "failed to copy {} to {}: {e}",
+                    source_path.display(),
+                    target_path.display()
+                )
+            })?;
+            applied_files += 1;
+        }
+    }
+
+    Ok(RemoteWorkspaceApplyReport {
+        schema_version: 1,
+        session_id: manifest.session_id,
+        worker_session_id: manifest.worker_session_id,
+        export_dir: export_dir.display().to_string(),
+        workspace: workspace.display().to_string(),
+        dry_run,
+        force,
+        applied_files,
+        skipped_files,
+        conflict_files,
+        total_bytes: manifest.total_bytes,
+        files,
+    })
+}
+
+fn read_remote_workspace_export_manifest(
+    export_dir: &Path,
+) -> Result<RemoteWorkspaceExportManifest, String> {
+    let manifest_path = export_dir.join("agentbox-workspace-export.json");
+    let bytes = fs::read(&manifest_path)
+        .map_err(|e| format!("failed to read {}: {e}", manifest_path.display()))?;
+    serde_json::from_slice(&bytes)
+        .map_err(|e| format!("failed to parse {}: {e}", manifest_path.display()))
+}
+
+fn verify_remote_workspace_export_dir(
+    export_dir: &Path,
+    manifest: &RemoteWorkspaceExportManifest,
+) -> Result<(), String> {
+    if manifest.schema_version != 1 {
+        return Err(format!(
+            "unsupported workspace export schema version {}",
+            manifest.schema_version
+        ));
+    }
+    if manifest.files.is_empty() {
+        return Err("workspace export manifest does not list any files".to_string());
+    }
+    let mut total_bytes = 0_usize;
+    let mut root_entries = Vec::with_capacity(manifest.files.len());
+    for file in &manifest.files {
+        let relative_path = safe_bundle_relative_path(&file.path)?;
+        let path = export_dir.join(relative_path);
+        let bytes =
+            fs::read(&path).map_err(|e| format!("failed to read {}: {e}", path.display()))?;
+        if bytes.len() != file.bytes {
+            return Err(format!(
+                "{} byte count mismatch: expected {}, got {}",
+                file.path,
+                file.bytes,
+                bytes.len()
+            ));
+        }
+        let actual_sha256 = sha256_hex(&bytes);
+        if actual_sha256 != file.sha256 {
+            return Err(format!(
+                "{} sha256 mismatch: expected {}, got {}",
+                file.path, file.sha256, actual_sha256
+            ));
+        }
+        total_bytes += file.bytes;
+        root_entries.push(format!(
+            "{}\0{}\0{}\0{}",
+            file.path, file.sha256, file.bytes, file.media_type
+        ));
+    }
+    if total_bytes != manifest.total_bytes {
+        return Err(format!(
+            "workspace export total byte mismatch: expected {}, got {}",
+            manifest.total_bytes, total_bytes
+        ));
+    }
+    root_entries.sort();
+    let actual_root =
+        sha256_hex(format!("agentbox-workspace-root-v1\n{}", root_entries.join("\n")).as_bytes());
+    if actual_root != manifest.root_sha256 {
+        return Err(format!(
+            "workspace export root sha256 mismatch: expected {}, got {}",
+            manifest.root_sha256, actual_root
+        ));
+    }
+    Ok(())
 }
 
 fn evidence_bundle_root_sha256(files: &[EvidenceBundleFile]) -> String {
@@ -4234,6 +4437,51 @@ async fn cmd_remote_workspace_export(
     println!("manifest:       {}", manifest.manifest_path);
 }
 
+fn cmd_remote_workspace_apply(
+    export_dir: PathBuf,
+    workspace: PathBuf,
+    dry_run: bool,
+    force: bool,
+    json: bool,
+) {
+    let report = apply_remote_workspace_export_dir(&export_dir, &workspace, dry_run, force)
+        .unwrap_or_else(|e| {
+            eprintln!(
+                "error: failed to apply remote AgentPod workspace export from {} to {}: {}",
+                export_dir.display(),
+                workspace.display(),
+                e
+            );
+            std::process::exit(1);
+        });
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&report)
+                .expect("failed to serialize remote AgentPod workspace apply report")
+        );
+        return;
+    }
+
+    println!("Remote AgentPod workspace apply report.");
+    println!("session:        {}", report.session_id);
+    println!("worker session: {}", report.worker_session_id);
+    println!("export:         {}", report.export_dir);
+    println!("workspace:      {}", report.workspace);
+    println!("dry run:        {}", report.dry_run);
+    println!("force:          {}", report.force);
+    println!("applied files:  {}", report.applied_files);
+    println!("conflicts:      {}", report.conflict_files);
+    println!("bytes:          {}", report.total_bytes);
+    if !report.files.is_empty() {
+        println!("files:");
+        for file in &report.files {
+            println!("  - {} ({})", file.path, file.action);
+        }
+    }
+}
+
 fn cmd_native_plan(
     provider: String,
     workspace: Option<PathBuf>,
@@ -4968,6 +5216,13 @@ async fn main() {
             )
             .await
         }
+        Commands::RemoteWorkspaceApply {
+            export_dir,
+            workspace,
+            dry_run,
+            force,
+            json,
+        } => cmd_remote_workspace_apply(export_dir, workspace, dry_run, force, json),
         Commands::NativePlan {
             provider,
             workspace,
@@ -5271,6 +5526,71 @@ mod tests {
             "do not overwrite"
         );
         let _ = fs::remove_dir_all(output_dir);
+    }
+
+    #[test]
+    fn remote_workspace_apply_writes_verified_export_to_workspace() {
+        let export_dir = std::env::temp_dir().join(format!(
+            "agentbox-remote-workspace-apply-export-test-{}",
+            std::process::id()
+        ));
+        let workspace = std::env::temp_dir().join(format!(
+            "agentbox-remote-workspace-apply-target-test-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&export_dir);
+        let _ = fs::remove_dir_all(&workspace);
+        let response = remote_workspace_export_response(vec![remote_workspace_file(
+            "src/main.rs",
+            "fn main() {}\n",
+        )]);
+        write_remote_workspace_export_dir(&response, &export_dir, false).unwrap();
+
+        let report =
+            apply_remote_workspace_export_dir(&export_dir, &workspace, false, false).unwrap();
+
+        assert_eq!(report.applied_files, 1);
+        assert_eq!(report.conflict_files, 0);
+        assert_eq!(
+            fs::read_to_string(workspace.join("src/main.rs")).unwrap(),
+            "fn main() {}\n"
+        );
+        let _ = fs::remove_dir_all(export_dir);
+        let _ = fs::remove_dir_all(workspace);
+    }
+
+    #[test]
+    fn remote_workspace_apply_reports_conflicts_without_overwrite() {
+        let export_dir = std::env::temp_dir().join(format!(
+            "agentbox-remote-workspace-apply-conflict-export-test-{}",
+            std::process::id()
+        ));
+        let workspace = std::env::temp_dir().join(format!(
+            "agentbox-remote-workspace-apply-conflict-target-test-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&export_dir);
+        let _ = fs::remove_dir_all(&workspace);
+        let response =
+            remote_workspace_export_response(vec![remote_workspace_file("README.md", "new\n")]);
+        write_remote_workspace_export_dir(&response, &export_dir, false).unwrap();
+        fs::create_dir_all(&workspace).unwrap();
+        fs::write(workspace.join("README.md"), b"old\n").unwrap();
+
+        let dry_run =
+            apply_remote_workspace_export_dir(&export_dir, &workspace, true, false).unwrap();
+        let err =
+            apply_remote_workspace_export_dir(&export_dir, &workspace, false, false).unwrap_err();
+
+        assert_eq!(dry_run.conflict_files, 1);
+        assert_eq!(dry_run.files[0].action, "conflict");
+        assert!(err.contains("already exist"), "{err}");
+        assert_eq!(
+            fs::read_to_string(workspace.join("README.md")).unwrap(),
+            "old\n"
+        );
+        let _ = fs::remove_dir_all(export_dir);
+        let _ = fs::remove_dir_all(workspace);
     }
 
     fn remote_workspace_file(path: &str, contents: &str) -> RemoteAgentPodWorkspaceFile {

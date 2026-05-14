@@ -188,6 +188,25 @@ assert (pullback / "export.txt").read_text(encoding="utf-8") == "worker export s
 assert (pullback / "agentbox-workspace-export.json").exists()
 PY
 
+"$ROOT/target/debug/agentbox-cli" remote-workspace-apply \
+  --export-dir "$TMPDIR/workspace-pullback" \
+  --workspace "$TMPDIR/workspace-applied" \
+  --json >"$TMPDIR/workspace-apply.json"
+
+python3 - "$TMPDIR/workspace-apply.json" "$TMPDIR/workspace-applied" <<'PY'
+import json
+import pathlib
+import sys
+
+with open(sys.argv[1], "r", encoding="utf-8") as fh:
+    data = json.load(fh)
+
+applied = pathlib.Path(sys.argv[2])
+assert data["applied_files"] >= 1
+assert data["conflict_files"] == 0
+assert (applied / "export.txt").read_text(encoding="utf-8") == "worker export smoke\n"
+PY
+
 SEALED_AT="$(python3 - <<'PY'
 from datetime import datetime, timezone
 print(datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"))

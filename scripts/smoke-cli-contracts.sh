@@ -80,6 +80,9 @@ grep -F "Upload a verified evidence bundle directory to a remote AgentPod worker
 "${CLI[@]}" remote-workspace-export --help >"$TMPDIR/remote-workspace-export-help.txt"
 grep -F "Export a remote AgentPod worker workspace into a local review directory" \
   "$TMPDIR/remote-workspace-export-help.txt" >/dev/null
+"${CLI[@]}" remote-workspace-apply --help >"$TMPDIR/remote-workspace-apply-help.txt"
+grep -F "Apply a pulled remote AgentPod workspace export to a local workspace" \
+  "$TMPDIR/remote-workspace-apply-help.txt" >/dev/null
 
 log "checking evidence bundle verification"
 BUNDLE_DIR="$TMPDIR/evidence-bundle"
