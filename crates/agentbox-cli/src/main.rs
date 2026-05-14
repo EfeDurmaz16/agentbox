@@ -2129,9 +2129,14 @@ fn parse_network_mode(raw: &str) -> agentbox_daemon::runtime::types::NetworkMode
         "first-contact" | "first_contact" | "approval-on-first-contact" => {
             NetworkMode::ApprovalOnFirstContact
         }
+        "open-with-guardrails" | "open_with_guardrails" | "guardrails" => {
+            NetworkMode::OpenWithGuardrails
+        }
         other => {
             eprintln!("error: invalid --network-mode value `{}`", other);
-            eprintln!("hint: expected deny-by-default, allowlisted, or first-contact");
+            eprintln!(
+                "hint: expected deny-by-default, allowlisted, first-contact, or open-with-guardrails"
+            );
             std::process::exit(1);
         }
     }

@@ -211,6 +211,7 @@ pub enum NetworkMode {
     DenyByDefault,
     AllowListed,
     ApprovalOnFirstContact,
+    OpenWithGuardrails,
     Host,
 }
 
@@ -225,9 +226,9 @@ pub struct NetworkPolicy {
 impl Default for NetworkPolicy {
     fn default() -> Self {
         Self {
-            mode: NetworkMode::DenyByDefault,
+            mode: NetworkMode::OpenWithGuardrails,
             allowed_domains: vec![],
-            denied_domains: vec![],
+            denied_domains: cloud_metadata_domains(),
             allow_localhost: true,
         }
     }
@@ -591,13 +592,14 @@ impl AgentPolicyProfile {
         match normalized.as_str() {
             "" | "general" => Self::profile(
                 "general",
-                "Conservative default profile for general autonomous agents.",
+                "Usable default profile for general autonomous agents with dangerous destinations blocked.",
                 NetworkPolicy::default(),
             ),
             "coding" => Self::profile(
                 "coding",
                 "Software engineering agent profile with metadata endpoints denied.",
                 NetworkPolicy {
+                    mode: NetworkMode::DenyByDefault,
                     denied_domains: cloud_metadata_domains(),
                     ..NetworkPolicy::default()
                 },
@@ -616,6 +618,7 @@ impl AgentPolicyProfile {
                 "deploy",
                 "Deployment agent profile with deny-by-default egress and metadata endpoints denied.",
                 NetworkPolicy {
+                    mode: NetworkMode::DenyByDefault,
                     denied_domains: cloud_metadata_domains(),
                     allow_localhost: false,
                     ..NetworkPolicy::default()
@@ -624,7 +627,12 @@ impl AgentPolicyProfile {
             custom => Self::profile(
                 custom,
                 "Custom agent policy profile with conservative defaults.",
-                NetworkPolicy::default(),
+                NetworkPolicy {
+                    mode: NetworkMode::DenyByDefault,
+                    allowed_domains: vec![],
+                    denied_domains: vec![],
+                    allow_localhost: true,
+                },
             ),
         }
     }
@@ -1116,7 +1124,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_minipod_is_deny_by_default() {
+    fn default_minipod_uses_open_network_with_guardrails() {
         let spec = MinipodSpec::for_agent_task("openclaw", "/tmp/agentbox-work");
 
         assert_eq!(spec.schema_version, AGENTPOD_SPEC_SCHEMA_VERSION);
@@ -1131,7 +1139,11 @@ mod tests {
             WorkspaceWritePolicy::Direct
         ));
         assert!(!spec.filesystem.workspace_overlay.is_enabled());
-        assert!(matches!(spec.network.mode, NetworkMode::DenyByDefault));
+        assert!(matches!(spec.network.mode, NetworkMode::OpenWithGuardrails));
+        assert!(spec
+            .network
+            .denied_domains
+            .contains(&"169.254.169.254".into()));
         assert!(!spec.credentials.inherit_host_env);
         assert!(spec.credentials.redact_in_audit);
     }
@@ -1554,6 +1566,12 @@ mod tests {
                 denied_domains: vec!["169.254.169.254".into()],
                 allow_localhost: true,
             },
+            NetworkPolicy {
+                mode: NetworkMode::OpenWithGuardrails,
+                allowed_domains: vec![],
+                denied_domains: vec!["169.254.169.254".into()],
+                allow_localhost: true,
+            },
         ];
 
         for policy in policies {
@@ -1711,10 +1729,14 @@ mod tests {
 
         assert!(matches!(spec.network.mode, NetworkMode::AllowListed));
         assert_eq!(spec.network.allowed_domains, vec!["api.github.com"]);
-        assert_eq!(
-            spec.network.denied_domains,
-            vec!["metadata.google.internal"]
-        );
+        assert!(spec
+            .network
+            .denied_domains
+            .contains(&"metadata.google.internal".into()));
+        assert!(spec
+            .network
+            .denied_domains
+            .contains(&"169.254.169.254".into()));
         assert_eq!(spec.filesystem.mounts.len(), 1);
         assert!(matches!(
             spec.filesystem.workspace_write_policy,

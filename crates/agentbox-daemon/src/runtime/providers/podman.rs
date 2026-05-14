@@ -170,7 +170,8 @@ fn minipod_to_pod_spec(spec: &MinipodSpec) -> PodSpec {
                 NetworkMode::Host => PodNetworkMode::Host,
                 NetworkMode::DenyByDefault
                 | NetworkMode::AllowListed
-                | NetworkMode::ApprovalOnFirstContact => PodNetworkMode::Restricted,
+                | NetworkMode::ApprovalOnFirstContact
+                | NetworkMode::OpenWithGuardrails => PodNetworkMode::Restricted,
             },
             allow_domains: spec.network.allowed_domains.clone(),
         },
