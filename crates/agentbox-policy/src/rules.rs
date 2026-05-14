@@ -388,6 +388,7 @@ pub fn check_approve(ctx: &CommandContext, config: &PolicyConfig) -> Option<Clas
                 "secrets",
                 "token",
                 ".netrc",
+                ".npmrc",
             ];
             let reads_sensitive = ctx.args.iter().any(|a| {
                 if a.starts_with('-') {
@@ -781,6 +782,21 @@ mod tests {
                 "{binary} should require approval"
             );
             assert!(c.reason.contains("cloud account"));
+        }
+    }
+
+    #[test]
+    fn test_cloud_and_deploy_credential_files_need_approval() {
+        for path in [
+            "/Users/test/.aws/credentials",
+            "/Users/test/.config/gcloud/application_default_credentials.json",
+            "/Users/test/.config/gh/hosts.yml",
+            "/Users/test/.npmrc",
+            "/Users/test/.config/vercel/auth.json",
+        ] {
+            let c = classify_default(&ctx("cat", &[path]));
+            assert_eq!(c.bucket, Bucket::Approve, "{path} should require approval");
+            assert!(c.reason.contains("sensitive/credential"));
         }
     }
 
