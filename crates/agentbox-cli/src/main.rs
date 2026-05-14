@@ -131,7 +131,7 @@ enum Commands {
         #[arg(long = "risk", default_value = "medium")]
         risk: String,
 
-        /// Runtime provider: auto, podman, agentpod-macos, agentpod-linux, agentpod-windows
+        /// Runtime provider: auto, podman, agentpod-macos, agentpod-linux, agentpod-windows, remote-agentpod
         #[arg(long = "provider", default_value = "auto")]
         provider: String,
 
@@ -1460,6 +1460,12 @@ async fn cmd_run(options: RunOptions) {
             eprintln!(
                 "warning: using gated agentpod-linux prototype execution; this is not a complete sandbox"
             );
+        } else if selection.selected_provider == "remote-agentpod"
+            && selected_provider.is_available().await
+        {
+            eprintln!(
+                "warning: using experimental remote-agentpod execution; worker-side sandboxing is not complete"
+            );
         } else {
             eprintln!(
                 "Error: provider `{}` is not runnable in this build yet.",
@@ -1473,6 +1479,13 @@ async fn cmd_run(options: RunOptions) {
                 eprintln!(
                 "hint: Linux prototype execution runs through `agentbox run` only on Linux with AGENTBOX_LINUX_NATIVE=1"
             );
+            } else if selection.selected_provider == "remote-agentpod" {
+                eprintln!(
+                    "hint: set AGENTBOX_REMOTE_AGENTPOD_ENDPOINT=https://... for a production worker"
+                );
+                eprintln!(
+                    "hint: loopback HTTP workers require AGENTBOX_REMOTE_AGENTPOD_ALLOW_HTTP_LOOPBACK=1"
+                );
             } else {
                 eprintln!("hint: use `--provider podman` for the current compatibility backend");
             }

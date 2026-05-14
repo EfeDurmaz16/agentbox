@@ -933,9 +933,12 @@ impl HttpRemoteAgentPodTransport {
     pub fn new(endpoint: impl Into<String>) -> Result<Self, RuntimeError> {
         let endpoint = endpoint.into();
         validate_remote_endpoint(&endpoint)?;
-        if !endpoint.starts_with("https://") {
+        let gated_loopback_http = endpoint.starts_with("http://")
+            && remote_loopback_http_enabled()
+            && is_loopback_http_endpoint(&endpoint);
+        if !(endpoint.starts_with("https://") || gated_loopback_http) {
             return Err(RuntimeError::ManifestRejected(
-                "HTTP remote AgentPod transport requires an https:// endpoint".into(),
+                "HTTP remote AgentPod transport requires https:// or gated loopback http://".into(),
             ));
         }
 
@@ -1188,6 +1191,13 @@ impl RemoteAgentPodTransportDescriptor {
 }
 
 fn validate_remote_endpoint(endpoint: &str) -> Result<(), RuntimeError> {
+    validate_remote_endpoint_with_loopback(endpoint, remote_loopback_http_enabled())
+}
+
+fn validate_remote_endpoint_with_loopback(
+    endpoint: &str,
+    allow_http_loopback: bool,
+) -> Result<(), RuntimeError> {
     let endpoint = endpoint.trim();
     if endpoint.is_empty() {
         return Err(RuntimeError::ManifestRejected(
@@ -1199,12 +1209,36 @@ fn validate_remote_endpoint(endpoint: &str) -> Result<(), RuntimeError> {
             "remote AgentPod endpoint must not embed credentials".into(),
         ));
     }
+    if endpoint.starts_with("http://") && allow_http_loopback && is_loopback_http_endpoint(endpoint)
+    {
+        return Ok(());
+    }
     if !(endpoint.starts_with("https://") || endpoint.starts_with("ssh://")) {
         return Err(RuntimeError::ManifestRejected(
             "remote AgentPod endpoint must use https:// or ssh://".into(),
         ));
     }
     Ok(())
+}
+
+fn remote_loopback_http_enabled() -> bool {
+    matches!(
+        std::env::var("AGENTBOX_REMOTE_AGENTPOD_ALLOW_HTTP_LOOPBACK")
+            .unwrap_or_default()
+            .to_ascii_lowercase()
+            .as_str(),
+        "1" | "true" | "yes"
+    )
+}
+
+fn is_loopback_http_endpoint(endpoint: &str) -> bool {
+    let Ok(url) = reqwest::Url::parse(endpoint) else {
+        return false;
+    };
+    if url.scheme() != "http" || !url.username().is_empty() || url.password().is_some() {
+        return false;
+    }
+    matches!(url.host_str(), Some("127.0.0.1" | "::1" | "localhost"))
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
@@ -1234,6 +1268,33 @@ fn remote_evidence_event_count(bundle: &SessionEvidenceBundle) -> u64 {
         + bundle.credential_events.len())
     .try_into()
     .unwrap_or(u64::MAX)
+}
+
+fn remote_worker_working_dir(
+    session: &RuntimeSession,
+    working_dir: Option<&str>,
+) -> Option<String> {
+    let working_dir = working_dir?;
+    let guest_workspace = session
+        .spec
+        .filesystem
+        .workspace_guest_path
+        .trim_end_matches('/');
+    if working_dir == guest_workspace {
+        return None;
+    }
+    let guest_prefix = format!("{guest_workspace}/");
+    if let Some(relative) = working_dir.strip_prefix(&guest_prefix) {
+        let host_workspace = session
+            .spec
+            .filesystem
+            .workspace_host_path
+            .to_string_lossy()
+            .to_string();
+        let host_workspace = host_workspace.trim_end_matches('/');
+        return Some(format!("{host_workspace}/{relative}"));
+    }
+    Some(working_dir.to_string())
 }
 
 fn require_lifecycle_events(
@@ -1549,11 +1610,13 @@ impl RuntimeProvider for RemoteAgentPodProvider {
         let endpoint = self.endpoint_from_session(session)?;
         let worker_session_id = self.worker_session_from_session(session)?;
         let transport = self.transport_for(endpoint)?;
+        let mut command = command.clone();
+        command.working_dir = remote_worker_working_dir(session, command.working_dir.as_deref());
         let response = transport
             .exec_command(RemoteAgentPodExecRequest {
                 session_id: session.id.clone(),
                 worker_session_id: worker_session_id.to_string(),
-                command: command.clone(),
+                command,
             })
             .await?;
         Ok(response.result)
@@ -1878,6 +1941,30 @@ mod tests {
     }
 
     #[test]
+    fn remote_worker_working_dir_translates_guest_workspace_paths() {
+        let session = RuntimeSession::new(
+            "agentbox-test".to_string(),
+            "remote-agentpod".to_string(),
+            "remote".to_string(),
+            MinipodSpec::for_agent_task("hermes", "/tmp/agentbox-workspace"),
+        );
+
+        assert_eq!(remote_worker_working_dir(&session, None), None);
+        assert_eq!(
+            remote_worker_working_dir(&session, Some("/workspace")),
+            None
+        );
+        assert_eq!(
+            remote_worker_working_dir(&session, Some("/workspace/project")),
+            Some("/tmp/agentbox-workspace/project".to_string())
+        );
+        assert_eq!(
+            remote_worker_working_dir(&session, Some("/tmp/agentbox-workspace")),
+            Some("/tmp/agentbox-workspace".to_string())
+        );
+    }
+
+    #[test]
     fn remote_transport_descriptor_is_secret_free_and_explicit() {
         let descriptor = RemoteAgentPodTransportDescriptor::new(
             "https://worker.example.com/agentpod",
@@ -1922,6 +2009,23 @@ mod tests {
     }
 
     #[test]
+    fn remote_endpoint_allows_http_loopback_only_when_explicitly_gated() {
+        let loopback = "http://127.0.0.1:63000/agentpod";
+        let localhost = "http://localhost:63000/agentpod";
+        let external = "http://worker.example.com/agentpod";
+
+        assert!(validate_remote_endpoint_with_loopback(loopback, false).is_err());
+        assert!(validate_remote_endpoint_with_loopback(loopback, true).is_ok());
+        assert!(validate_remote_endpoint_with_loopback(localhost, true).is_ok());
+        assert!(validate_remote_endpoint_with_loopback(external, true).is_err());
+        assert!(validate_remote_endpoint_with_loopback(
+            "http://token@127.0.0.1:63000/agentpod",
+            true
+        )
+        .is_err());
+    }
+
+    #[test]
     fn http_remote_transport_builds_stable_routes() {
         let transport =
             HttpRemoteAgentPodTransport::new("https://worker.example.com/agentpod/").unwrap();
@@ -1953,7 +2057,7 @@ mod tests {
     fn http_remote_transport_requires_https_endpoint() {
         let ssh = HttpRemoteAgentPodTransport::new("ssh://agentpod@example.com").unwrap_err();
 
-        assert!(ssh.to_string().contains("https://"));
+        assert!(ssh.to_string().contains("https:// or gated loopback"));
     }
 
     #[test]

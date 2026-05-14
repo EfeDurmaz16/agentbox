@@ -4,6 +4,9 @@ Remote AgentPod is the provider shape for attached machines, disposable workers,
 and cloud-hosted execution cells. It is experimental and disabled by default.
 `RemoteAgentPodProvider` becomes available only when
 `AGENTBOX_REMOTE_AGENTPOD_ENDPOINT` points at an HTTPS worker endpoint.
+For local verification against `agentbox-remote-worker`, loopback-only HTTP can
+be enabled with `AGENTBOX_REMOTE_AGENTPOD_ALLOW_HTTP_LOOPBACK=1`; non-loopback
+HTTP and credential-bearing endpoints remain rejected.
 
 The product surface starts with a secret-free transport descriptor:
 

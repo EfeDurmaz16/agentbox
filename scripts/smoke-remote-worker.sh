@@ -51,6 +51,32 @@ assert data["lifecycle_ack"] is True
 assert data["secret_material_included"] is False
 PY
 
+mkdir -p "$TMPDIR/home"
+cargo build --locked -q -p agentbox-cli
+AGENTBOX_REMOTE_AGENTPOD_ENDPOINT="http://127.0.0.1:${PORT}" \
+AGENTBOX_REMOTE_AGENTPOD_ALLOW_HTTP_LOOPBACK=1 \
+HOME="$TMPDIR/home" \
+"$ROOT/target/debug/agentbox-cli" run \
+  --provider remote-agentpod \
+  --json \
+  -- \
+  printf provider-remote-smoke >"$TMPDIR/provider-run.json"
+
+python3 - "$TMPDIR/provider-run.json" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], "r", encoding="utf-8") as fh:
+    data = json.load(fh)
+
+assert data["session"]["provider"] == "remote-agentpod"
+assert data["session"]["status"] == "Running"
+assert data["command_result"]["exit_code"] == 0
+assert data["command_result"]["stdout"] == "provider-remote-smoke"
+assert data["destroyed"] is True
+assert data["cleanup_error"] is None
+PY
+
 mkdir -p "$TMPDIR/workspace"
 cargo run --locked -q -p agentbox-cli -- minipod-spec remote-smoke --risk medium --workspace "$TMPDIR/workspace" \
   >"$TMPDIR/spec.json"
