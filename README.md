@@ -295,7 +295,7 @@ agentbox/
 | v0.1 | PATH shim daemon + phone approval | Done |
 | v0.2 | Guarded minipod runtime spine | In progress |
 | v0.3 | Context-rich policy engine | Done |
-| v1.0 | macOS Endpoint Security (kernel-level, bypass-proof) | Planned |
+| v1.0 | macOS Endpoint Security host process/file enforcement | Planned |
 | v1.5 | MCP Governance Proxy (protocol-level interception) | Planned |
 
 ## Why Not...

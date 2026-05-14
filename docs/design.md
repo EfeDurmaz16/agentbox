@@ -83,14 +83,17 @@ Rust daemon + compiled shim binaries for dangerous commands. Shims sit first in 
 - Pros: Works with any terminal agent, zero config, <50ms overhead via daemon socket, single binary install
 - Cons: Only intercepts shell commands, bypassable via full paths (/bin/rm) or direct syscalls
 
-### Approach B: Endpoint Security Agent (v1 — ship in 6 weeks)
+### Approach B: Endpoint Security Agent (v1)
 
-macOS Endpoint Security framework to intercept ALL process exec, file unlink, network connect at kernel level. Cannot be bypassed. Same mechanism as CrowdStrike/SentinelOne.
+macOS Endpoint Security framework to authorize selected process and file events
+through a System Extension. This can close PATH-shim bypasses for covered event
+classes, but it does not cover all network behavior and requires entitlement,
+packaging, latency, and fail-mode work.
 
 - Effort: L (4-6 weeks, requires Apple Developer cert)
 - Risk: Medium (ES framework is complex, requires System Extension approval)
-- Pros: True universal interception, cannot be bypassed, fulfills premise #4
-- Cons: macOS only, requires $99/yr Apple Developer Program, harder to develop
+- Pros: Stronger host process/file enforcement than PATH shims, especially for absolute-path launches and direct file operations
+- Cons: macOS only, entitlement-gated, not a network egress layer, requires careful deadline/fail-mode design
 
 ### Approach C: MCP Governance Proxy (v1.5 — adds protocol-level context)
 
@@ -108,7 +111,7 @@ Local MCP proxy between agent and MCP servers. Intercepts tool calls with full s
 | Phase | Timeline | What ships | Interception |
 |-------|----------|-----------|-------------|
 | v0.1 | Week 2 | PATH shim daemon + phone approval | Shell commands |
-| v1.0 | Week 6 | Endpoint Security agent | ALL process/file/network |
+| v1.0 | Week 6+ | Endpoint Security agent | Selected process/file authorization events |
 | v1.5 | Week 10 | MCP proxy layer | Tool-level semantic context |
 
 Each phase ships independently. Each phase makes the product strictly better. Users see the same UX throughout; the enforcement mechanism strengthens underneath.

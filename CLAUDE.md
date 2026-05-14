@@ -22,8 +22,8 @@ Three-phase build, each ships independently:
 - macOS only for now
 
 ### v1.0 — Endpoint Security Agent (future)
-- macOS Endpoint Security framework for kernel-level interception
-- Cannot be bypassed (no PATH tricks, no absolute paths, no direct syscalls)
+- macOS Endpoint Security framework for selected host process/file authorization
+- Closes important PATH-shim bypasses for covered event classes, but remains entitlement-gated and must be verified
 - Requires Apple Developer Program ($99/yr) + System Extension entitlement
 
 ### v1.5 — MCP Governance Proxy (future)

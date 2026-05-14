@@ -73,3 +73,7 @@ The macOS native provider should eventually own:
 
 Until those pieces exist, Agentbox should describe macOS native enforcement as a
 planned provider descriptor, not as shipped support.
+
+See [macOS Endpoint Security enforcement design](macos-endpoint-security.md) and
+[macOS system extension scaffold plan](macos-system-extension-scaffold.md) for
+the planned host-level enforcement path.
