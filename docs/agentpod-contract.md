@@ -90,6 +90,16 @@ tests keep the non-Linux path unavailable. With that gate enabled on Linux,
 lifecycle. Without the gate, the command exits with this boundary instead of
 silently falling back to Podman or pretending the native provider is ready.
 
+Linux live verification is intentionally separate from the default macOS test
+suite:
+
+```sh
+scripts/smoke-linux-native.sh
+```
+
+The smoke script requires Linux, `unshare`, and `jq`; it enables
+`AGENTBOX_LINUX_NATIVE=1` only for the gated run.
+
 ## Adaptive Runtime Selection
 
 Agentbox should choose or recommend a provider by task risk.
