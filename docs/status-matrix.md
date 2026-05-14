@@ -46,7 +46,7 @@ Not every provider boundary is implemented yet.
 | Session replay metadata | Shipped | Session evidence bundles include ordered replay metadata with audit ids, hash links, policy buckets, decisions, and explicit metadata-only limitations. |
 | Minipod manifest CLI | Shipped | `agentbox minipod-spec` generates and validates a deny-by-default manifest, including `--policy-bundle` task policy JSON files. |
 | Runtime provider registry | Shipped | `RuntimeProviderRegistry` can resolve AgentPod provider descriptors and compatibility providers, and can explain provider selection by risk and explicit provider hints. |
-| Runtime provider listing | Shipped | `agentbox providers` reports family, platform, shipped/experimental/descriptor-only status, and network enforcement claims. |
+| Runtime provider listing | Shipped | `agentbox providers` reports family, platform, shipped/experimental/descriptor-only status, and network enforcement claims. `agentbox providers --json` exposes the same provider truth metadata for scripts and release checks. |
 | Network enforcement capability flags | Shipped | Runtime providers separately report active network enforcement strength, so planned policy support is not confused with packet/domain enforcement. |
 | AgentPod provider descriptors | Shipped | `agentpod-macos`, `agentpod-linux`, `agentpod-windows`, and `remote-agentpod` expose capability metadata while returning unavailable for execution. |
 | Podman compatibility adapter | Shipped | `agentbox run` now routes through `RuntimeManager` and the Podman `RuntimeProvider` adapter, creating governed runtime sessions and evidence events. |

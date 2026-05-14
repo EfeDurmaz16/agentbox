@@ -332,7 +332,11 @@ enum Commands {
         workspace_overlay_dir: Option<PathBuf>,
     },
     /// List runtime providers and their current implementation status
-    Providers,
+    Providers {
+        /// Emit JSON
+        #[arg(long)]
+        json: bool,
+    },
     /// Inspect persisted minipod session metadata
     MinipodInspect {
         /// Session id to inspect; omit to list all persisted sessions
@@ -3009,8 +3013,74 @@ fn apply_credential_ttl(
     }
 }
 
-fn cmd_providers() {
+fn cmd_providers(json: bool) {
     use agentbox_daemon::runtime::registry::RuntimeProviderRegistry;
+
+    let mut rows = vec![serde_json::json!({
+        "provider": "direct-host",
+        "family": "direct-host",
+        "platform": std::env::consts::OS,
+        "status": "shipped",
+        "bridge": "unix-socket",
+        "network": "command-mediation",
+        "capabilities": ["shim", "policy", "approval", "audit"],
+    })];
+
+    let registry = RuntimeProviderRegistry::with_local_providers(
+        socket_path().to_string_lossy().into_owned(),
+        find_shim_binary()
+            .map(|path| path.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+    );
+    for name in registry.names() {
+        let provider = registry
+            .get(name)
+            .expect("provider name came from registry");
+        if provider.name() == "podman" {
+            continue;
+        }
+        rows.push(serde_json::json!({
+            "provider": provider.name(),
+            "family": format_provider_family(provider.family()),
+            "platform": provider.platform(),
+            "status": format_provider_status(provider.implementation_status()),
+            "bridge": format_bridge_transports(provider.bridge_transport_kinds()),
+            "network": format_network_enforcement(provider.network_enforcement_capabilities()),
+            "capabilities": provider
+                .capabilities()
+                .iter()
+                .map(|capability| format!("{capability:?}"))
+                .collect::<Vec<_>>(),
+        }));
+    }
+
+    let podman_status = if Command::new("podman")
+        .arg("--version")
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
+    {
+        "experimental"
+    } else {
+        "unavailable"
+    };
+    rows.push(serde_json::json!({
+        "provider": "podman",
+        "family": "compat",
+        "platform": "linux-vm",
+        "status": podman_status,
+        "bridge": "unix-socket",
+        "network": "none",
+        "capabilities": ["container isolation", "shim bridge"],
+    }));
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&rows).expect("failed to serialize providers")
+        );
+        return;
+    }
 
     println!(
         "{:<18} {:<14} {:<10} {:<18} {:<18} {:<24} CAPABILITIES",
@@ -3025,13 +3095,6 @@ fn cmd_providers() {
         "shipped",
         "unix-socket",
         "command-mediation"
-    );
-
-    let registry = RuntimeProviderRegistry::with_local_providers(
-        socket_path().to_string_lossy().into_owned(),
-        find_shim_binary()
-            .map(|path| path.to_string_lossy().into_owned())
-            .unwrap_or_default(),
     );
     for name in registry.names() {
         let provider = registry
@@ -3058,16 +3121,6 @@ fn cmd_providers() {
         );
     }
 
-    let podman_status = if Command::new("podman")
-        .arg("--version")
-        .output()
-        .map(|output| output.status.success())
-        .unwrap_or(false)
-    {
-        "experimental"
-    } else {
-        "unavailable"
-    };
     println!(
         "{:<18} {:<14} {:<10} {:<18} {:<18} {:<24} container isolation, shim bridge",
         "podman", "compat", "linux-vm", podman_status, "unix-socket", "none"
@@ -3661,7 +3714,7 @@ async fn main() {
             workspace_mode,
             workspace_overlay_dir,
         }),
-        Commands::Providers => cmd_providers(),
+        Commands::Providers { json } => cmd_providers(json),
         Commands::MinipodInspect { session_id, json } => cmd_minipod_inspect(session_id, json),
         Commands::Review {
             session_id,
