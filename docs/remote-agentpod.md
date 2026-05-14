@@ -259,6 +259,10 @@ remote credential handoff protocol exists; remote env injection must not become
 an accidental secret channel. Create-session similarly rejects specs carrying
 credential grants or host environment inheritance until the handoff protocol is
 explicit.
+Before spawning a process, exec classifies the argv with the session AgentPod
+network policy. Commands outside the allowed policy return exit code `126`
+without being spawned; approval-required commands are denied until a remote
+approval bridge is implemented.
 Evidence upload validates the evidence metadata and records an in-memory receipt
 on the matching worker session before acknowledging the bundle hash and event
 count. With `--state-dir`, those receipts are also persisted in the worker state
@@ -282,15 +286,16 @@ receipts, and stored bundle payload references after binding the caller-provided
 When the daemon-side provider creates a remote session, it persists the worker
 endpoint, worker session id, worker identity, and worker evidence endpoint in
 session labels so later exec/destroy calls can route back to the same worker.
-Workspace materialization, workspace export, and local apply now exist as
-hash-checked bundle flows. Policy enforcement inside the worker, credential
-handoff, full evidence streaming, supervised worker restarts, and merge/conflict
-UX beyond overwrite protection remain future work.
+Workspace materialization, workspace export, local apply, and worker-side
+command policy now exist as hash-checked/governed flows. Credential handoff,
+full evidence streaming, supervised worker restarts, and merge/conflict UX
+beyond overwrite protection remain future work.
 
 `scripts/smoke-remote-worker.sh` starts this worker on a random loopback port,
 posts a handshake descriptor, checks the Ed25519 acknowledgement shape, creates
 worker sessions from generated AgentPod specs, runs a direct `printf` exec
-request, exports the worker workspace through both direct HTTP and the CLI
+request, proves deny-by-default worker policy blocks an unknown `curl` before
+spawn, exports the worker workspace through both direct HTTP and the CLI
 pullback command, applies the pulled workspace to a local directory, uploads a
 bundle metadata receipt, verifies the returned lifecycle evidence, uploads and
 verifies a hash-bound bundle payload, restarts the worker to prove persisted
@@ -336,6 +341,6 @@ implementation.
 ## Current Boundary
 
 `remote-agentpod` is now an experimental gated provider. The missing pieces are
-sandboxed remote execution, worker-side policy enforcement, credential handoff,
-evidence streaming, supervised worker lifecycle, richer workspace merge UX, and
-live HTTPS worker conformance tests.
+sandboxed remote execution, credential handoff, evidence streaming, supervised
+worker lifecycle, richer workspace merge UX, and live HTTPS worker conformance
+tests.

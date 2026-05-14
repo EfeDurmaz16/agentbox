@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 agentbox-daemon = { path = "../agentbox-daemon" }
+agentbox-policy = { path = "../agentbox-policy" }
 axum = { workspace = true }
 chrono = { workspace = true }
 ed25519-dalek = { workspace = true }

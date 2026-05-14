@@ -69,6 +69,7 @@ name = "agentbox-remote-worker"
 version = "0.1.0"
 dependencies = [
  "agentbox-daemon",
+ "agentbox-policy",
  "axum",
  "chrono",
  "ed25519-dalek",

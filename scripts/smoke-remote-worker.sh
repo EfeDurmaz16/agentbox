@@ -148,6 +148,81 @@ assert data["result"]["stdout"] == "remote-worker-smoke"
 assert "EvidenceSealed" in data["lifecycle_events"]
 PY
 
+mkdir -p "$TMPDIR/policy-workspace"
+cargo run --locked -q -p agentbox-cli -- minipod-spec remote-policy-smoke \
+  --risk medium \
+  --workspace "$TMPDIR/policy-workspace" \
+  --network-mode deny-by-default \
+  >"$TMPDIR/policy-spec.json"
+python3 - "$TMPDIR/policy-spec.json" "$TMPDIR/handshake-ack.json" >"$TMPDIR/policy-create-request.json" <<'PY'
+import json
+import sys
+from datetime import datetime, timezone
+
+with open(sys.argv[1], "r", encoding="utf-8") as fh:
+    spec = json.load(fh)
+with open(sys.argv[2], "r", encoding="utf-8") as fh:
+    handshake_ack = json.load(fh)
+
+now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+json.dump({
+    "transport": {
+        "schema_version": 1,
+        "provider": "remote-agentpod",
+        "endpoint": "https://worker.example.com/agentpod",
+        "auth_kind": "SignedChallenge",
+        "evidence_mode": "BundleUpload",
+        "kill_switch_required": True,
+        "secret_material_included": False,
+        "lifecycle": {
+            "schema_version": 1,
+            "create_timeout_seconds": 120,
+            "command_timeout_seconds": 3600,
+            "idle_timeout_seconds": 300,
+            "destroy_timeout_seconds": 60,
+            "required_events": [
+                "WorkerAllocated",
+                "SessionCreated",
+                "CommandStarted",
+                "CommandFinished",
+                "EvidenceSealed",
+                "KillSwitchAck",
+                "WorkerDestroyed",
+            ],
+            "kill_switch_required": True,
+        },
+        "created_at": now,
+    },
+    "handshake_ack": handshake_ack,
+    "spec": spec,
+}, sys.stdout)
+PY
+
+curl -fsS "http://127.0.0.1:${PORT}/sessions" \
+  -H 'content-type: application/json' \
+  --data @"$TMPDIR/policy-create-request.json" \
+  >"$TMPDIR/policy-create-response.json"
+POLICY_SESSION_ID="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["session_id"])' "$TMPDIR/policy-create-response.json")"
+POLICY_WORKER_SESSION_ID="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["worker_session_id"])' "$TMPDIR/policy-create-response.json")"
+
+curl -fsS "http://127.0.0.1:${PORT}/sessions/${POLICY_WORKER_SESSION_ID}/exec" \
+  -H 'content-type: application/json' \
+  --data "{\"session_id\":\"${POLICY_SESSION_ID}\",\"worker_session_id\":\"${POLICY_WORKER_SESSION_ID}\",\"command\":{\"argv\":[\"curl\",\"https://unknown.example.com\"],\"working_dir\":null,\"env\":{},\"timeout_seconds\":5}}" \
+  >"$TMPDIR/policy-exec-response.json"
+
+python3 - "$TMPDIR/policy-exec-response.json" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], "r", encoding="utf-8") as fh:
+    data = json.load(fh)
+
+assert data["result"]["exit_code"] == 126
+assert "policy denied" in data["result"]["stderr"]
+assert "unknown.example.com" in data["result"]["stderr"]
+assert "EvidenceSealed" in data["lifecycle_events"]
+PY
+
 printf 'worker export smoke\n' >"$TMPDIR/workspace/export.txt"
 curl -fsS "http://127.0.0.1:${PORT}/sessions/${WORKER_SESSION_ID}/workspace/export?session_id=${SESSION_ID}" \
   >"$TMPDIR/workspace-export-response.json"

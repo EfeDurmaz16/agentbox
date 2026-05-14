@@ -13,7 +13,10 @@ use agentbox_daemon::runtime::providers::remote::{
     RemoteAgentPodWorkspaceBundle, RemoteAgentPodWorkspaceExportResponse,
     RemoteAgentPodWorkspaceFile,
 };
-use agentbox_daemon::runtime::types::{CommandResult, RuntimeCapability, RuntimeStatus};
+use agentbox_daemon::runtime::types::{
+    CommandResult, NetworkMode, RuntimeCapability, RuntimeStatus,
+};
+use agentbox_policy::classify::{self, Bucket, CommandContext, PolicyConfig, PolicyNetworkMode};
 use axum::extract::{Path as AxumPath, Query, State};
 use axum::http::StatusCode;
 use axum::routing::{get, post};
@@ -67,10 +70,30 @@ struct RemoteWorkerState {
 struct WorkerSession {
     session_id: String,
     workspace_host_path: PathBuf,
+    policy: WorkerPolicy,
     status: RuntimeStatus,
     kill_tx: watch::Sender<bool>,
     evidence_receipts: Vec<WorkerEvidenceReceipt>,
     stored_evidence_bundles: Vec<WorkerStoredEvidenceBundle>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct WorkerPolicy {
+    workspace_guest_path: String,
+    allowed_domains: Vec<String>,
+    denied_domains: Vec<String>,
+    allow_localhost: bool,
+    network_mode: WorkerPolicyNetworkMode,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+enum WorkerPolicyNetworkMode {
+    None,
+    DenyByDefault,
+    AllowListed,
+    ApprovalOnFirstContact,
+    OpenWithGuardrails,
+    Host,
 }
 
 #[derive(Clone)]
@@ -96,6 +119,8 @@ struct WorkerSessionSnapshot {
     worker_session_id: String,
     #[serde(default = "default_worker_workspace")]
     workspace_host_path: PathBuf,
+    #[serde(default)]
+    policy: WorkerPolicy,
     status: RuntimeStatus,
     evidence_receipts: Vec<WorkerEvidenceReceiptSnapshot>,
     #[serde(default)]
@@ -198,12 +223,73 @@ fn worker_error(status: StatusCode, message: impl Into<String>) -> (StatusCode, 
     )
 }
 
+impl Default for WorkerPolicy {
+    fn default() -> Self {
+        Self {
+            workspace_guest_path: "/workspace".into(),
+            allowed_domains: Vec::new(),
+            denied_domains: Vec::new(),
+            allow_localhost: false,
+            network_mode: WorkerPolicyNetworkMode::DenyByDefault,
+        }
+    }
+}
+
+impl WorkerPolicy {
+    fn from_spec(spec: &agentbox_daemon::runtime::types::MinipodSpec) -> Self {
+        Self {
+            workspace_guest_path: spec.filesystem.workspace_guest_path.clone(),
+            allowed_domains: spec.network.allowed_domains.clone(),
+            denied_domains: spec.network.denied_domains.clone(),
+            allow_localhost: spec.network.allow_localhost,
+            network_mode: WorkerPolicyNetworkMode::from_network_mode(&spec.network.mode),
+        }
+    }
+
+    fn to_policy_config(&self, workspace_host_path: &Path) -> PolicyConfig {
+        PolicyConfig {
+            workspace: Some(workspace_host_path.display().to_string()),
+            allowed_domains: self.allowed_domains.clone(),
+            denied_domains: self.denied_domains.clone(),
+            allow_localhost: self.allow_localhost,
+            network_mode: self.network_mode.to_policy_network_mode(),
+            always_allow: Vec::new(),
+            always_block: Vec::new(),
+        }
+    }
+}
+
+impl WorkerPolicyNetworkMode {
+    fn from_network_mode(mode: &NetworkMode) -> Self {
+        match mode {
+            NetworkMode::None => Self::None,
+            NetworkMode::DenyByDefault => Self::DenyByDefault,
+            NetworkMode::AllowListed => Self::AllowListed,
+            NetworkMode::ApprovalOnFirstContact => Self::ApprovalOnFirstContact,
+            NetworkMode::OpenWithGuardrails => Self::OpenWithGuardrails,
+            NetworkMode::Host => Self::Host,
+        }
+    }
+
+    fn to_policy_network_mode(self) -> PolicyNetworkMode {
+        match self {
+            Self::None => PolicyNetworkMode::None,
+            Self::DenyByDefault => PolicyNetworkMode::DenyByDefault,
+            Self::AllowListed => PolicyNetworkMode::AllowListed,
+            Self::ApprovalOnFirstContact => PolicyNetworkMode::ApprovalOnFirstContact,
+            Self::OpenWithGuardrails => PolicyNetworkMode::OpenWithGuardrails,
+            Self::Host => PolicyNetworkMode::Host,
+        }
+    }
+}
+
 impl WorkerSession {
-    fn new(session_id: String, workspace_host_path: PathBuf) -> Self {
+    fn new(session_id: String, workspace_host_path: PathBuf, policy: WorkerPolicy) -> Self {
         let (kill_tx, _kill_rx) = watch::channel(false);
         Self {
             session_id,
             workspace_host_path,
+            policy,
             status: RuntimeStatus::Running,
             kill_tx,
             evidence_receipts: Vec::new(),
@@ -225,6 +311,7 @@ impl WorkerSession {
         Self {
             session_id: snapshot.session_id,
             workspace_host_path: snapshot.workspace_host_path,
+            policy: snapshot.policy,
             status: snapshot.status,
             kill_tx,
             evidence_receipts: snapshot
@@ -256,6 +343,7 @@ impl WorkerSession {
             session_id: self.session_id.clone(),
             worker_session_id,
             workspace_host_path: self.workspace_host_path.clone(),
+            policy: self.policy.clone(),
             status: self.status.clone(),
             evidence_receipts: self
                 .evidence_receipts
@@ -334,6 +422,7 @@ async fn handshake(
         capabilities: vec![
             RuntimeCapability::ApprovalBridge,
             RuntimeCapability::EvidenceExport,
+            RuntimeCapability::NetworkPolicy,
         ],
         evidence_endpoint: state.config.evidence_endpoint.clone(),
         lifecycle_ack: true,
@@ -364,7 +453,11 @@ async fn create_session(
     if let Some(bundle) = request.workspace_bundle.as_ref() {
         materialize_worker_workspace_bundle(&workspace_host_path, bundle).await?;
     }
-    let session = WorkerSession::new(request.spec.id.clone(), workspace_host_path);
+    let session = WorkerSession::new(
+        request.spec.id.clone(),
+        workspace_host_path,
+        WorkerPolicy::from_spec(&request.spec),
+    );
     state
         .sessions
         .lock()
@@ -524,6 +617,7 @@ fn validate_exec_material(
 struct WorkerExecContext {
     kill_rx: watch::Receiver<bool>,
     workspace_host_path: PathBuf,
+    policy: WorkerPolicy,
 }
 
 async fn session_exec_context(
@@ -558,6 +652,7 @@ async fn session_exec_context(
     Ok(WorkerExecContext {
         kill_rx: session.kill_receiver(),
         workspace_host_path: session.workspace_host_path.clone(),
+        policy: session.policy.clone(),
     })
 }
 
@@ -595,6 +690,9 @@ async fn execute_command(
             ),
             duration_ms: elapsed_ms(started),
         };
+    }
+    if let Some(result) = enforce_worker_policy(&request, &context, &working_dir, started) {
+        return result;
     }
     command.current_dir(&working_dir);
     command.kill_on_drop(true);
@@ -656,6 +754,41 @@ async fn execute_command(
             duration_ms: elapsed_ms(started),
         },
     }
+}
+
+fn enforce_worker_policy(
+    request: &RemoteAgentPodExecRequest,
+    context: &WorkerExecContext,
+    working_dir: &Path,
+    started: Instant,
+) -> Option<CommandResult> {
+    let program = request.command.argv.first()?;
+    let ctx = CommandContext {
+        binary: program.clone(),
+        args: request.command.argv.iter().skip(1).cloned().collect(),
+        cwd: working_dir.display().to_string(),
+        parent_process: Some("agentbox-remote-worker".into()),
+        pid: std::process::id(),
+    };
+    let classification = classify::classify(
+        &ctx,
+        &context
+            .policy
+            .to_policy_config(&context.workspace_host_path),
+    );
+    if matches!(classification.bucket, Bucket::Allow) {
+        return None;
+    }
+
+    Some(CommandResult {
+        exit_code: 126,
+        stdout: String::new(),
+        stderr: format!(
+            "agentbox remote worker policy denied command before execution: {:?}: {}",
+            classification.bucket, classification.reason
+        ),
+        duration_ms: elapsed_ms(started),
+    })
 }
 
 async fn wait_for_kill(kill_rx: &mut watch::Receiver<bool>) -> bool {
@@ -1606,7 +1739,11 @@ mod tests {
         let state = test_state(config);
         state.sessions.lock().await.insert(
             "worker-session-1".into(),
-            WorkerSession::new("session-1".into(), std::env::temp_dir()),
+            WorkerSession::new(
+                "session-1".into(),
+                std::env::temp_dir(),
+                WorkerPolicy::default(),
+            ),
         );
         let request = RemoteAgentPodExecRequest {
             session_id: "session-1".into(),
@@ -1639,7 +1776,11 @@ mod tests {
         let state = test_state(config);
         state.sessions.lock().await.insert(
             "worker-session-1".into(),
-            WorkerSession::new("session-1".into(), std::env::temp_dir()),
+            WorkerSession::new(
+                "session-1".into(),
+                std::env::temp_dir(),
+                WorkerPolicy::default(),
+            ),
         );
         let request = RemoteAgentPodExecRequest {
             session_id: "session-1".into(),
@@ -1697,7 +1838,7 @@ mod tests {
         ));
         state.sessions.lock().await.insert(
             "worker-session-1".into(),
-            WorkerSession::new("session-1".into(), workspace),
+            WorkerSession::new("session-1".into(), workspace, WorkerPolicy::default()),
         );
         let request = RemoteAgentPodExecRequest {
             session_id: "session-1".into(),
@@ -1726,7 +1867,11 @@ mod tests {
         let state = test_state(config);
         state.sessions.lock().await.insert(
             "worker-session-1".into(),
-            WorkerSession::new("session-1".into(), std::env::temp_dir()),
+            WorkerSession::new(
+                "session-1".into(),
+                std::env::temp_dir(),
+                WorkerPolicy::default(),
+            ),
         );
         let request = RemoteAgentPodExecRequest {
             session_id: "session-1".into(),
@@ -1743,6 +1888,43 @@ mod tests {
 
         assert_eq!(err.0, StatusCode::BAD_REQUEST);
         assert!(err.1 .0.error.contains("credential handoff"));
+    }
+
+    #[tokio::test]
+    async fn exec_command_enforces_worker_network_policy_before_spawn() {
+        let config = RemoteWorkerConfig::new(
+            "worker.local/dev",
+            "https://worker.example.com/agentpod/evidence",
+            SigningKey::from_bytes(&[41_u8; 32]),
+        );
+        let state = test_state(config);
+        state.sessions.lock().await.insert(
+            "worker-session-1".into(),
+            WorkerSession::new(
+                "session-1".into(),
+                std::env::temp_dir(),
+                WorkerPolicy {
+                    network_mode: WorkerPolicyNetworkMode::DenyByDefault,
+                    ..WorkerPolicy::default()
+                },
+            ),
+        );
+        let request = RemoteAgentPodExecRequest {
+            session_id: "session-1".into(),
+            worker_session_id: "worker-session-1".into(),
+            command: ExecCommand {
+                argv: vec!["curl".into(), "https://unknown.example.com".into()],
+                working_dir: None,
+                env: HashMap::new(),
+                timeout_seconds: Some(5),
+            },
+        };
+
+        let response = exec_command(State(state), Json(request)).await.unwrap().0;
+
+        assert_eq!(response.result.exit_code, 126);
+        assert!(response.result.stderr.contains("policy denied"));
+        assert!(response.result.stderr.contains("unknown.example.com"));
     }
 
     #[tokio::test]
@@ -1812,7 +1994,11 @@ mod tests {
         std::fs::write(workspace.join(".env"), "TOKEN=secret\n").unwrap();
         state.sessions.lock().await.insert(
             "worker-session-1".into(),
-            WorkerSession::new("session-1".into(), workspace.clone()),
+            WorkerSession::new(
+                "session-1".into(),
+                workspace.clone(),
+                WorkerPolicy::default(),
+            ),
         );
 
         let Json(response) = export_workspace(
@@ -1882,7 +2068,11 @@ mod tests {
         let state = test_state(config);
         state.sessions.lock().await.insert(
             "worker-session-1".into(),
-            WorkerSession::new("session-1".into(), std::env::temp_dir()),
+            WorkerSession::new(
+                "session-1".into(),
+                std::env::temp_dir(),
+                WorkerPolicy::default(),
+            ),
         );
         let request = RemoteAgentPodExecRequest {
             session_id: "session-1".into(),
@@ -1928,7 +2118,11 @@ mod tests {
         let state = test_state(config);
         state.sessions.lock().await.insert(
             "worker-session-1".into(),
-            WorkerSession::new("session-1".into(), std::env::temp_dir()),
+            WorkerSession::new(
+                "session-1".into(),
+                std::env::temp_dir(),
+                WorkerPolicy::default(),
+            ),
         );
         let sealed_at = chrono::Utc::now();
         let request = RemoteAgentPodEvidenceUploadRequest {
@@ -1983,7 +2177,11 @@ mod tests {
         let state = test_state(config);
         state.sessions.lock().await.insert(
             "worker-session-1".into(),
-            WorkerSession::new("session-1".into(), std::env::temp_dir()),
+            WorkerSession::new(
+                "session-1".into(),
+                std::env::temp_dir(),
+                WorkerPolicy::default(),
+            ),
         );
         let (bundle_json, bundle_sha256) =
             test_evidence_bundle_upload_json("session-1", "worker-session-1");
@@ -2029,7 +2227,11 @@ mod tests {
         );
         let state = test_state(config);
         let sealed_at = chrono::Utc::now();
-        let mut session = WorkerSession::new("session-1".into(), std::env::temp_dir());
+        let mut session = WorkerSession::new(
+            "session-1".into(),
+            std::env::temp_dir(),
+            WorkerPolicy::default(),
+        );
         session.evidence_receipts.push(WorkerEvidenceReceipt {
             bundle_sha256: "c".repeat(64),
             derived_from_bundle: true,
@@ -2085,7 +2287,11 @@ mod tests {
         let state = test_state(config);
         state.sessions.lock().await.insert(
             "worker-session-1".into(),
-            WorkerSession::new("session-1".into(), std::env::temp_dir()),
+            WorkerSession::new(
+                "session-1".into(),
+                std::env::temp_dir(),
+                WorkerPolicy::default(),
+            ),
         );
 
         let err = evidence_status(
@@ -2112,7 +2318,11 @@ mod tests {
         let state = test_state(config);
         state.sessions.lock().await.insert(
             "worker-session-1".into(),
-            WorkerSession::new("session-1".into(), std::env::temp_dir()),
+            WorkerSession::new(
+                "session-1".into(),
+                std::env::temp_dir(),
+                WorkerPolicy::default(),
+            ),
         );
         let request = WorkerEvidenceBundleUploadRequest {
             session_id: "session-1".into(),
@@ -2141,7 +2351,11 @@ mod tests {
         let state = test_state(config);
         state.sessions.lock().await.insert(
             "worker-session-1".into(),
-            WorkerSession::new("session-1".into(), std::env::temp_dir()),
+            WorkerSession::new(
+                "session-1".into(),
+                std::env::temp_dir(),
+                WorkerPolicy::default(),
+            ),
         );
         let bundle_json = "{}".to_string();
         let request = WorkerEvidenceBundleUploadRequest {
@@ -2224,7 +2438,11 @@ mod tests {
         )
         .with_state_dir(&path);
         let state = test_state(config.clone());
-        let mut session = WorkerSession::new("session-1".into(), std::env::temp_dir());
+        let mut session = WorkerSession::new(
+            "session-1".into(),
+            std::env::temp_dir(),
+            WorkerPolicy::default(),
+        );
         let sealed_at = chrono::Utc::now();
         session.evidence_receipts.push(WorkerEvidenceReceipt {
             bundle_sha256: "b".repeat(64),
