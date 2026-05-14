@@ -3047,7 +3047,15 @@ fn read_evidence_bundle_index(bundle_dir: &Path) -> Result<EvidenceBundleIndex, 
         .map_err(|e| format!("failed to parse {}: {e}", index_path.display()))
 }
 
-fn load_remote_evidence_metadata_from_bundle(bundle_dir: &Path) -> Result<(String, u64), String> {
+struct RemoteEvidenceBundleMetadata {
+    bundle_id: String,
+    root_sha256: String,
+    event_count: u64,
+}
+
+fn load_remote_evidence_metadata_from_bundle(
+    bundle_dir: &Path,
+) -> Result<RemoteEvidenceBundleMetadata, String> {
     verify_evidence_bundle_dir(bundle_dir)?;
     let index = read_evidence_bundle_index(bundle_dir)?;
     let bundle_path = bundle_dir.join("bundle.json");
@@ -3074,7 +3082,11 @@ fn load_remote_evidence_metadata_from_bundle(bundle_dir: &Path) -> Result<(Strin
     if event_count == 0 {
         return Err("evidence bundle does not contain any uploadable evidence events".to_string());
     }
-    Ok((index.root_sha256, event_count))
+    Ok(RemoteEvidenceBundleMetadata {
+        bundle_id: index.bundle_id,
+        root_sha256: index.root_sha256,
+        event_count,
+    })
 }
 
 fn evidence_bundle_root_sha256(files: &[EvidenceBundleFile]) -> String {
@@ -3728,38 +3740,50 @@ fn cmd_remote_evidence(
 ) {
     use agentbox_daemon::runtime::providers::remote::RemoteAgentPodEvidenceUploadRequest;
 
-    let (bundle_sha256, event_count) = if let Some(bundle_dir) = bundle_dir {
-        if bundle_sha256.is_some() || event_count.is_some() {
-            eprintln!(
-                "error: --bundle-dir cannot be combined with --bundle-sha256 or --event-count"
-            );
-            std::process::exit(1);
-        }
-        load_remote_evidence_metadata_from_bundle(&bundle_dir).unwrap_or_else(|e| {
-            eprintln!(
-                "error: failed to derive remote evidence metadata from {}: {}",
-                bundle_dir.display(),
-                e
-            );
-            std::process::exit(1);
-        })
-    } else {
-        let Some(bundle_sha256) = bundle_sha256 else {
-            eprintln!("error: --bundle-sha256 is required unless --bundle-dir is provided");
-            std::process::exit(1);
+    let (bundle_sha256, event_count, bundle_id, bundle_root_sha256, derived_from_bundle) =
+        if let Some(bundle_dir) = bundle_dir {
+            if bundle_sha256.is_some() || event_count.is_some() {
+                eprintln!(
+                    "error: --bundle-dir cannot be combined with --bundle-sha256 or --event-count"
+                );
+                std::process::exit(1);
+            }
+            let metadata =
+                load_remote_evidence_metadata_from_bundle(&bundle_dir).unwrap_or_else(|e| {
+                    eprintln!(
+                        "error: failed to derive remote evidence metadata from {}: {}",
+                        bundle_dir.display(),
+                        e
+                    );
+                    std::process::exit(1);
+                });
+            (
+                metadata.root_sha256.clone(),
+                metadata.event_count,
+                Some(metadata.bundle_id),
+                Some(metadata.root_sha256),
+                true,
+            )
+        } else {
+            let Some(bundle_sha256) = bundle_sha256 else {
+                eprintln!("error: --bundle-sha256 is required unless --bundle-dir is provided");
+                std::process::exit(1);
+            };
+            let Some(event_count) = event_count else {
+                eprintln!("error: --event-count is required unless --bundle-dir is provided");
+                std::process::exit(1);
+            };
+            (bundle_sha256, event_count, None, None, false)
         };
-        let Some(event_count) = event_count else {
-            eprintln!("error: --event-count is required unless --bundle-dir is provided");
-            std::process::exit(1);
-        };
-        (bundle_sha256, event_count)
-    };
 
     let request = RemoteAgentPodEvidenceUploadRequest {
         session_id,
         worker_session_id,
         evidence_mode: parse_remote_evidence_mode(&evidence),
         bundle_sha256,
+        derived_from_bundle,
+        bundle_id,
+        bundle_root_sha256,
         event_count,
         sealed_at: chrono::Utc::now(),
         secret_material_included: false,
@@ -4622,10 +4646,10 @@ mod tests {
         )
         .unwrap();
 
-        let (root_sha256, event_count) =
-            load_remote_evidence_metadata_from_bundle(&output_dir).unwrap();
-        assert_eq!(root_sha256, index.root_sha256);
-        assert_eq!(event_count, 1);
+        let metadata = load_remote_evidence_metadata_from_bundle(&output_dir).unwrap();
+        assert_eq!(metadata.bundle_id, index.bundle_id);
+        assert_eq!(metadata.root_sha256, index.root_sha256);
+        assert_eq!(metadata.event_count, 1);
 
         let _ = fs::remove_dir_all(output_dir);
     }

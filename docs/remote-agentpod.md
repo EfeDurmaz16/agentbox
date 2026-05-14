@@ -90,6 +90,9 @@ agentbox remote-evidence \
 
 This only validates and prints upload metadata. It does not upload evidence,
 sign the bundle, or claim a live worker connection.
+When `--bundle-dir` is used, the printed request includes `derived_from_bundle`,
+`bundle_id`, and `bundle_root_sha256` so a future worker can distinguish manual
+hash entry from metadata derived from a verified local bundle.
 
 ## Transport Conformance
 

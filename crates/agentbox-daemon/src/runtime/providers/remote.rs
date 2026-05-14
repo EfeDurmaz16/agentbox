@@ -427,6 +427,12 @@ pub struct RemoteAgentPodEvidenceUploadRequest {
     pub worker_session_id: String,
     pub evidence_mode: RemoteAgentPodEvidenceMode,
     pub bundle_sha256: String,
+    #[serde(default)]
+    pub derived_from_bundle: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bundle_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bundle_root_sha256: Option<String>,
     pub event_count: u64,
     pub sealed_at: DateTime<Utc>,
     pub secret_material_included: bool,
@@ -451,6 +457,31 @@ impl RemoteAgentPodEvidenceUploadRequest {
             return Err(RuntimeError::ManifestRejected(
                 "remote evidence bundle hash must be a SHA-256 hex digest".into(),
             ));
+        }
+        if let Some(root_hash) = &self.bundle_root_sha256 {
+            if root_hash.len() != 64 || !root_hash.chars().all(|value| value.is_ascii_hexdigit()) {
+                return Err(RuntimeError::ManifestRejected(
+                    "remote evidence bundle root hash must be a SHA-256 hex digest".into(),
+                ));
+            }
+        }
+        if self.derived_from_bundle {
+            if self
+                .bundle_id
+                .as_ref()
+                .map(|value| value.trim().is_empty())
+                .unwrap_or(true)
+            {
+                return Err(RuntimeError::ManifestRejected(
+                    "remote evidence derived from a bundle must include a bundle id".into(),
+                ));
+            }
+            if self.bundle_root_sha256.as_deref() != Some(self.bundle_sha256.as_str()) {
+                return Err(RuntimeError::ManifestRejected(
+                    "remote evidence derived from a bundle must bind bundle_sha256 to bundle_root_sha256"
+                        .into(),
+                ));
+            }
         }
         if self.event_count == 0 {
             return Err(RuntimeError::ManifestRejected(
@@ -1319,6 +1350,9 @@ mod tests {
             worker_session_id: "worker-session-1".into(),
             evidence_mode: RemoteAgentPodEvidenceMode::BundleUpload,
             bundle_sha256: "a".repeat(64),
+            derived_from_bundle: false,
+            bundle_id: None,
+            bundle_root_sha256: None,
             event_count: 2,
             sealed_at: Utc::now(),
             secret_material_included: false,
@@ -1343,12 +1377,48 @@ mod tests {
     }
 
     #[test]
+    fn remote_evidence_upload_request_binds_derived_bundle_root() {
+        let mut request = RemoteAgentPodEvidenceUploadRequest {
+            session_id: "session-1".into(),
+            worker_session_id: "worker-session-1".into(),
+            evidence_mode: RemoteAgentPodEvidenceMode::BundleUpload,
+            bundle_sha256: "f".repeat(64),
+            derived_from_bundle: true,
+            bundle_id: Some("bundle-1".into()),
+            bundle_root_sha256: Some("f".repeat(64)),
+            event_count: 2,
+            sealed_at: Utc::now(),
+            secret_material_included: false,
+        };
+
+        request.validate().unwrap();
+
+        request.bundle_root_sha256 = Some("e".repeat(64));
+        assert!(request
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("bundle_root_sha256"));
+
+        request.bundle_root_sha256 = Some("f".repeat(64));
+        request.bundle_id = Some(" ".into());
+        assert!(request
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("bundle id"));
+    }
+
+    #[test]
     fn remote_evidence_upload_response_must_acknowledge_submitted_bundle() {
         let request = RemoteAgentPodEvidenceUploadRequest {
             session_id: "session-1".into(),
             worker_session_id: "worker-session-1".into(),
             evidence_mode: RemoteAgentPodEvidenceMode::BundleUpload,
             bundle_sha256: "c".repeat(64),
+            derived_from_bundle: false,
+            bundle_id: None,
+            bundle_root_sha256: None,
             event_count: 3,
             sealed_at: Utc::now(),
             secret_material_included: false,
@@ -1430,6 +1500,9 @@ mod tests {
                 worker_session_id: destroyed.worker_session_id,
                 evidence_mode: RemoteAgentPodEvidenceMode::BundleUpload,
                 bundle_sha256: "e".repeat(64),
+                derived_from_bundle: false,
+                bundle_id: None,
+                bundle_root_sha256: None,
                 event_count: 4,
                 sealed_at: Utc::now(),
                 secret_material_included: false,
