@@ -41,6 +41,10 @@ are tested on a real Windows host or Windows CI.
 The first implementation slice should be Job Objects because it gives Agentbox a
 credible process lifecycle boundary without requiring kernel drivers.
 
+Current repo status: Agentbox models a Windows Job Object plan/controller and
+keeps the live Win32 apply path unavailable until Windows-only tests prove
+behavior.
+
 Target behavior:
 
 - create one job object per `RuntimeSession`
