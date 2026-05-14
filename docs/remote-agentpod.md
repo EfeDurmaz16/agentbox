@@ -53,15 +53,22 @@ It does not include the nonce itself or any credential material. Current
 validation requires the acknowledgement signature field to bind the challenge id,
 so a worker cannot return an unrelated signed payload and satisfy the contract.
 
-The HTTPS adapter also enforces a canonical challenge-binding digest:
+The HTTPS adapter accepts two verifier paths. The legacy compatibility path
+still enforces a canonical challenge-binding digest:
 
 ```text
 agentbox-v1:<challenge-id>:sha256(<challenge-id>:<nonce-sha256>:<worker-identity>:<worker-public-key>)
 ```
 
-This is a verifier boundary, not final worker authentication. It proves the
-adapter is no longer accepting loose challenge substrings, while keeping the
-future Ed25519, mTLS, workload-identity, or SSH verifier pluggable.
+The cryptographic path requires:
+
+- `worker_public_key`: `ed25519:<hex-public-key>`
+- `signed_challenge`: `ed25519:<challenge-id>:<hex-signature>`
+
+The signature covers the challenge id, nonce digest, worker identity, worker
+public key, and evidence endpoint. This gives the remote contract a real
+challenge-bound worker identity proof while keeping future mTLS,
+workload-identity, and SSH verifier modes pluggable.
 
 ## Evidence Upload Metadata
 
@@ -123,10 +130,11 @@ API. It posts:
 - `POST /sessions/{worker_session_id}/destroy`
 
 The adapter validates the same handshake, create, exec, and lifecycle evidence
-contracts before returning responses, and the handshake path now requires the
-canonical challenge-binding verifier. It is not wired into
-`RemoteAgentPodProvider` yet because there is no shipped remote worker server or
-cryptographic signed response verifier.
+contracts before returning responses. The handshake path now routes
+`ed25519:<challenge-id>:<signature>` acknowledgements through Ed25519 signature
+verification and falls back to the legacy canonical digest verifier for older
+fixtures. It is not wired into `RemoteAgentPodProvider` yet because there is no
+shipped remote worker server.
 
 Evidence upload is currently metadata-only: the worker must identify the session,
 worker session, evidence mode, SHA-256 bundle hash, event count, and sealed time.
@@ -173,6 +181,5 @@ implementation.
 ## Current Boundary
 
 `remote-agentpod` remains descriptor-only. The missing pieces are a live worker
-server, cryptographic worker authentication, provider lifecycle wiring, command
-execution, evidence streaming, credential handoff, kill switch enforcement, and
-live conformance tests.
+server, provider lifecycle wiring, command execution, evidence streaming,
+credential handoff, kill switch enforcement, and live conformance tests.

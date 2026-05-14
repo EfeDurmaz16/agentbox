@@ -16,6 +16,7 @@ tracing-subscriber = { workspace = true }
 reqwest = { workspace = true }
 ulid = { workspace = true }
 sha2 = { workspace = true }
+ed25519-dalek = { workspace = true }
 toml = "0.8"
 dirs = "6"
 rand = "0.8"

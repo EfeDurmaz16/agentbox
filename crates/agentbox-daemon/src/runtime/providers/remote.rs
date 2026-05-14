@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
+use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -139,6 +140,112 @@ impl RemoteAgentPodHandshakeVerifier for ChallengeBindingHandshakeVerifier {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Ed25519HandshakeVerifier;
+
+impl Ed25519HandshakeVerifier {
+    pub fn signing_payload(
+        descriptor: &RemoteAgentPodHandshakeDescriptor,
+        ack: &RemoteAgentPodHandshakeAck,
+    ) -> String {
+        format!(
+            "agentbox-remote-agentpod-handshake-v1\nchallenge_id={}\nchallenge_nonce_sha256={}\nworker_identity={}\nworker_public_key={}\nevidence_endpoint={}\n",
+            descriptor.challenge_id,
+            descriptor.challenge_nonce_sha256,
+            ack.worker_identity,
+            ack.worker_public_key,
+            ack.evidence_endpoint
+        )
+    }
+
+    fn parse_worker_public_key(value: &str) -> Result<VerifyingKey, RuntimeError> {
+        let Some(hex_key) = value.strip_prefix("ed25519:") else {
+            return Err(RuntimeError::ManifestRejected(
+                "remote AgentPod worker public key must use ed25519:<hex-public-key>".into(),
+            ));
+        };
+        let decoded = decode_hex_exact::<32>(hex_key, "remote AgentPod worker public key")?;
+        VerifyingKey::from_bytes(&decoded).map_err(|_| {
+            RuntimeError::ManifestRejected("remote AgentPod worker public key is invalid".into())
+        })
+    }
+
+    fn parse_signed_challenge(value: &str) -> Result<Signature, RuntimeError> {
+        let Some(rest) = value.strip_prefix("ed25519:") else {
+            return Err(RuntimeError::ManifestRejected(
+                "remote AgentPod signed challenge must use ed25519:<challenge-id>:<hex-signature>"
+                    .into(),
+            ));
+        };
+        let Some((_challenge_id, hex_signature)) = rest.split_once(':') else {
+            return Err(RuntimeError::ManifestRejected(
+                "remote AgentPod signed challenge must bind the challenge id".into(),
+            ));
+        };
+        let decoded = decode_hex_exact::<64>(hex_signature, "remote AgentPod signed challenge")?;
+        Ok(Signature::from_bytes(&decoded))
+    }
+}
+
+impl RemoteAgentPodHandshakeVerifier for Ed25519HandshakeVerifier {
+    fn name(&self) -> &str {
+        "ed25519-challenge-signature"
+    }
+
+    fn verify(
+        &self,
+        descriptor: &RemoteAgentPodHandshakeDescriptor,
+        ack: &RemoteAgentPodHandshakeAck,
+        now: DateTime<Utc>,
+    ) -> Result<RemoteAgentPodVerifiedHandshake, RuntimeError> {
+        ack.validate_for(descriptor, now)?;
+        let verifying_key = Self::parse_worker_public_key(&ack.worker_public_key)?;
+        let signature = Self::parse_signed_challenge(&ack.signed_challenge)?;
+        let expected_prefix = format!("ed25519:{}:", descriptor.challenge_id);
+        if !ack.signed_challenge.starts_with(&expected_prefix) {
+            return Err(RuntimeError::ManifestRejected(
+                "remote AgentPod signed challenge does not bind the exact challenge id".into(),
+            ));
+        }
+        let payload = Self::signing_payload(descriptor, ack);
+        verifying_key
+            .verify(payload.as_bytes(), &signature)
+            .map_err(|_| {
+                RuntimeError::ManifestRejected(
+                    "remote AgentPod signed challenge failed Ed25519 verification".into(),
+                )
+            })?;
+
+        Ok(RemoteAgentPodVerifiedHandshake {
+            worker_identity: ack.worker_identity.clone(),
+            worker_public_key: ack.worker_public_key.clone(),
+            challenge_id: descriptor.challenge_id.clone(),
+            evidence_endpoint: ack.evidence_endpoint.clone(),
+            verified_at: now,
+            verifier: self.name().to_string(),
+            cryptographic_signature_verified: true,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct RemoteAgentPodHandshakeVerifierSet;
+
+impl RemoteAgentPodHandshakeVerifierSet {
+    pub fn verify(
+        &self,
+        descriptor: &RemoteAgentPodHandshakeDescriptor,
+        ack: &RemoteAgentPodHandshakeAck,
+        now: DateTime<Utc>,
+    ) -> Result<RemoteAgentPodVerifiedHandshake, RuntimeError> {
+        if ack.signed_challenge.starts_with("ed25519:") {
+            Ed25519HandshakeVerifier.verify(descriptor, ack, now)
+        } else {
+            ChallengeBindingHandshakeVerifier.verify(descriptor, ack, now)
+        }
+    }
+}
+
 impl RemoteAgentPodHandshakeAck {
     pub fn validate_for(
         &self,
@@ -177,6 +284,34 @@ impl RemoteAgentPodHandshakeAck {
         }
 
         Ok(())
+    }
+}
+
+fn decode_hex_exact<const N: usize>(value: &str, label: &str) -> Result<[u8; N], RuntimeError> {
+    if value.len() != N * 2 {
+        return Err(RuntimeError::ManifestRejected(format!(
+            "{label} must be {} hex characters",
+            N * 2
+        )));
+    }
+    let mut out = [0_u8; N];
+    let bytes = value.as_bytes();
+    for index in 0..N {
+        let high = decode_hex_nibble(bytes[index * 2], label)?;
+        let low = decode_hex_nibble(bytes[index * 2 + 1], label)?;
+        out[index] = (high << 4) | low;
+    }
+    Ok(out)
+}
+
+fn decode_hex_nibble(value: u8, label: &str) -> Result<u8, RuntimeError> {
+    match value {
+        b'0'..=b'9' => Ok(value - b'0'),
+        b'a'..=b'f' => Ok(value - b'a' + 10),
+        b'A'..=b'F' => Ok(value - b'A' + 10),
+        _ => Err(RuntimeError::ManifestRejected(format!(
+            "{label} must contain only hex characters"
+        ))),
     }
 }
 
@@ -619,7 +754,7 @@ impl RemoteAgentPodTransport for HttpRemoteAgentPodTransport {
                     "remote handshake ack was invalid JSON: {err}"
                 ))
             })?;
-        ChallengeBindingHandshakeVerifier.verify(descriptor, &ack, Utc::now())?;
+        RemoteAgentPodHandshakeVerifierSet.verify(descriptor, &ack, Utc::now())?;
         Ok(ack)
     }
 
@@ -881,6 +1016,7 @@ mod tests {
         assert_network_enforcement_metadata, assert_provider_metadata,
         assert_unavailable_provider_contract,
     };
+    use ed25519_dalek::{Signer, SigningKey};
     use std::collections::HashMap;
 
     struct FakeRemoteAgentPodTransport;
@@ -1226,6 +1362,135 @@ mod tests {
             .unwrap_err();
 
         assert!(err.to_string().contains("canonical challenge binding"));
+    }
+
+    #[test]
+    fn ed25519_handshake_verifier_accepts_signed_worker_identity() {
+        let descriptor = RemoteAgentPodHandshakeDescriptor::new(
+            "https://worker.example.com/agentpod",
+            RemoteAgentPodAuthKind::SignedChallenge,
+            300,
+        )
+        .unwrap();
+        let signing_key = SigningKey::from_bytes(&[7_u8; 32]);
+        let verifying_key = signing_key.verifying_key();
+        let mut ack = RemoteAgentPodHandshakeAck {
+            worker_identity: "worker.local/test".into(),
+            worker_public_key: format!("ed25519:{}", hex_encode(&verifying_key.to_bytes())),
+            signed_challenge: String::new(),
+            capabilities: vec![RuntimeCapability::EvidenceExport],
+            evidence_endpoint: "https://worker.example.com/agentpod/evidence".into(),
+            lifecycle_ack: true,
+            secret_material_included: false,
+            expires_at: descriptor.created_at + Duration::seconds(60),
+        };
+        let payload = Ed25519HandshakeVerifier::signing_payload(&descriptor, &ack);
+        let signature = signing_key.sign(payload.as_bytes());
+        ack.signed_challenge = format!(
+            "ed25519:{}:{}",
+            descriptor.challenge_id,
+            hex_encode(&signature.to_bytes())
+        );
+
+        let verified = Ed25519HandshakeVerifier
+            .verify(&descriptor, &ack, descriptor.created_at)
+            .unwrap();
+
+        assert_eq!(verified.worker_identity, ack.worker_identity);
+        assert_eq!(verified.verifier, "ed25519-challenge-signature");
+        assert!(verified.cryptographic_signature_verified);
+    }
+
+    #[test]
+    fn ed25519_handshake_verifier_rejects_tampered_signature_binding() {
+        let descriptor = RemoteAgentPodHandshakeDescriptor::new(
+            "https://worker.example.com/agentpod",
+            RemoteAgentPodAuthKind::SignedChallenge,
+            300,
+        )
+        .unwrap();
+        let signing_key = SigningKey::from_bytes(&[11_u8; 32]);
+        let verifying_key = signing_key.verifying_key();
+        let mut ack = RemoteAgentPodHandshakeAck {
+            worker_identity: "worker.local/test".into(),
+            worker_public_key: format!("ed25519:{}", hex_encode(&verifying_key.to_bytes())),
+            signed_challenge: String::new(),
+            capabilities: vec![RuntimeCapability::EvidenceExport],
+            evidence_endpoint: "https://worker.example.com/agentpod/evidence".into(),
+            lifecycle_ack: true,
+            secret_material_included: false,
+            expires_at: descriptor.created_at + Duration::seconds(60),
+        };
+        let payload = Ed25519HandshakeVerifier::signing_payload(&descriptor, &ack);
+        let signature = signing_key.sign(payload.as_bytes());
+        ack.signed_challenge = format!(
+            "ed25519:{}:{}",
+            descriptor.challenge_id,
+            hex_encode(&signature.to_bytes())
+        );
+        ack.evidence_endpoint = "https://worker.example.com/agentpod/other-evidence".into();
+
+        let err = Ed25519HandshakeVerifier
+            .verify(&descriptor, &ack, descriptor.created_at)
+            .unwrap_err();
+
+        assert!(err.to_string().contains("Ed25519 verification"));
+    }
+
+    #[test]
+    fn remote_handshake_verifier_set_selects_cryptographic_or_legacy_binding() {
+        let descriptor = RemoteAgentPodHandshakeDescriptor::new(
+            "https://worker.example.com/agentpod",
+            RemoteAgentPodAuthKind::SignedChallenge,
+            300,
+        )
+        .unwrap();
+        let signing_key = SigningKey::from_bytes(&[13_u8; 32]);
+        let verifying_key = signing_key.verifying_key();
+        let mut signed_ack = RemoteAgentPodHandshakeAck {
+            worker_identity: "worker.local/test".into(),
+            worker_public_key: format!("ed25519:{}", hex_encode(&verifying_key.to_bytes())),
+            signed_challenge: String::new(),
+            capabilities: vec![RuntimeCapability::EvidenceExport],
+            evidence_endpoint: "https://worker.example.com/agentpod/evidence".into(),
+            lifecycle_ack: true,
+            secret_material_included: false,
+            expires_at: descriptor.created_at + Duration::seconds(60),
+        };
+        let payload = Ed25519HandshakeVerifier::signing_payload(&descriptor, &signed_ack);
+        let signature = signing_key.sign(payload.as_bytes());
+        signed_ack.signed_challenge = format!(
+            "ed25519:{}:{}",
+            descriptor.challenge_id,
+            hex_encode(&signature.to_bytes())
+        );
+
+        let signed = RemoteAgentPodHandshakeVerifierSet
+            .verify(&descriptor, &signed_ack, descriptor.created_at)
+            .unwrap();
+        assert!(signed.cryptographic_signature_verified);
+
+        let mut legacy_ack = RemoteAgentPodHandshakeAck {
+            worker_identity: "worker.local/test".into(),
+            worker_public_key: "ed25519:test-public-key".into(),
+            signed_challenge: String::new(),
+            capabilities: vec![RuntimeCapability::EvidenceExport],
+            evidence_endpoint: "https://worker.example.com/agentpod/evidence".into(),
+            lifecycle_ack: true,
+            secret_material_included: false,
+            expires_at: descriptor.created_at + Duration::seconds(60),
+        };
+        legacy_ack.signed_challenge =
+            ChallengeBindingHandshakeVerifier::bound_challenge(&descriptor, &legacy_ack);
+
+        let legacy = RemoteAgentPodHandshakeVerifierSet
+            .verify(&descriptor, &legacy_ack, descriptor.created_at)
+            .unwrap();
+        assert!(!legacy.cryptographic_signature_verified);
+    }
+
+    fn hex_encode(bytes: &[u8]) -> String {
+        bytes.iter().map(|byte| format!("{byte:02x}")).collect()
     }
 
     #[test]
