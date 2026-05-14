@@ -18,7 +18,7 @@ use agentbox_daemon::runtime::providers::remote::{
 };
 use agentbox_daemon::runtime::types::{
     ApprovalGrant, ApprovalScope, CommandResult, CredentialGrant, CredentialGrantKind,
-    FileAccessMode, NetworkMode, RuntimeCapability, RuntimeStatus,
+    FileAccessMode, MountKind, MountMode, NetworkMode, RuntimeCapability, RuntimeStatus,
 };
 use agentbox_policy::classify::{self, Bucket, CommandContext, PolicyConfig, PolicyNetworkMode};
 use axum::extract::{Path as AxumPath, Query, State};
@@ -76,6 +76,7 @@ struct WorkerSession {
     workspace_host_path: PathBuf,
     policy: WorkerPolicy,
     env_credentials: Vec<WorkerEnvCredentialGrant>,
+    file_credentials: Vec<WorkerFileCredentialGrant>,
     approval_grants: Vec<ApprovalGrant>,
     status: RuntimeStatus,
     kill_tx: watch::Sender<bool>,
@@ -93,6 +94,16 @@ struct WorkerSession {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct WorkerEnvCredentialGrant {
     name: String,
+    one_time: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct WorkerFileCredentialGrant {
+    name: String,
+    guest_path: String,
+    host_path: PathBuf,
+    sha256: String,
+    bytes: usize,
     one_time: bool,
 }
 
@@ -164,6 +175,8 @@ struct WorkerSessionSnapshot {
     #[serde(default)]
     env_credentials: Vec<WorkerEnvCredentialGrant>,
     #[serde(default)]
+    file_credentials: Vec<WorkerFileCredentialGrantSnapshot>,
+    #[serde(default)]
     approval_grants: Vec<ApprovalGrant>,
     status: RuntimeStatus,
     #[serde(default)]
@@ -228,6 +241,16 @@ struct WorkerPendingApprovalSnapshot {
     command_argv: Vec<String>,
     reason: String,
     created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct WorkerFileCredentialGrantSnapshot {
+    name: String,
+    guest_path: String,
+    host_path: PathBuf,
+    sha256: String,
+    bytes: usize,
+    one_time: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -384,11 +407,30 @@ impl WorkerSession {
         )
     }
 
+    #[cfg(test)]
     fn new_with_env_credentials(
         session_id: String,
         workspace_host_path: PathBuf,
         policy: WorkerPolicy,
         env_credentials: Vec<WorkerEnvCredentialGrant>,
+        approval_grants: Vec<ApprovalGrant>,
+    ) -> Self {
+        Self::new_with_credentials(
+            session_id,
+            workspace_host_path,
+            policy,
+            env_credentials,
+            Vec::new(),
+            approval_grants,
+        )
+    }
+
+    fn new_with_credentials(
+        session_id: String,
+        workspace_host_path: PathBuf,
+        policy: WorkerPolicy,
+        env_credentials: Vec<WorkerEnvCredentialGrant>,
+        file_credentials: Vec<WorkerFileCredentialGrant>,
         approval_grants: Vec<ApprovalGrant>,
     ) -> Self {
         let (kill_tx, _kill_rx) = watch::channel(false);
@@ -397,6 +439,7 @@ impl WorkerSession {
             workspace_host_path,
             policy,
             env_credentials,
+            file_credentials,
             approval_grants,
             status: RuntimeStatus::Running,
             kill_tx,
@@ -428,6 +471,18 @@ impl WorkerSession {
             workspace_host_path: snapshot.workspace_host_path,
             policy: snapshot.policy,
             env_credentials: snapshot.env_credentials,
+            file_credentials: snapshot
+                .file_credentials
+                .into_iter()
+                .map(|credential| WorkerFileCredentialGrant {
+                    name: credential.name,
+                    guest_path: credential.guest_path,
+                    host_path: credential.host_path,
+                    sha256: credential.sha256,
+                    bytes: credential.bytes,
+                    one_time: credential.one_time,
+                })
+                .collect(),
             approval_grants: snapshot.approval_grants,
             status: snapshot.status,
             kill_tx,
@@ -497,6 +552,18 @@ impl WorkerSession {
             workspace_host_path: self.workspace_host_path.clone(),
             policy: self.policy.clone(),
             env_credentials: self.env_credentials.clone(),
+            file_credentials: self
+                .file_credentials
+                .iter()
+                .map(|credential| WorkerFileCredentialGrantSnapshot {
+                    name: credential.name.clone(),
+                    guest_path: credential.guest_path.clone(),
+                    host_path: credential.host_path.clone(),
+                    sha256: credential.sha256.clone(),
+                    bytes: credential.bytes,
+                    one_time: credential.one_time,
+                })
+                .collect(),
             approval_grants: self.approval_grants.clone(),
             status: self.status.clone(),
             commands_started: self.commands_started,
@@ -646,11 +713,14 @@ async fn create_session(
     if let Some(bundle) = request.workspace_bundle.as_ref() {
         materialize_worker_workspace_bundle(&workspace_host_path, bundle).await?;
     }
-    let session = WorkerSession::new_with_env_credentials(
+    let file_credentials =
+        materialize_worker_credential_files(&workspace_host_path, &request).await?;
+    let session = WorkerSession::new_with_credentials(
         request.spec.id.clone(),
         workspace_host_path,
         WorkerPolicy::from_spec(&request.spec),
         worker_env_credentials(&request.spec.credentials.grants),
+        file_credentials,
         worker_approval_grants(&request.spec.id, &request.spec.approvals),
     );
     state
@@ -688,18 +758,18 @@ fn validate_create_material(
 ) -> Result<(), (StatusCode, Json<WorkerError>)> {
     if request.spec.credentials.inherit_host_env || !request.spec.credentials.grants.is_empty() {
         if !request.spec.credentials.inherit_host_env
-            && request
-                .spec
-                .credentials
-                .grants
-                .iter()
-                .all(|grant| matches!(grant.kind, CredentialGrantKind::EnvVar))
+            && request.spec.credentials.grants.iter().all(|grant| {
+                matches!(
+                    grant.kind,
+                    CredentialGrantKind::EnvVar | CredentialGrantKind::FileMount
+                )
+            })
         {
             return Ok(());
         }
         return Err(worker_error(
             StatusCode::BAD_REQUEST,
-            "agentbox remote worker only accepts explicit environment credential grants; file, socket, provider-token, and host env inheritance are refused",
+            "agentbox remote worker only accepts explicit environment and file credential grants; socket, provider-token, and host env inheritance are refused",
         ));
     }
     Ok(())
@@ -714,6 +784,150 @@ fn worker_env_credentials(grants: &[CredentialGrant]) -> Vec<WorkerEnvCredential
             one_time: grant.one_time,
         })
         .collect()
+}
+
+async fn materialize_worker_credential_files(
+    workspace_host_path: &Path,
+    request: &RemoteAgentPodCreateSessionRequest,
+) -> Result<Vec<WorkerFileCredentialGrant>, (StatusCode, Json<WorkerError>)> {
+    let mut credentials = Vec::new();
+    for grant in request
+        .spec
+        .credentials
+        .grants
+        .iter()
+        .filter(|grant| matches!(grant.kind, CredentialGrantKind::FileMount))
+    {
+        let payload = request
+            .credential_files
+            .iter()
+            .find(|file| file.name == grant.name)
+            .ok_or_else(|| {
+                worker_error(
+                    StatusCode::BAD_REQUEST,
+                    format!(
+                        "agentbox remote worker file credential grant `{}` requires a matching payload",
+                        grant.name
+                    ),
+                )
+            })?;
+        payload.validate().map_err(|err| {
+            worker_error(
+                StatusCode::BAD_REQUEST,
+                format!("agentbox remote worker rejected credential file payload: {err}"),
+            )
+        })?;
+        if grant
+            .expires_at
+            .is_some_and(|expires_at| expires_at <= Utc::now())
+        {
+            return Err(worker_error(
+                StatusCode::BAD_REQUEST,
+                format!(
+                    "agentbox remote worker file credential grant `{}` is expired",
+                    grant.name
+                ),
+            ));
+        }
+        let mount = request
+            .spec
+            .filesystem
+            .mounts
+            .iter()
+            .find(|mount| {
+                matches!(mount.kind, MountKind::Credential)
+                    && matches!(mount.mode, MountMode::ReadOnly)
+                    && mount.host_path.display().to_string() == grant.target
+                    && mount.guest_path == payload.guest_path
+            })
+            .ok_or_else(|| {
+                worker_error(
+                    StatusCode::BAD_REQUEST,
+                    format!(
+                        "agentbox remote worker file credential grant `{}` requires a matching read-only credential mount",
+                        grant.name
+                    ),
+                )
+            })?;
+        let host_path = worker_guest_path_to_workspace_path(
+            workspace_host_path,
+            &request.spec.filesystem.workspace_guest_path,
+            &mount.guest_path,
+        )?;
+        if let Some(parent) = host_path.parent() {
+            tokio::fs::create_dir_all(parent).await.map_err(|err| {
+                worker_error(
+                    StatusCode::BAD_REQUEST,
+                    format!(
+                        "agentbox remote worker failed to prepare credential directory {}: {err}",
+                        parent.display()
+                    ),
+                )
+            })?;
+        }
+        tokio::fs::write(&host_path, payload.contents_utf8.as_bytes())
+            .await
+            .map_err(|err| {
+                worker_error(
+                    StatusCode::BAD_REQUEST,
+                    format!(
+                        "agentbox remote worker failed to materialize credential file {}: {err}",
+                        host_path.display()
+                    ),
+                )
+            })?;
+        credentials.push(WorkerFileCredentialGrant {
+            name: grant.name.clone(),
+            guest_path: mount.guest_path.clone(),
+            host_path,
+            sha256: payload.sha256.clone(),
+            bytes: payload.bytes,
+            one_time: grant.one_time,
+        });
+    }
+    if request.credential_files.len() != credentials.len() {
+        return Err(worker_error(
+            StatusCode::BAD_REQUEST,
+            "agentbox remote worker received credential file payload without matching grant",
+        ));
+    }
+    Ok(credentials)
+}
+
+fn worker_guest_path_to_workspace_path(
+    workspace_host_path: &Path,
+    workspace_guest_path: &str,
+    guest_path: &str,
+) -> Result<PathBuf, (StatusCode, Json<WorkerError>)> {
+    let workspace_guest_path = workspace_guest_path.trim_end_matches('/');
+    if workspace_guest_path.is_empty()
+        || (guest_path != workspace_guest_path
+            && !guest_path.starts_with(&format!("{workspace_guest_path}/")))
+    {
+        return Err(worker_error(
+            StatusCode::BAD_REQUEST,
+            "agentbox remote worker only materializes file credentials under the workspace guest path",
+        ));
+    }
+    let relative = guest_path
+        .trim_start_matches(workspace_guest_path)
+        .trim_start_matches('/');
+    if relative.is_empty()
+        || Path::new(relative).components().any(|component| {
+            matches!(
+                component,
+                std::path::Component::ParentDir
+                    | std::path::Component::RootDir
+                    | std::path::Component::Prefix(_)
+            )
+        })
+    {
+        return Err(worker_error(
+            StatusCode::BAD_REQUEST,
+            "agentbox remote worker credential guest path is unsafe",
+        ));
+    }
+    Ok(workspace_host_path.join(relative))
 }
 
 fn worker_approval_grants(session_id: &str, grants: &[ApprovalGrant]) -> Vec<ApprovalGrant> {
@@ -868,6 +1082,20 @@ fn validate_exec_material(
     Ok(())
 }
 
+fn file_credential_env_name(name: &str) -> String {
+    let suffix = name
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() {
+                ch.to_ascii_uppercase()
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    format!("AGENTBOX_CREDENTIAL_FILE_{suffix}")
+}
+
 fn require_route_worker_session_id(
     route_worker_session_id: &str,
     body_worker_session_id: &str,
@@ -958,6 +1186,7 @@ struct WorkerExecContext {
     workspace_host_path: PathBuf,
     policy: WorkerPolicy,
     env_credentials: Vec<WorkerEnvCredentialGrant>,
+    file_credentials: Vec<WorkerFileCredentialGrant>,
     approval_grants: Vec<ApprovalGrant>,
 }
 
@@ -996,6 +1225,7 @@ async fn session_exec_context(
         workspace_host_path: session.workspace_host_path.clone(),
         policy: session.policy.clone(),
         env_credentials: session.env_credentials.clone(),
+        file_credentials: session.file_credentials.clone(),
         approval_grants: session.approval_grants.clone(),
     })
 }
@@ -1017,6 +1247,12 @@ async fn execute_command(
     let mut command = Command::new(program);
     command.args(request.command.argv.iter().skip(1));
     command.env_clear();
+    for credential in &context.file_credentials {
+        command.env(
+            file_credential_env_name(&credential.name),
+            credential.host_path.display().to_string(),
+        );
+    }
     command.envs(&request.command.env);
     let working_dir = request
         .command
@@ -2263,12 +2499,14 @@ fn decode_hex_nibble(value: u8) -> Result<u8, String> {
 mod tests {
     use super::*;
     use agentbox_daemon::runtime::providers::remote::{
-        Ed25519HandshakeVerifier, RemoteAgentPodAuthKind, RemoteAgentPodDestroySessionRequest,
-        RemoteAgentPodEvidenceMode, RemoteAgentPodHandshakeVerifier,
-        RemoteAgentPodTransportDescriptor, RemoteAgentPodWorkspaceBundle,
+        Ed25519HandshakeVerifier, RemoteAgentPodAuthKind, RemoteAgentPodCredentialFile,
+        RemoteAgentPodDestroySessionRequest, RemoteAgentPodEvidenceMode,
+        RemoteAgentPodHandshakeVerifier, RemoteAgentPodTransportDescriptor,
+        RemoteAgentPodWorkspaceBundle,
     };
     use agentbox_daemon::runtime::types::{
-        CredentialGrant, CredentialGrantKind, ExecCommand, MinipodSpec,
+        CredentialGrant, CredentialGrantKind, ExecCommand, MinipodSpec, MountKind, MountMode,
+        MountRule,
     };
     use std::collections::HashMap;
 
@@ -2292,6 +2530,21 @@ mod tests {
         AxumPath("worker-session-1".into())
     }
 
+    #[test]
+    fn worker_guest_path_to_workspace_path_requires_workspace_boundary() {
+        let workspace = std::env::temp_dir().join("agentbox-remote-worker-path-boundary");
+        let err =
+            worker_guest_path_to_workspace_path(&workspace, "/workspace", "/workspace2/secret")
+                .unwrap_err();
+
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+        assert!(err
+            .1
+             .0
+            .error
+            .contains("only materializes file credentials under the workspace guest path"));
+    }
+
     fn create_session_request(workspace: PathBuf) -> RemoteAgentPodCreateSessionRequest {
         RemoteAgentPodCreateSessionRequest {
             transport: RemoteAgentPodTransportDescriptor::new(
@@ -2312,6 +2565,7 @@ mod tests {
             },
             spec: MinipodSpec::for_agent_task("remote-test-agent", workspace),
             workspace_bundle: None,
+            credential_files: Vec::new(),
         }
     }
 
@@ -2758,6 +3012,64 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn exec_command_exposes_file_credential_paths_without_secret_env_values() {
+        let config = RemoteWorkerConfig::new(
+            "worker.local/dev",
+            "https://worker.example.com/agentpod/evidence",
+            SigningKey::from_bytes(&[46_u8; 32]),
+        );
+        let state = test_state(config);
+        let workspace = std::env::temp_dir().join(format!(
+            "agentbox-remote-worker-file-credential-exec-{}",
+            std::process::id()
+        ));
+        let credential_path = workspace.join(".agentbox/credentials/openai");
+        std::fs::create_dir_all(credential_path.parent().unwrap()).unwrap();
+        std::fs::write(&credential_path, "agentbox-test-credential\n").unwrap();
+        state.sessions.lock().await.insert(
+            "worker-session-1".into(),
+            WorkerSession::new_with_credentials(
+                "session-1".into(),
+                workspace.clone(),
+                WorkerPolicy::default(),
+                Vec::new(),
+                vec![WorkerFileCredentialGrant {
+                    name: "openai".into(),
+                    guest_path: "/workspace/.agentbox/credentials/openai".into(),
+                    host_path: credential_path.clone(),
+                    sha256: hex_encode(&Sha256::digest(b"agentbox-test-credential\n")),
+                    bytes: "agentbox-test-credential\n".len(),
+                    one_time: true,
+                }],
+                Vec::new(),
+            ),
+        );
+        let request = RemoteAgentPodExecRequest {
+            session_id: "session-1".into(),
+            worker_session_id: "worker-session-1".into(),
+            command: ExecCommand {
+                argv: vec![
+                    "sh".into(),
+                    "-c".into(),
+                    "cat \"$AGENTBOX_CREDENTIAL_FILE_OPENAI\"".into(),
+                ],
+                working_dir: None,
+                env: HashMap::new(),
+                timeout_seconds: Some(5),
+            },
+        };
+
+        let response = exec_command(State(state), worker_session_path(), Json(request))
+            .await
+            .unwrap()
+            .0;
+
+        assert_eq!(response.result.exit_code, 0);
+        assert_eq!(response.result.stdout, "agentbox-test-credential\n");
+        let _ = std::fs::remove_dir_all(workspace);
+    }
+
+    #[tokio::test]
     async fn exec_command_enforces_worker_network_policy_before_spawn() {
         let config = RemoteWorkerConfig::new(
             "worker.local/dev",
@@ -2958,6 +3270,7 @@ mod tests {
             workspace_host_path: std::env::temp_dir(),
             policy: WorkerPolicy::default(),
             env_credentials: Vec::new(),
+            file_credentials: Vec::new(),
             approval_grants: Vec::new(),
         };
         let request = RemoteAgentPodExecRequest {
@@ -2997,6 +3310,7 @@ mod tests {
             workspace_host_path: workspace.clone(),
             policy: WorkerPolicy::default(),
             env_credentials: Vec::new(),
+            file_credentials: Vec::new(),
             approval_grants: Vec::new(),
         };
         let curl_request = RemoteAgentPodExecRequest {
@@ -3075,6 +3389,7 @@ mod tests {
             workspace_host_path: workspace.clone(),
             policy: WorkerPolicy::default(),
             env_credentials: Vec::new(),
+            file_credentials: Vec::new(),
             approval_grants: Vec::new(),
         };
         let request = RemoteAgentPodExecRequest {
@@ -3281,6 +3596,141 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn create_session_materializes_file_credential_payloads() {
+        let config = RemoteWorkerConfig::new(
+            "worker.local/dev",
+            "https://worker.example.com/agentpod/evidence",
+            SigningKey::from_bytes(&[45_u8; 32]),
+        );
+        let state = test_state(config);
+        let workspace = std::env::temp_dir().join(format!(
+            "agentbox-remote-worker-file-credential-materialized-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&workspace);
+        let mut request = create_session_request(workspace.clone());
+        let host_source = std::env::temp_dir().join(format!(
+            "agentbox-remote-worker-source-credential-{}",
+            std::process::id()
+        ));
+        request.spec.filesystem.mounts.push(MountRule {
+            host_path: host_source.clone(),
+            guest_path: "/workspace/.agentbox/credentials/openai".into(),
+            mode: MountMode::ReadOnly,
+            kind: MountKind::Credential,
+        });
+        request.spec.credentials.grants.push(CredentialGrant {
+            name: "openai".into(),
+            kind: CredentialGrantKind::FileMount,
+            target: host_source.display().to_string(),
+            one_time: true,
+            requires_approval: true,
+            expires_at: None,
+        });
+        let contents = "agentbox-test-credential\n";
+        request.credential_files.push(RemoteAgentPodCredentialFile {
+            name: "openai".into(),
+            guest_path: "/workspace/.agentbox/credentials/openai".into(),
+            sha256: hex_encode(&Sha256::digest(contents.as_bytes())),
+            bytes: contents.len(),
+            contents_utf8: contents.into(),
+            one_time: true,
+            expires_at: None,
+        });
+
+        let response = create_session(State(state.clone()), Json(request))
+            .await
+            .unwrap()
+            .0;
+
+        let materialized = workspace.join(".agentbox/credentials/openai");
+        assert_eq!(
+            std::fs::read_to_string(&materialized).unwrap(),
+            "agentbox-test-credential\n"
+        );
+        let sessions = state.sessions.lock().await;
+        let session = sessions.get(&response.worker_session_id).unwrap();
+        assert_eq!(session.file_credentials.len(), 1);
+        assert_eq!(session.file_credentials[0].name, "openai");
+        assert_eq!(session.file_credentials[0].host_path, materialized);
+        let _ = std::fs::remove_dir_all(workspace);
+    }
+
+    #[tokio::test]
+    async fn create_session_rejects_file_credential_without_payload() {
+        let config = RemoteWorkerConfig::new(
+            "worker.local/dev",
+            "https://worker.example.com/agentpod/evidence",
+            SigningKey::from_bytes(&[47_u8; 32]),
+        );
+        let state = test_state(config);
+        let workspace = std::env::temp_dir().join(format!(
+            "agentbox-remote-worker-missing-file-credential-{}",
+            std::process::id()
+        ));
+        let host_source = std::env::temp_dir().join(format!(
+            "agentbox-remote-worker-missing-source-credential-{}",
+            std::process::id()
+        ));
+        let mut request = create_session_request(workspace.clone());
+        request.spec.filesystem.mounts.push(MountRule {
+            host_path: host_source.clone(),
+            guest_path: "/workspace/.agentbox/credentials/openai".into(),
+            mode: MountMode::ReadOnly,
+            kind: MountKind::Credential,
+        });
+        request.spec.credentials.grants.push(CredentialGrant {
+            name: "openai".into(),
+            kind: CredentialGrantKind::FileMount,
+            target: host_source.display().to_string(),
+            one_time: true,
+            requires_approval: true,
+            expires_at: None,
+        });
+
+        let err = create_session(State(state), Json(request))
+            .await
+            .unwrap_err();
+
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+        assert!(err.1 .0.error.contains("requires a matching payload"));
+        let _ = std::fs::remove_dir_all(workspace);
+    }
+
+    #[tokio::test]
+    async fn create_session_rejects_file_credential_payload_without_grant() {
+        let config = RemoteWorkerConfig::new(
+            "worker.local/dev",
+            "https://worker.example.com/agentpod/evidence",
+            SigningKey::from_bytes(&[48_u8; 32]),
+        );
+        let state = test_state(config);
+        let workspace = std::env::temp_dir().join(format!(
+            "agentbox-remote-worker-extra-file-credential-{}",
+            std::process::id()
+        ));
+        let mut request = create_session_request(workspace.clone());
+        let contents = "agentbox-test-credential\n";
+        request.credential_files.push(RemoteAgentPodCredentialFile {
+            name: "openai".into(),
+            guest_path: "/workspace/.agentbox/credentials/openai".into(),
+            sha256: hex_encode(&Sha256::digest(contents.as_bytes())),
+            bytes: contents.len(),
+            contents_utf8: contents.into(),
+            one_time: true,
+            expires_at: None,
+        });
+
+        let err = create_session(State(state), Json(request))
+            .await
+            .unwrap_err();
+
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+        assert!(err.1 .0.error.contains("payload without matching grant"));
+        let _ = std::fs::remove_dir_all(workspace);
+    }
+
+    #[tokio::test]
     async fn create_session_persists_manifest_approval_grants() {
         let config = RemoteWorkerConfig::new(
             "worker.local/dev",
@@ -3317,7 +3767,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn create_session_rejects_non_env_credential_grants() {
+    async fn create_session_rejects_unsupported_credential_grants() {
         let config = RemoteWorkerConfig::new(
             "worker.local/dev",
             "https://worker.example.com/agentpod/evidence",
@@ -3330,9 +3780,9 @@ mod tests {
         ));
         let mut request = create_session_request(workspace.clone());
         request.spec.credentials.grants.push(CredentialGrant {
-            name: "openai".into(),
-            kind: CredentialGrantKind::FileMount,
-            target: "/run/agentbox/secrets/openai".into(),
+            name: "deploy-token".into(),
+            kind: CredentialGrantKind::ProviderToken,
+            target: "vercel".into(),
             one_time: true,
             requires_approval: true,
             expires_at: None,
@@ -3343,7 +3793,11 @@ mod tests {
             .unwrap_err();
 
         assert_eq!(err.0, StatusCode::BAD_REQUEST);
-        assert!(err.1 .0.error.contains("only accepts explicit environment"));
+        assert!(err
+            .1
+             .0
+            .error
+            .contains("only accepts explicit environment and file"));
         assert!(state.sessions.lock().await.is_empty());
         assert!(!workspace.exists());
     }

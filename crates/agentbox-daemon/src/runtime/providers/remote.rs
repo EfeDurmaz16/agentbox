@@ -14,8 +14,8 @@ use crate::runtime::provider::{
     ProviderFamily, ProviderImplementationStatus, RuntimeError, RuntimeProvider,
 };
 use crate::runtime::types::{
-    ApprovalGrant, ApprovalScope, CommandResult, ExecCommand, MinipodSpec, RuntimeCapability,
-    RuntimeSession, RuntimeStatus, SessionEvidenceBundle,
+    ApprovalGrant, ApprovalScope, CommandResult, CredentialGrantKind, ExecCommand, MinipodSpec,
+    MountKind, MountMode, RuntimeCapability, RuntimeSession, RuntimeStatus, SessionEvidenceBundle,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -465,6 +465,8 @@ pub struct RemoteAgentPodCreateSessionRequest {
     pub spec: MinipodSpec,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_bundle: Option<RemoteAgentPodWorkspaceBundle>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub credential_files: Vec<RemoteAgentPodCredentialFile>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -482,6 +484,50 @@ pub struct RemoteAgentPodWorkspaceFile {
     pub sha256: String,
     pub bytes: usize,
     pub contents_utf8: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteAgentPodCredentialFile {
+    pub name: String,
+    pub guest_path: String,
+    pub sha256: String,
+    pub bytes: usize,
+    pub contents_utf8: String,
+    pub one_time: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<DateTime<Utc>>,
+}
+
+impl RemoteAgentPodCredentialFile {
+    pub fn validate(&self) -> Result<(), RuntimeError> {
+        if self.name.trim().is_empty() {
+            return Err(RuntimeError::ManifestRejected(
+                "remote credential file name cannot be empty".into(),
+            ));
+        }
+        if self.guest_path.trim().is_empty() {
+            return Err(RuntimeError::ManifestRejected(
+                "remote credential file guest path cannot be empty".into(),
+            ));
+        }
+        if self.bytes != self.contents_utf8.len()
+            || sha256_hex(self.contents_utf8.as_bytes()) != self.sha256
+        {
+            return Err(RuntimeError::ManifestRejected(
+                "remote credential file hash or byte count does not match contents".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn validate_remote_credential_files(
+    files: &[RemoteAgentPodCredentialFile],
+) -> Result<(), RuntimeError> {
+    for file in files {
+        file.validate()?;
+    }
+    Ok(())
 }
 
 impl RemoteAgentPodWorkspaceBundle {
@@ -532,6 +578,7 @@ impl RemoteAgentPodCreateSessionResponse {
                 "remote AgentPod create response must include worker session id".into(),
             ));
         }
+        validate_remote_credential_files(&request.credential_files)?;
         require_lifecycle_events(
             &self.lifecycle_events,
             &[
@@ -2021,6 +2068,7 @@ const REMOTE_WORKSPACE_BUNDLE_ENV: &str = "AGENTBOX_REMOTE_AGENTPOD_WORKSPACE_BU
 const REMOTE_WORKSPACE_BUNDLE_MAX_FILES: usize = 512;
 const REMOTE_WORKSPACE_BUNDLE_MAX_FILE_BYTES: usize = 512 * 1024;
 const REMOTE_WORKSPACE_BUNDLE_MAX_TOTAL_BYTES: usize = 8 * 1024 * 1024;
+const REMOTE_CREDENTIAL_FILE_MAX_BYTES: usize = 64 * 1024;
 
 #[derive(Clone, Default)]
 pub struct RemoteAgentPodProvider {
@@ -2213,6 +2261,75 @@ impl RemoteAgentPodProvider {
         }
         build_remote_workspace_bundle(&spec.filesystem.workspace_host_path).map(Some)
     }
+
+    fn credential_files_for_spec(
+        &self,
+        spec: &MinipodSpec,
+    ) -> Result<Vec<RemoteAgentPodCredentialFile>, RuntimeError> {
+        let mut files = Vec::new();
+        for grant in &spec.credentials.grants {
+            if !matches!(grant.kind, CredentialGrantKind::FileMount) {
+                continue;
+            }
+            let mount = spec
+                .filesystem
+                .mounts
+                .iter()
+                .find(|mount| {
+                    matches!(mount.kind, MountKind::Credential)
+                        && matches!(mount.mode, MountMode::ReadOnly)
+                        && mount.host_path.display().to_string() == grant.target
+                })
+                .ok_or_else(|| {
+                    RuntimeError::ManifestRejected(format!(
+                        "remote credential file grant `{}` requires a matching read-only credential mount",
+                        grant.name
+                    ))
+                })?;
+            let metadata = fs::metadata(&mount.host_path).map_err(|err| {
+                RuntimeError::ManifestRejected(format!(
+                    "remote credential file {} is not readable: {err}",
+                    mount.host_path.display()
+                ))
+            })?;
+            if !metadata.is_file() {
+                return Err(RuntimeError::ManifestRejected(format!(
+                    "remote credential file grant `{}` must point at a single file",
+                    grant.name
+                )));
+            }
+            let bytes: usize = metadata.len().try_into().unwrap_or(usize::MAX);
+            if bytes > REMOTE_CREDENTIAL_FILE_MAX_BYTES {
+                return Err(RuntimeError::ManifestRejected(format!(
+                    "remote credential file grant `{}` exceeds byte limit of {REMOTE_CREDENTIAL_FILE_MAX_BYTES}",
+                    grant.name
+                )));
+            }
+            let contents = fs::read(&mount.host_path).map_err(|err| {
+                RuntimeError::ManifestRejected(format!(
+                    "remote credential file {} failed to read: {err}",
+                    mount.host_path.display()
+                ))
+            })?;
+            let contents_utf8 = String::from_utf8(contents).map_err(|_| {
+                RuntimeError::ManifestRejected(format!(
+                    "remote credential file grant `{}` must be UTF-8 text",
+                    grant.name
+                ))
+            })?;
+            files.push(RemoteAgentPodCredentialFile {
+                name: grant.name.clone(),
+                guest_path: mount.guest_path.clone(),
+                sha256: sha256_hex(contents_utf8.as_bytes()),
+                bytes: contents_utf8.len(),
+                contents_utf8,
+                one_time: grant.one_time,
+                expires_at: grant.expires_at,
+            });
+        }
+        validate_remote_credential_files(&files)?;
+        Ok(files)
+    }
 }
 
 impl std::fmt::Debug for RemoteAgentPodProvider {
@@ -2276,12 +2393,14 @@ impl RuntimeProvider for RemoteAgentPodProvider {
         )?;
         let handshake_ack = transport.handshake(&handshake_descriptor).await?;
         let workspace_bundle = self.workspace_bundle_for_spec(spec)?;
+        let credential_files = self.credential_files_for_spec(spec)?;
         let response = transport
             .create_session(RemoteAgentPodCreateSessionRequest {
                 transport: transport_descriptor,
                 handshake_ack: handshake_ack.clone(),
                 spec: spec.clone(),
                 workspace_bundle,
+                credential_files,
             })
             .await?;
         let mut session = RuntimeSession::new(
@@ -2713,6 +2832,27 @@ mod tests {
         );
 
         provider.destroy_session(&session).await.unwrap();
+    }
+
+    #[test]
+    fn remote_credential_file_payload_validates_hash_and_metadata() {
+        let contents = "agentbox-test-credential\n";
+        let payload = RemoteAgentPodCredentialFile {
+            name: "openai".into(),
+            guest_path: "/workspace/.agentbox/credentials/openai".into(),
+            sha256: sha256_hex(contents.as_bytes()),
+            bytes: contents.len(),
+            contents_utf8: contents.into(),
+            one_time: true,
+            expires_at: None,
+        };
+        let mut tampered = payload.clone();
+        tampered.bytes += 1;
+
+        payload.validate().unwrap();
+        let err = tampered.validate().unwrap_err();
+
+        assert!(err.to_string().contains("hash or byte count"));
     }
 
     #[test]
@@ -3261,6 +3401,7 @@ mod tests {
             handshake_ack,
             spec: spec.clone(),
             workspace_bundle: None,
+            credential_files: Vec::new(),
         };
         let response = RemoteAgentPodCreateSessionResponse {
             session_id: spec.id.clone(),
@@ -3584,6 +3725,7 @@ mod tests {
                 handshake_ack,
                 spec: spec.clone(),
                 workspace_bundle: None,
+                credential_files: Vec::new(),
             })
             .await
             .unwrap();

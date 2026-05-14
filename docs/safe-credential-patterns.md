@@ -149,6 +149,7 @@ after exposure.
 |---------|---------------------------|
 | Direct host shims | Approves/audits common credential path access, but cannot stop all process-local reads. |
 | Podman compatibility | Can carry credential mount metadata; live socket/shim behavior still needs host proof. |
+| Remote AgentPod | Accepts explicit env grants and file credential payloads for workspace-local materialization; the secret still crosses the daemon-to-worker channel and can be printed by the agent. |
 | macOS AgentPod | Needs Endpoint Security, keychain mediation, or VM-backed profile separation before broad claims. |
 | Linux AgentPod | Needs namespace/Landlock/seccomp/provider wiring before file grants become kernel-backed. |
 | Windows AgentPod | Needs Job Objects plus AppContainer/ACL/profile strategy before credential isolation is credible. |

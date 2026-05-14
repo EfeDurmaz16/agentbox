@@ -301,9 +301,13 @@ defaults to that workspace and refuses an explicit working directory outside it.
 The contract worker accepts explicit environment credential grant metadata from
 the session manifest. During exec it only accepts command environment keys that
 match those session-bound grant names; arbitrary env material is rejected so
-remote env injection does not become an accidental secret channel. Create-session
-still rejects file, socket, provider-token, and host environment inheritance
-until those handoff protocols are explicit.
+remote env injection does not become an accidental secret channel. It also
+accepts explicit file credential payloads when the session manifest contains a
+matching read-only credential mount and `FileMount` grant. The worker verifies
+the payload hash and byte count, materializes the file only under the session
+workspace guest path, stores only metadata in the worker snapshot, and exposes
+the worker-local path as `AGENTBOX_CREDENTIAL_FILE_<NAME>` during exec. Socket,
+provider-token, and host environment inheritance grants remain rejected.
 Before spawning a process, exec classifies the argv with the session AgentPod
 network policy. Commands outside the allowed policy return exit code `126`
 without being spawned. Approval-required commands can run only when the
@@ -352,16 +356,19 @@ Runtime status refresh for remote sessions uses those labels to query the
 worker evidence-status route instead of treating remote status as unavailable.
 Workspace materialization, workspace export, local apply, worker-side command
 policy, manifest-bound worker approval grants, command supervision counters, and
-session-bound env credential handoff now exist as governed flows. Ordered
-evidence stream chunks and command-scope pending approval resolution also exist
-at the worker contract layer. Rich approval prompts, file/socket/provider-token
-credential handoff, full evidence event streaming, supervised worker restarts,
-and merge/conflict UX beyond overwrite protection remain future work.
+session-bound env and file credential handoff now exist as governed flows.
+Ordered evidence stream chunks and command-scope pending approval resolution
+also exist at the worker contract layer. Rich approval prompts, socket and
+provider-token credential handoff, full evidence event streaming, supervised
+worker restarts, and merge/conflict UX beyond overwrite protection remain future
+work.
 
 `scripts/smoke-remote-worker.sh` starts this worker on a random loopback port,
 posts a handshake descriptor, checks the Ed25519 acknowledgement shape, creates
 worker sessions from generated AgentPod specs, runs a direct `printf` exec
 request, proves session-bound env credential handoff through the provider path,
+proves provider file credential handoff with only a path env exposed to the
+remote command,
 proves deny-by-default worker policy blocks an unknown `curl` before spawn,
 exports the worker workspace through both direct HTTP and the CLI pullback
 command, applies the pulled workspace to a local directory, uploads a bundle
@@ -411,6 +418,7 @@ implementation.
 ## Current Boundary
 
 `remote-agentpod` is now an experimental gated provider. The missing pieces are
-sandboxed remote execution, file/socket/provider-token credential handoff,
-full live event streaming, supervised worker lifecycle, richer workspace merge
-UX, and live HTTPS worker conformance tests.
+sandboxed remote execution, socket/provider-token credential handoff, one-time
+file credential consumption synchronization, full live event streaming,
+supervised worker lifecycle, richer workspace merge UX, and live HTTPS worker
+conformance tests.
