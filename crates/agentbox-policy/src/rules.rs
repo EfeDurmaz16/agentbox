@@ -72,6 +72,26 @@ pub fn check_config_overrides(
         }
     }
 
+    // Domain denylist for network commands. This runs before always-allow and allowlist
+    // entries because explicit high-risk destinations should not be bypassed by friction
+    // reduction rules.
+    if matches!(ctx.binary.as_str(), "curl" | "wget") {
+        if let Some(url) = ctx.args.iter().find(|a| a.starts_with("http")) {
+            if let Some(domain) = extract_domain(url) {
+                if config.denied_domains.iter().any(|d| {
+                    let d_lower = d.to_lowercase();
+                    domain == d_lower || domain.ends_with(&format!(".{}", d_lower))
+                }) {
+                    return Some(Classification {
+                        bucket: Bucket::Block,
+                        reason: format!("{} to {} — domain in denylist", ctx.binary, domain),
+                        notification_summary: None,
+                    });
+                }
+            }
+        }
+    }
+
     // Always-allow overrides
     for pattern in &config.always_allow {
         if command_matches_pattern(ctx, pattern) {
@@ -698,6 +718,32 @@ mod tests {
         };
         let c = classify(&ctx("curl", &["https://evil.example.com/steal"]), &config);
         assert_eq!(c.bucket, Bucket::Approve);
+    }
+
+    #[test]
+    fn test_curl_denied_domain_is_blocked() {
+        let config = PolicyConfig {
+            allowed_domains: vec!["github.com".into()],
+            denied_domains: vec![
+                "metadata.google.internal".into(),
+                "blocked.example.com".into(),
+            ],
+            always_allow: vec!["curl *".into()],
+            ..Default::default()
+        };
+
+        let c = classify(
+            &ctx(
+                "curl",
+                &["https://metadata.google.internal/computeMetadata/v1"],
+            ),
+            &config,
+        );
+        assert_eq!(c.bucket, Bucket::Block);
+        assert!(c.reason.contains("denylist"));
+
+        let c = classify(&ctx("curl", &["https://api.blocked.example.com"]), &config);
+        assert_eq!(c.bucket, Bucket::Block);
     }
 
     #[test]

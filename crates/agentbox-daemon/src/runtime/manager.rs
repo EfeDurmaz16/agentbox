@@ -240,6 +240,7 @@ impl RuntimeManager {
                     .clone()
                     .or_else(|| Some(session.spec.filesystem.workspace_guest_path.clone())),
                 allowed_domains: session.spec.network.allowed_domains.clone(),
+                denied_domains: session.spec.network.denied_domains.clone(),
                 always_allow: vec![],
                 always_block: vec![],
             },
@@ -544,6 +545,44 @@ mod tests {
             .unwrap();
         let command = ExecCommand {
             argv: vec!["rm".into(), "-rf".into(), "/".into()],
+            working_dir: Some("/workspace".into()),
+            env: Default::default(),
+            timeout_seconds: None,
+        };
+
+        let err = manager.exec(&session.id, &command).await.unwrap_err();
+
+        assert!(matches!(err, RuntimeError::PolicyDenied(_)));
+        assert_eq!(
+            manager.session_approval_grants(&session.id).unwrap().len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn exec_denies_network_denylist_before_grants() {
+        let manager = manager("exec-network-denylist");
+        let mut spec = MinipodSpec::for_agent_task("openclaw", "/tmp/agentbox-work");
+        spec.network.denied_domains = vec!["metadata.google.internal".into()];
+        let session = manager.create(&spec).await.unwrap();
+        manager
+            .add_session_approval_grant(
+                &session.id,
+                ApprovalGrant {
+                    id: "grant-domain".into(),
+                    scope: ApprovalScope::Domain {
+                        domain: "metadata.google.internal".into(),
+                    },
+                    reason: "operator approval should not bypass denylist".into(),
+                    expires_at: None,
+                },
+            )
+            .unwrap();
+        let command = ExecCommand {
+            argv: vec![
+                "curl".into(),
+                "https://metadata.google.internal/computeMetadata/v1".into(),
+            ],
             working_dir: Some("/workspace".into()),
             env: Default::default(),
             timeout_seconds: None,

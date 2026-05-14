@@ -41,6 +41,8 @@ pub struct Config {
     #[serde(default)]
     pub allowed_domains: Vec<String>,
     #[serde(default)]
+    pub denied_domains: Vec<String>,
+    #[serde(default)]
     pub always_allow: Vec<String>,
     #[serde(default)]
     pub always_block: Vec<String>,
@@ -74,6 +76,7 @@ impl Config {
             shim_dir: base.join("shims").to_string_lossy().into_owned(),
             workspace: None,
             allowed_domains: Vec::new(),
+            denied_domains: Vec::new(),
             always_allow: Vec::new(),
             always_block: Vec::new(),
             log_level: "info".to_string(),
@@ -84,6 +87,7 @@ impl Config {
         PolicyConfig {
             workspace: self.workspace.clone(),
             allowed_domains: self.allowed_domains.clone(),
+            denied_domains: self.denied_domains.clone(),
             always_allow: self.always_allow.clone(),
             always_block: self.always_block.clone(),
         }
@@ -239,6 +243,7 @@ mod tests {
             shim_dir: "/tmp/shims".to_string(),
             workspace: Some("/tmp/workspace".to_string()),
             allowed_domains: vec!["github.com".to_string(), "api.openai.com".to_string()],
+            denied_domains: vec!["metadata.google.internal".to_string()],
             always_allow: vec!["git status".to_string()],
             always_block: vec!["npm *".to_string()],
             log_level: "debug".to_string(),

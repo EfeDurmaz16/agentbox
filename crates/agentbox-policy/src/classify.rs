@@ -43,6 +43,8 @@ pub struct PolicyConfig {
     pub workspace: Option<String>,
     /// Domains that don't need network approval
     pub allowed_domains: Vec<String>,
+    /// Domains that are always blocked for network commands
+    pub denied_domains: Vec<String>,
     /// Commands that are always allowed (user overrides)
     pub always_allow: Vec<String>,
     /// Commands that are always blocked (user overrides)

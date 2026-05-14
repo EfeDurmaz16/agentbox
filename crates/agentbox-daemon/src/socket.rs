@@ -266,6 +266,7 @@ mod tests {
             shim_dir: "/tmp/agentbox-shims".to_string(),
             workspace: None,
             allowed_domains: vec![],
+            denied_domains: vec![],
             always_allow: vec![],
             always_block: vec![],
             log_level: "debug".to_string(),

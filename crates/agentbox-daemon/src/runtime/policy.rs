@@ -50,6 +50,15 @@ pub fn validate_minipod_spec(spec: &MinipodSpec) -> Result<(), RuntimeError> {
     if matches!(spec.network.mode, NetworkMode::Host) {
         return reject("host network mode is not allowed for governed minipods");
     }
+    if spec
+        .network
+        .allowed_domains
+        .iter()
+        .chain(spec.network.denied_domains.iter())
+        .any(|domain| domain.trim().is_empty())
+    {
+        return reject("network policy domains cannot be empty");
+    }
 
     if spec.resources.memory_bytes == 0 {
         return reject("memory limit must be greater than zero");
@@ -205,6 +214,16 @@ mod tests {
         let reason = rejection_reason(validate_minipod_spec(&spec));
 
         assert!(reason.contains("host network"));
+    }
+
+    #[test]
+    fn rejects_empty_network_policy_domains() {
+        let mut spec = spec();
+        spec.network.denied_domains.push(" ".into());
+
+        let reason = rejection_reason(validate_minipod_spec(&spec));
+
+        assert!(reason.contains("domains"));
     }
 
     #[test]

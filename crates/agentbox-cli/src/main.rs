@@ -98,6 +98,10 @@ enum Commands {
         /// Network domain allowed without first-contact approval
         #[arg(long = "allow-domain")]
         allow_domains: Vec<String>,
+
+        /// Network domain blocked for this minipod task
+        #[arg(long = "deny-domain")]
+        deny_domains: Vec<String>,
     },
     /// Stop and remove a minipod
     StopPod {
@@ -164,6 +168,10 @@ enum Commands {
         /// Network domain allowed without first-contact approval
         #[arg(long = "allow-domain")]
         allow_domains: Vec<String>,
+
+        /// Network domain blocked for this minipod task
+        #[arg(long = "deny-domain")]
+        deny_domains: Vec<String>,
 
         /// Add a read-only host mount as host_path:guest_path
         #[arg(long = "mount-ro")]
@@ -819,6 +827,7 @@ struct RunOptions {
     credential_files: Vec<String>,
     policy_bundles: Vec<PathBuf>,
     allow_domains: Vec<String>,
+    deny_domains: Vec<String>,
 }
 
 async fn cmd_run(options: RunOptions) {
@@ -942,6 +951,9 @@ async fn cmd_run(options: RunOptions) {
     if !options.allow_domains.is_empty() {
         spec.network.mode = NetworkMode::AllowListed;
         spec.network.allowed_domains = options.allow_domains;
+    }
+    if !options.deny_domains.is_empty() {
+        spec.network.denied_domains = options.deny_domains;
     }
 
     // 5. Print progress and create minipod through RuntimeManager
@@ -1955,7 +1967,7 @@ fn cmd_session_evidence_bundle(db_path: &PathBuf, session_id: &str, limit: usize
     );
 }
 
-fn cmd_minipod_spec(
+struct MinipodSpecOptions {
     agent: String,
     workspace: Option<PathBuf>,
     agent_profile: String,
@@ -1963,33 +1975,40 @@ fn cmd_minipod_spec(
     read_only_mounts: Vec<String>,
     credential_files: Vec<String>,
     policy_bundles: Vec<PathBuf>,
-) {
+    deny_domains: Vec<String>,
+}
+
+fn cmd_minipod_spec(options: MinipodSpecOptions) {
     use agentbox_daemon::runtime::policy::validate_minipod_spec;
     use agentbox_daemon::runtime::types::{MinipodSpec, NetworkMode};
 
-    let workspace = workspace.unwrap_or_else(|| {
+    let workspace = options.workspace.unwrap_or_else(|| {
         std::env::current_dir().unwrap_or_else(|_| {
             eprintln!("error: failed to determine current directory");
             std::process::exit(1);
         })
     });
-    let mut spec = MinipodSpec::for_agent_task_with_profile(agent, workspace, agent_profile);
+    let mut spec =
+        MinipodSpec::for_agent_task_with_profile(options.agent, workspace, options.agent_profile);
 
-    for bundle_path in policy_bundles {
+    for bundle_path in options.policy_bundles {
         let bundle = load_task_policy_bundle(&bundle_path);
         bundle.apply_to_minipod(&mut spec);
     }
-    for mount in read_only_mounts {
+    for mount in options.read_only_mounts {
         spec.filesystem.mounts.push(parse_read_only_mount(&mount));
     }
-    for grant in credential_files {
+    for grant in options.credential_files {
         let (mount, credential_grant) = parse_credential_file_grant(&grant);
         spec.filesystem.mounts.push(mount);
         spec.credentials.grants.push(credential_grant);
     }
-    if !allow_domains.is_empty() {
+    if !options.allow_domains.is_empty() {
         spec.network.mode = NetworkMode::AllowListed;
-        spec.network.allowed_domains = allow_domains;
+        spec.network.allowed_domains = options.allow_domains;
+    }
+    if !options.deny_domains.is_empty() {
+        spec.network.denied_domains = options.deny_domains;
     }
 
     if let Err(e) = validate_minipod_spec(&spec) {
@@ -2312,6 +2331,7 @@ async fn main() {
             credential_files,
             policy_bundles,
             allow_domains,
+            deny_domains,
         } => {
             cmd_run(RunOptions {
                 command,
@@ -2324,6 +2344,7 @@ async fn main() {
                 credential_files,
                 policy_bundles,
                 allow_domains,
+                deny_domains,
             })
             .await
         }
@@ -2347,7 +2368,8 @@ async fn main() {
             read_only_mounts,
             credential_files,
             policy_bundles,
-        } => cmd_minipod_spec(
+            deny_domains,
+        } => cmd_minipod_spec(MinipodSpecOptions {
             agent,
             workspace,
             agent_profile,
@@ -2355,7 +2377,8 @@ async fn main() {
             read_only_mounts,
             credential_files,
             policy_bundles,
-        ),
+            deny_domains,
+        }),
         Commands::Providers => cmd_providers(),
         Commands::MinipodInspect { session_id, json } => cmd_minipod_inspect(session_id, json),
         Commands::MinipodLogs {
