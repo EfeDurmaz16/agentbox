@@ -1390,71 +1390,40 @@ async fn cmd_stop_pod(pod_id: String) {
 }
 
 async fn cmd_pods() {
-    match Command::new("podman")
-        .args([
-            "pod",
-            "ls",
-            "--format",
-            "json",
-            "--filter",
-            "label=agentbox=true",
-        ])
-        .output()
-    {
-        Ok(o) if o.status.success() => {
-            let stdout = String::from_utf8_lossy(&o.stdout);
-            let json_str = stdout.trim();
+    use agentbox_daemon::config;
+    use agentbox_daemon::runtime::session::RuntimeSessionStore;
 
-            if json_str.is_empty() || json_str == "[]" {
-                println!("No minipods running.");
-                return;
-            }
+    let config = config::load().unwrap_or_else(|e| {
+        eprintln!("error: failed to load Agentbox config: {}", e);
+        std::process::exit(1);
+    });
+    let store = RuntimeSessionStore::new(config.session_store_path);
+    let sessions = store.list().unwrap_or_else(|e| {
+        eprintln!("error: failed to read runtime session store: {}", e);
+        std::process::exit(1);
+    });
 
-            let pods: Vec<serde_json::Value> = match serde_json::from_str(json_str) {
-                Ok(p) => p,
-                Err(e) => {
-                    eprintln!("Error: failed to parse pod list: {}", e);
-                    std::process::exit(1);
-                }
-            };
+    if sessions.is_empty() {
+        println!("No persisted AgentPod sessions.");
+        return;
+    }
 
-            if pods.is_empty() {
-                println!("No minipods running.");
-                return;
-            }
+    println!(
+        "{:<28} {:<18} {:<12} {:<10} {:<12} AGENT",
+        "SESSION", "NAME", "PROVIDER", "STATUS", "RISK"
+    );
+    println!("{}", "-".repeat(104));
 
-            println!("{:<24} {:<12} {:<8} CREATED", "NAME", "STATUS", "CTRS");
-            println!("{}", "-".repeat(64));
-
-            for pod in &pods {
-                let name = pod["Name"].as_str().unwrap_or("-");
-                let status = pod["Status"].as_str().unwrap_or("-");
-                let containers = pod["Containers"]
-                    .as_array()
-                    .map(|a| a.len())
-                    .or_else(|| pod["NumberOfContainers"].as_u64().map(|n| n as usize))
-                    .unwrap_or(0);
-                let created = pod["Created"]
-                    .as_str()
-                    .map(|s| if s.len() > 19 { &s[..19] } else { s })
-                    .unwrap_or("-");
-
-                println!("{:<24} {:<12} {:<8} {}", name, status, containers, created);
-            }
-        }
-        Ok(o) => {
-            let stderr = String::from_utf8_lossy(&o.stderr);
-            eprintln!("Error: {}", stderr.trim());
-            std::process::exit(1);
-        }
-        Err(e) => {
-            eprintln!("Error: podman not found: {}", e);
-            eprintln!(
-                "  macOS: brew install podman && podman machine init && podman machine start"
-            );
-            eprintln!("  Linux: https://podman.io/docs/installation");
-            std::process::exit(1);
-        }
+    for session in &sessions {
+        println!(
+            "{:<28} {:<18} {:<12} {:<10} {:<12} {}",
+            session.id,
+            session.name,
+            session.provider,
+            format!("{:?}", session.status),
+            session.spec.risk.label(),
+            session.spec.agent.name
+        );
     }
 }
 
