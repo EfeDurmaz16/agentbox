@@ -131,8 +131,9 @@ API. It posts:
 - `POST /sessions/{worker_session_id}/evidence/bundle`
 - `POST /sessions/{worker_session_id}/destroy`
 
-The adapter validates the same handshake, create, exec, and lifecycle evidence
-contracts before returning responses. The handshake path now routes
+The adapter validates the same handshake, create, exec, evidence metadata,
+evidence bundle payload, and lifecycle contracts before returning responses. The
+handshake path now routes
 `ed25519:<challenge-id>:<signature>` acknowledgements through Ed25519 signature
 verification and falls back to the legacy canonical digest verifier for older
 fixtures. It is not wired into `RemoteAgentPodProvider` yet because there is no

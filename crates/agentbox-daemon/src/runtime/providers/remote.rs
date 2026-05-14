@@ -670,6 +670,93 @@ impl RemoteAgentPodEvidenceUploadResponse {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteAgentPodEvidenceBundleUploadRequest {
+    pub session_id: String,
+    pub worker_session_id: String,
+    pub bundle_sha256: String,
+    pub bundle_json: String,
+    pub secret_material_included: bool,
+}
+
+impl RemoteAgentPodEvidenceBundleUploadRequest {
+    pub fn validate(&self) -> Result<(), RuntimeError> {
+        if self.session_id.trim().is_empty()
+            || self.worker_session_id.trim().is_empty()
+            || self.bundle_sha256.trim().is_empty()
+            || self.bundle_json.trim().is_empty()
+        {
+            return Err(RuntimeError::ManifestRejected(
+                "remote evidence bundle upload request must include session ids, bundle hash, and payload".into(),
+            ));
+        }
+        if self.bundle_sha256.len() != 64
+            || !self
+                .bundle_sha256
+                .chars()
+                .all(|value| value.is_ascii_hexdigit())
+        {
+            return Err(RuntimeError::ManifestRejected(
+                "remote evidence bundle payload hash must be a SHA-256 hex digest".into(),
+            ));
+        }
+        if sha256_hex(self.bundle_json.as_bytes()) != self.bundle_sha256 {
+            return Err(RuntimeError::ManifestRejected(
+                "remote evidence bundle payload hash does not match bundle_json".into(),
+            ));
+        }
+        if self.secret_material_included {
+            return Err(RuntimeError::ManifestRejected(
+                "remote evidence bundle payload must not include secret material".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteAgentPodEvidenceBundleUploadResponse {
+    pub session_id: String,
+    pub worker_session_id: String,
+    pub stored_bundle_sha256: String,
+    pub stored_bytes: u64,
+    pub storage_path: String,
+    pub lifecycle_events: Vec<RemoteAgentPodLifecycleEvent>,
+}
+
+impl RemoteAgentPodEvidenceBundleUploadResponse {
+    pub fn validate_for(
+        &self,
+        request: &RemoteAgentPodEvidenceBundleUploadRequest,
+    ) -> Result<(), RuntimeError> {
+        request.validate()?;
+        if self.session_id != request.session_id
+            || self.worker_session_id != request.worker_session_id
+        {
+            return Err(RuntimeError::ManifestRejected(
+                "remote evidence bundle upload response session ids do not match request".into(),
+            ));
+        }
+        if self.stored_bundle_sha256 != request.bundle_sha256 {
+            return Err(RuntimeError::ManifestRejected(
+                "remote evidence bundle upload response must acknowledge the submitted bundle hash"
+                    .into(),
+            ));
+        }
+        if self.stored_bytes == 0 || self.storage_path.trim().is_empty() {
+            return Err(RuntimeError::ManifestRejected(
+                "remote evidence bundle upload response must include stored byte count and path"
+                    .into(),
+            ));
+        }
+        require_lifecycle_events(
+            &self.lifecycle_events,
+            &[RemoteAgentPodLifecycleEvent::EvidenceSealed],
+            "evidence bundle upload response",
+        )
+    }
+}
+
 #[async_trait]
 pub trait RemoteAgentPodTransport: Send + Sync {
     async fn handshake(
@@ -696,6 +783,11 @@ pub trait RemoteAgentPodTransport: Send + Sync {
         &self,
         request: RemoteAgentPodEvidenceUploadRequest,
     ) -> Result<RemoteAgentPodEvidenceUploadResponse, RuntimeError>;
+
+    async fn upload_evidence_bundle(
+        &self,
+        request: RemoteAgentPodEvidenceBundleUploadRequest,
+    ) -> Result<RemoteAgentPodEvidenceBundleUploadResponse, RuntimeError>;
 }
 
 #[derive(Debug, Clone)]
@@ -854,6 +946,38 @@ impl RemoteAgentPodTransport for HttpRemoteAgentPodTransport {
             .map_err(|err| {
                 RuntimeError::ManifestRejected(format!(
                     "remote evidence upload response was invalid JSON: {err}"
+                ))
+            })?;
+        response.validate_for(&request)?;
+        Ok(response)
+    }
+
+    async fn upload_evidence_bundle(
+        &self,
+        request: RemoteAgentPodEvidenceBundleUploadRequest,
+    ) -> Result<RemoteAgentPodEvidenceBundleUploadResponse, RuntimeError> {
+        request.validate()?;
+        let response = self
+            .client
+            .post(self.route(format!(
+                "sessions/{}/evidence/bundle",
+                request.worker_session_id
+            )))
+            .json(&request)
+            .send()
+            .await
+            .map_err(|err| {
+                RuntimeError::Unavailable(format!("remote evidence bundle upload failed: {err}"))
+            })?
+            .error_for_status()
+            .map_err(|err| {
+                RuntimeError::Unavailable(format!("remote evidence bundle upload rejected: {err}"))
+            })?
+            .json::<RemoteAgentPodEvidenceBundleUploadResponse>()
+            .await
+            .map_err(|err| {
+                RuntimeError::ManifestRejected(format!(
+                    "remote evidence bundle upload response was invalid JSON: {err}"
                 ))
             })?;
         response.validate_for(&request)?;
@@ -1277,6 +1401,25 @@ mod tests {
             response.validate_for(&request)?;
             Ok(response)
         }
+
+        async fn upload_evidence_bundle(
+            &self,
+            request: RemoteAgentPodEvidenceBundleUploadRequest,
+        ) -> Result<RemoteAgentPodEvidenceBundleUploadResponse, RuntimeError> {
+            let response = RemoteAgentPodEvidenceBundleUploadResponse {
+                session_id: request.session_id.clone(),
+                worker_session_id: request.worker_session_id.clone(),
+                stored_bundle_sha256: request.bundle_sha256.clone(),
+                stored_bytes: request.bundle_json.len() as u64,
+                storage_path: format!(
+                    "evidence/{}/{}.json",
+                    request.worker_session_id, request.bundle_sha256
+                ),
+                lifecycle_events: vec![RemoteAgentPodLifecycleEvent::EvidenceSealed],
+            };
+            response.validate_for(&request)?;
+            Ok(response)
+        }
     }
 
     #[tokio::test]
@@ -1410,6 +1553,10 @@ mod tests {
         assert_eq!(
             transport.route("sessions/worker-1/evidence"),
             "https://worker.example.com/agentpod/sessions/worker-1/evidence"
+        );
+        assert_eq!(
+            transport.route("sessions/worker-1/evidence/bundle"),
+            "https://worker.example.com/agentpod/sessions/worker-1/evidence/bundle"
         );
     }
 
@@ -1906,6 +2053,47 @@ mod tests {
         assert!(err.to_string().contains("submitted bundle"));
     }
 
+    #[test]
+    fn remote_evidence_bundle_upload_request_binds_payload_hash() {
+        let bundle_json = r#"{"session_id":"session-1","events":[]}"#.to_string();
+        let mut request = RemoteAgentPodEvidenceBundleUploadRequest {
+            session_id: "session-1".into(),
+            worker_session_id: "worker-session-1".into(),
+            bundle_sha256: sha256_hex(bundle_json.as_bytes()),
+            bundle_json,
+            secret_material_included: false,
+        };
+
+        request.validate().unwrap();
+        request.bundle_json = "{}".into();
+        let err = request.validate().unwrap_err();
+        assert!(err.to_string().contains("does not match"));
+    }
+
+    #[test]
+    fn remote_evidence_bundle_upload_response_must_acknowledge_storage() {
+        let bundle_json = r#"{"session_id":"session-1","events":[]}"#.to_string();
+        let request = RemoteAgentPodEvidenceBundleUploadRequest {
+            session_id: "session-1".into(),
+            worker_session_id: "worker-session-1".into(),
+            bundle_sha256: sha256_hex(bundle_json.as_bytes()),
+            bundle_json,
+            secret_material_included: false,
+        };
+        let response = RemoteAgentPodEvidenceBundleUploadResponse {
+            session_id: "session-1".into(),
+            worker_session_id: "worker-session-1".into(),
+            stored_bundle_sha256: request.bundle_sha256.clone(),
+            stored_bytes: 0,
+            storage_path: String::new(),
+            lifecycle_events: vec![RemoteAgentPodLifecycleEvent::EvidenceSealed],
+        };
+
+        let err = response.validate_for(&request).unwrap_err();
+
+        assert!(err.to_string().contains("stored byte count"));
+    }
+
     #[tokio::test]
     async fn fake_remote_transport_proves_contract_without_provider_execution() {
         let transport = RemoteAgentPodTransportDescriptor::new(
@@ -1982,6 +2170,22 @@ mod tests {
 
         assert_eq!(evidence.accepted_event_count, 4);
         assert!(evidence
+            .lifecycle_events
+            .contains(&RemoteAgentPodLifecycleEvent::EvidenceSealed));
+        let bundle_json = r#"{"session_id":"session-1","events":[]}"#.to_string();
+        let bundle = fake
+            .upload_evidence_bundle(RemoteAgentPodEvidenceBundleUploadRequest {
+                session_id: evidence.session_id.clone(),
+                worker_session_id: evidence.worker_session_id.clone(),
+                bundle_sha256: sha256_hex(bundle_json.as_bytes()),
+                bundle_json,
+                secret_material_included: false,
+            })
+            .await
+            .unwrap();
+
+        assert!(bundle.storage_path.ends_with(".json"));
+        assert!(bundle
             .lifecycle_events
             .contains(&RemoteAgentPodLifecycleEvent::EvidenceSealed));
 
