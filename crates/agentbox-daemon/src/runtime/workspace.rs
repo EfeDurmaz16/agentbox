@@ -24,6 +24,7 @@ pub enum WorkspaceOverlayError {
     MissingUpperPath,
     MissingWorkPath,
     SameUpperAndWorkPath(PathBuf),
+    OverlayUpperNotEmpty(PathBuf),
     OverlayInsideWorkspace {
         overlay_path: PathBuf,
         workspace_path: PathBuf,
@@ -39,6 +40,11 @@ impl fmt::Display for WorkspaceOverlayError {
             Self::SameUpperAndWorkPath(path) => write!(
                 f,
                 "workspace overlay upper and work paths must be different: {}",
+                path.display()
+            ),
+            Self::OverlayUpperNotEmpty(path) => write!(
+                f,
+                "workspace overlay upper path must be empty before projection: {}",
                 path.display()
             ),
             Self::OverlayInsideWorkspace {
@@ -123,6 +129,45 @@ impl WorkspaceOverlayAllocator {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceProjection {
+    pub lower_host_path: PathBuf,
+    pub projected_host_path: PathBuf,
+    pub work_host_path: PathBuf,
+}
+
+pub struct WorkspaceProjectionMaterializer;
+
+impl WorkspaceProjectionMaterializer {
+    pub fn materialize(
+        spec: &mut MinipodSpec,
+    ) -> Result<Option<WorkspaceProjection>, WorkspaceOverlayError> {
+        let Some(allocation) = WorkspaceOverlayAllocator::allocate(spec)? else {
+            return Ok(None);
+        };
+
+        let lower_host_path = spec.filesystem.workspace_host_path.clone();
+        ensure_empty_dir(&allocation.upper_host_path)?;
+        copy_tree(&lower_host_path, &allocation.upper_host_path)?;
+
+        spec.labels.insert(
+            "agentbox.workspace.lower".to_string(),
+            lower_host_path.display().to_string(),
+        );
+        spec.labels.insert(
+            "agentbox.workspace.projected".to_string(),
+            allocation.upper_host_path.display().to_string(),
+        );
+        spec.filesystem.workspace_host_path = allocation.upper_host_path.clone();
+
+        Ok(Some(WorkspaceProjection {
+            lower_host_path,
+            projected_host_path: allocation.upper_host_path,
+            work_host_path: allocation.work_host_path,
+        }))
+    }
+}
+
 fn canonicalize_existing(path: &Path) -> Result<PathBuf, WorkspaceOverlayError> {
     path.canonicalize().map_err(|err| {
         WorkspaceOverlayError::Io(format!(
@@ -167,6 +212,108 @@ fn canonicalize_for_create(path: &Path) -> Result<PathBuf, WorkspaceOverlayError
         ))
     })?;
     Ok(parent.join(file_name))
+}
+
+fn ensure_empty_dir(path: &Path) -> Result<(), WorkspaceOverlayError> {
+    let mut entries = fs::read_dir(path).map_err(|err| {
+        WorkspaceOverlayError::Io(format!(
+            "failed to read workspace overlay upper path {}: {err}",
+            path.display()
+        ))
+    })?;
+    if entries.next().is_some() {
+        return Err(WorkspaceOverlayError::OverlayUpperNotEmpty(
+            path.to_path_buf(),
+        ));
+    }
+    Ok(())
+}
+
+fn copy_tree(src: &Path, dst: &Path) -> Result<(), WorkspaceOverlayError> {
+    for entry in fs::read_dir(src).map_err(|err| {
+        WorkspaceOverlayError::Io(format!(
+            "failed to read workspace path {}: {err}",
+            src.display()
+        ))
+    })? {
+        let entry = entry.map_err(|err| {
+            WorkspaceOverlayError::Io(format!(
+                "failed to inspect workspace entry under {}: {err}",
+                src.display()
+            ))
+        })?;
+        let source_path = entry.path();
+        let target_path = dst.join(entry.file_name());
+        copy_entry(&source_path, &target_path)?;
+    }
+    Ok(())
+}
+
+fn copy_entry(src: &Path, dst: &Path) -> Result<(), WorkspaceOverlayError> {
+    let metadata = fs::symlink_metadata(src).map_err(|err| {
+        WorkspaceOverlayError::Io(format!(
+            "failed to inspect workspace entry {}: {err}",
+            src.display()
+        ))
+    })?;
+
+    if metadata.file_type().is_symlink() {
+        copy_symlink(src, dst)?;
+        return Ok(());
+    }
+
+    if metadata.is_dir() {
+        fs::create_dir_all(dst).map_err(|err| {
+            WorkspaceOverlayError::Io(format!(
+                "failed to create projected workspace directory {}: {err}",
+                dst.display()
+            ))
+        })?;
+        copy_tree(src, dst)?;
+        return Ok(());
+    }
+
+    fs::copy(src, dst).map_err(|err| {
+        WorkspaceOverlayError::Io(format!(
+            "failed to copy workspace file {} to {}: {err}",
+            src.display(),
+            dst.display()
+        ))
+    })?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn copy_symlink(src: &Path, dst: &Path) -> Result<(), WorkspaceOverlayError> {
+    let target = fs::read_link(src).map_err(|err| {
+        WorkspaceOverlayError::Io(format!(
+            "failed to read workspace symlink {}: {err}",
+            src.display()
+        ))
+    })?;
+    std::os::unix::fs::symlink(&target, dst).map_err(|err| {
+        WorkspaceOverlayError::Io(format!(
+            "failed to copy workspace symlink {} to {}: {err}",
+            src.display(),
+            dst.display()
+        ))
+    })
+}
+
+#[cfg(not(unix))]
+fn copy_symlink(src: &Path, dst: &Path) -> Result<(), WorkspaceOverlayError> {
+    let target = fs::read_link(src).map_err(|err| {
+        WorkspaceOverlayError::Io(format!(
+            "failed to read workspace symlink {}: {err}",
+            src.display()
+        ))
+    })?;
+    fs::write(dst, target.display().to_string()).map_err(|err| {
+        WorkspaceOverlayError::Io(format!(
+            "failed to preserve workspace symlink marker {}: {err}",
+            src.display()
+        ))
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -432,6 +579,79 @@ mod tests {
             WorkspaceOverlayError::OverlayInsideWorkspace { .. }
         ));
         let _ = fs::remove_dir_all(&workspace);
+    }
+
+    #[test]
+    fn projection_materializer_copies_workspace_into_upper_layer() {
+        let workspace = unique_dir("projection-workspace");
+        let overlay = unique_dir("projection-overlay");
+        let _ = fs::remove_dir_all(&workspace);
+        let _ = fs::remove_dir_all(&overlay);
+        fs::create_dir_all(workspace.join("src")).unwrap();
+        fs::write(workspace.join("README.md"), "lower\n").unwrap();
+        fs::write(workspace.join("src").join("main.rs"), "fn main() {}\n").unwrap();
+        let mut spec = MinipodSpec::for_agent_task("hermes", &workspace);
+        spec.workspace_mode = AgentPodWorkspaceMode::OverlayReview;
+        spec.filesystem.workspace_overlay =
+            WorkspaceOverlayPolicy::review_required(Some(overlay.clone()));
+
+        let projection = WorkspaceProjectionMaterializer::materialize(&mut spec)
+            .unwrap()
+            .expect("workspace should be projected");
+
+        assert_eq!(
+            projection.lower_host_path,
+            workspace.canonicalize().unwrap()
+        );
+        assert_eq!(
+            spec.filesystem.workspace_host_path,
+            projection.projected_host_path
+        );
+        assert_eq!(
+            fs::read_to_string(projection.projected_host_path.join("README.md")).unwrap(),
+            "lower\n"
+        );
+        fs::write(
+            projection.projected_host_path.join("README.md"),
+            "overlay\n",
+        )
+        .unwrap();
+        assert_eq!(
+            fs::read_to_string(workspace.join("README.md")).unwrap(),
+            "lower\n"
+        );
+        assert_eq!(
+            spec.labels.get("agentbox.workspace.lower"),
+            Some(&workspace.canonicalize().unwrap().display().to_string())
+        );
+
+        let _ = fs::remove_dir_all(&workspace);
+        let _ = fs::remove_dir_all(&overlay);
+    }
+
+    #[test]
+    fn projection_materializer_rejects_non_empty_upper_layer() {
+        let workspace = unique_dir("projection-nonempty-workspace");
+        let overlay = unique_dir("projection-nonempty-overlay");
+        let _ = fs::remove_dir_all(&workspace);
+        let _ = fs::remove_dir_all(&overlay);
+        fs::create_dir_all(&workspace).unwrap();
+        fs::create_dir_all(overlay.join("upper")).unwrap();
+        fs::write(overlay.join("upper").join("existing.txt"), "stale\n").unwrap();
+        fs::create_dir_all(overlay.join("work")).unwrap();
+        let mut spec = MinipodSpec::for_agent_task("hermes", &workspace);
+        spec.workspace_mode = AgentPodWorkspaceMode::OverlayReview;
+        spec.filesystem.workspace_overlay =
+            WorkspaceOverlayPolicy::review_required(Some(overlay.clone()));
+
+        let err = WorkspaceProjectionMaterializer::materialize(&mut spec).unwrap_err();
+
+        assert!(matches!(
+            err,
+            WorkspaceOverlayError::OverlayUpperNotEmpty(_)
+        ));
+        let _ = fs::remove_dir_all(&workspace);
+        let _ = fs::remove_dir_all(&overlay);
     }
 
     fn run_git(workspace: &Path, args: &[&str]) {
