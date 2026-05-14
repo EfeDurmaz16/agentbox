@@ -174,7 +174,12 @@ impl RuntimeProvider for AgentPodProvider {
     }
 
     fn implementation_status(&self) -> ProviderImplementationStatus {
-        ProviderImplementationStatus::DescriptorOnly
+        match self.kind {
+            AgentPodProviderKind::Linux => ProviderImplementationStatus::PrototypePrimitive,
+            AgentPodProviderKind::MacOs | AgentPodProviderKind::Windows => {
+                ProviderImplementationStatus::DescriptorOnly
+            }
+        }
     }
 
     fn capabilities(&self) -> &[RuntimeCapability] {
@@ -279,7 +284,7 @@ mod tests {
         assert_eq!(provider.family(), ProviderFamily::NativeSandbox);
         assert_eq!(
             provider.implementation_status(),
-            ProviderImplementationStatus::DescriptorOnly
+            ProviderImplementationStatus::PrototypePrimitive
         );
         assert!(
             provider.network_enforcement_capabilities().is_empty(),

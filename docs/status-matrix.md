@@ -48,7 +48,7 @@ Not every provider boundary is implemented yet.
 | Runtime provider registry | Shipped | `RuntimeProviderRegistry` can resolve AgentPod provider descriptors and compatibility providers, and can explain provider selection by risk and explicit provider hints. |
 | Runtime provider listing | Shipped | `agentbox providers` reports family, platform, shipped/experimental/descriptor-only status, and network enforcement claims. `agentbox providers --json` exposes the same provider truth metadata for scripts and release checks. |
 | Network enforcement capability flags | Shipped | Runtime providers separately report active network enforcement strength, so planned policy support is not confused with packet/domain enforcement. |
-| AgentPod provider descriptors | Shipped | `agentpod-macos`, `agentpod-linux`, `agentpod-windows`, and `remote-agentpod` expose capability metadata while returning unavailable for execution. |
+| AgentPod provider truth | Shipped | `agentpod-macos`, `agentpod-linux`, `agentpod-windows`, and `remote-agentpod` expose capability/status metadata while returning unavailable for provider execution. Linux now reports prototype primitives; macOS, Windows, and remote remain descriptor-only. |
 | Podman compatibility adapter | Shipped | `agentbox run` now routes through `RuntimeManager` and the Podman `RuntimeProvider` adapter, creating governed runtime sessions and evidence events. |
 | AgentPod lifecycle CLI | Shipped partial | `agentbox pods` lists persisted runtime sessions and `agentbox stop-pod` stops runtime sessions through `RuntimeManager` before falling back to legacy Podman ids. Stopped sessions are retained for review and evidence, while transient approval grants are cleared. |
 
