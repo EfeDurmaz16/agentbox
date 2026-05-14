@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use crate::audit::AuditEvent;
+use crate::runtime::types::ApprovalSignature;
 use crate::runtime::types::{CredentialGrant, CredentialGrantKind, RuntimeSession};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -68,9 +70,45 @@ impl FidesCredentialAuthorityHook for NoopFidesCredentialAuthorityHook {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FidesSignedActionDraft {
+    pub schema_version: i64,
+    pub action_id: String,
+    pub action_type: String,
+    pub actor: String,
+    pub subject: String,
+    pub decision: String,
+    pub evidence_refs: Vec<String>,
+    pub signature: Option<ApprovalSignature>,
+}
+
+impl FidesSignedActionDraft {
+    pub fn from_audit_event(session: &RuntimeSession, event: &AuditEvent) -> Self {
+        Self {
+            schema_version: 1,
+            action_id: event.id.clone(),
+            action_type: format!("agentbox.{}", event.bucket),
+            actor: session.spec.agent.name.clone(),
+            subject: session.id.clone(),
+            decision: event.decision.clone(),
+            evidence_refs: event.event_hash.iter().cloned().collect(),
+            signature: None,
+        }
+    }
+
+    pub fn is_signed(&self) -> bool {
+        self.signature.is_some()
+    }
+
+    pub fn requires_signature(&self) -> bool {
+        self.signature.is_none()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::audit::AuditEvent;
     use crate::runtime::types::{FilesystemPolicy, MinipodSpec, RuntimeSession, RuntimeStatus};
     use chrono::Utc;
 
@@ -132,5 +170,32 @@ mod tests {
             decision,
             FidesCredentialAuthorityDecision::RequiresExternalAuthority { .. }
         ));
+    }
+
+    #[test]
+    fn fides_signed_action_draft_maps_audit_decisions_without_fake_signature() {
+        let (session, _) = session_with_grant();
+        let mut event = AuditEvent::new(
+            0,
+            Some("hermes".into()),
+            format!("runtime.exec {} git push", session.id),
+            "/tmp/agentbox-work".into(),
+            "approval".into(),
+            "grant:grant-git-push:exit_code:0".into(),
+            None,
+            Some("agentpod-linux".into()),
+        );
+        event.event_hash = Some("event-hash-1".into());
+
+        let draft = FidesSignedActionDraft::from_audit_event(&session, &event);
+
+        assert_eq!(draft.schema_version, 1);
+        assert_eq!(draft.action_id, event.id);
+        assert_eq!(draft.action_type, "agentbox.approval");
+        assert_eq!(draft.actor, "hermes");
+        assert_eq!(draft.subject, session.id);
+        assert_eq!(draft.evidence_refs, vec!["event-hash-1"]);
+        assert!(!draft.is_signed());
+        assert!(draft.requires_signature());
     }
 }
