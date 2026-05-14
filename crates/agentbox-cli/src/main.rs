@@ -316,6 +316,15 @@ fn process_alive(pid: u32) -> bool {
     unsafe { libc::kill(pid as i32, 0) == 0 }
 }
 
+fn cleanup_stale_daemon_files() {
+    if let Some(pid) = read_pid() {
+        if !process_alive(pid) {
+            let _ = fs::remove_file(pid_path());
+            let _ = fs::remove_file(socket_path());
+        }
+    }
+}
+
 /// Locate the agentbox-daemon binary.
 /// Looks next to the current executable first, then falls back to PATH.
 fn find_daemon_binary() -> Option<PathBuf> {
@@ -367,6 +376,9 @@ fn cmd_start() {
         if process_alive(pid) {
             eprintln!("daemon already running (PID: {})", pid);
             std::process::exit(1);
+        } else {
+            cleanup_stale_daemon_files();
+            eprintln!("cleaned stale daemon pid/socket files");
         }
     }
 
@@ -426,12 +438,17 @@ fn cmd_stop() {
 }
 
 fn cmd_status() {
-    let running = read_pid().is_some_and(process_alive);
+    let pid = read_pid();
+    let running = pid.is_some_and(process_alive);
 
     if running {
-        let pid = read_pid().unwrap();
+        let pid = pid.unwrap();
         println!("status:  running");
         println!("pid:     {}", pid);
+    } else if let Some(pid) = pid {
+        println!("status:  stopped (stale pid file)");
+        println!("pid:     {} (not running)", pid);
+        println!("hint:    run `agentbox start` to clean stale daemon files");
     } else {
         println!("status:  stopped");
     }
@@ -503,13 +520,16 @@ fn cmd_doctor() {
         "start the daemon once to generate config.toml",
     ));
 
-    let daemon_running = read_pid().is_some_and(process_alive);
+    let pid = read_pid();
+    let daemon_running = pid.is_some_and(process_alive);
     checks.push(doctor_check(
         "daemon process",
         daemon_running,
-        read_pid()
-            .map(|pid| format!("pid {pid}"))
-            .unwrap_or_else(|| "no pid file".to_string()),
+        match pid {
+            Some(pid) if daemon_running => format!("pid {pid}"),
+            Some(pid) => format!("stale pid {pid}"),
+            None => "no pid file".to_string(),
+        },
         "run `agentbox start`",
     ));
 
