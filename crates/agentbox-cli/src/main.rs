@@ -31,6 +31,8 @@ struct Cli {
 enum Commands {
     /// Start the daemon in background
     Start,
+    /// Initialize local config, directories, and command shims
+    Setup,
     /// Stop the daemon
     Stop,
     /// Show daemon status
@@ -404,6 +406,29 @@ fn cmd_start() {
     fs::write(pid_path(), pid.to_string()).expect("failed to write pid file");
 
     println!("daemon started (PID: {})", pid);
+}
+
+fn cmd_setup() {
+    use agentbox_daemon::config;
+
+    ensure_dir(&agentbox_dir());
+    let config = config::load().unwrap_or_else(|e| {
+        eprintln!("error: failed to initialize Agentbox config: {}", e);
+        std::process::exit(1);
+    });
+
+    println!("Agentbox setup");
+    println!("{}", "-".repeat(64));
+    println!("config:  {}", config_path().display());
+    println!("audit:   {}", config.db_path);
+    println!("socket:  {}", config.socket_path);
+    println!();
+    cmd_install();
+    println!();
+    println!("Next:");
+    println!("  export PATH=\"{}:$PATH\"", shims_dir().display());
+    println!("  agentbox start");
+    println!("  agentbox doctor");
 }
 
 fn cmd_stop() {
@@ -2672,6 +2697,7 @@ async fn main() {
 
     match cli.command {
         Commands::Start => cmd_start(),
+        Commands::Setup => cmd_setup(),
         Commands::Stop => cmd_stop(),
         Commands::Status => cmd_status(),
         Commands::Doctor => cmd_doctor(),
