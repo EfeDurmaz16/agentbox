@@ -1263,7 +1263,16 @@ async fn cmd_run(options: RunOptions) {
             selection.selected_provider
         );
         eprintln!("reason: {}", selection.reason);
-        eprintln!("hint: use `--provider podman` for the current compatibility backend");
+        if selection.selected_provider == "agentpod-linux" {
+            eprintln!(
+                "hint: inspect the native prototype plan with `agentbox native-plan --provider agentpod-linux -- <cmd>`"
+            );
+            eprintln!(
+                "hint: Linux prototype execution is still gated behind AGENTBOX_LINUX_NATIVE and is not wired into `agentbox run` yet"
+            );
+        } else {
+            eprintln!("hint: use `--provider podman` for the current compatibility backend");
+        }
         std::process::exit(1);
     }
 

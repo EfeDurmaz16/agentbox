@@ -88,6 +88,10 @@ It is intentionally not wired into provider selection yet. It refuses to run
 unless `AGENTBOX_LINUX_NATIVE=1` is set on a Linux host, and tests keep the
 non-Linux path unavailable.
 
+For now, `agentbox run --provider agentpod-linux` exits with this boundary
+instead of silently falling back to Podman or pretending the native provider is
+ready.
+
 ## Adaptive Runtime Selection
 
 Agentbox should choose or recommend a provider by task risk.
