@@ -197,6 +197,10 @@ scripts/demo-autonomous-agent.sh
 # Live compatibility smoke for daemon socket + shim bridge when Podman exists
 scripts/smoke-podman-bridge.sh
 
+# Build the Linux guest shim artifact used by Podman compatibility minipods
+rustup target add x86_64-unknown-linux-musl
+eval "$(scripts/build-linux-shim.sh)"
+
 # Block high-risk destinations for the task
 agentbox minipod-spec hermes --workspace . --deny-domain metadata.google.internal
 
