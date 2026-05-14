@@ -36,6 +36,15 @@ implemented yet.
 | AgentPod Windows | Descriptor only | Candidate surfaces include Job Objects, AppContainer, WFP, ETW, and Windows sandbox primitives. Execution intentionally returns unavailable. |
 | Podman compatibility minipods | Experimental | `agentbox run` uses the daemon-owned runtime manager path. `agentbox pods` and `agentbox stop-pod` still use the older Podman CLI path, and live socket/shim smoke proof remains open. |
 
+## Ecosystem Integrations
+
+| Surface | Status | Notes |
+|---------|--------|-------|
+| FIDES authority hook | Planned | Agentbox should emit authority and credential-grant decisions in a shape FIDES can sign or verify. No FIDES adapter is shipped yet. |
+| agit evidence lineage | Planned | Agentbox should export session evidence that agit can attach to workspace diffs and commit lineage. No agit adapter is shipped yet. |
+| Switchboard coordination | Planned | Switchboard can coordinate multiple agents, while Agentbox owns each local runtime boundary. No direct integration is shipped yet. |
+| Aspendos consumer path | Planned | Aspendos-style general agents are target consumers for governed minipods. No bundled Aspendos runtime integration is shipped yet. |
+
 ## Current Direction
 
 Agentbox is not trying to be a smaller VM manager. The target product is:
