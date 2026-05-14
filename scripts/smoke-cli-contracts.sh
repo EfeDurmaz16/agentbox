@@ -82,22 +82,26 @@ import sys
 bundle = pathlib.Path(sys.argv[1])
 manifest = bundle / "manifest.json"
 data = manifest.read_bytes()
+file_entry = {
+    "path": "manifest.json",
+    "media_type": "application/json",
+    "description": "smoke manifest",
+    "sha256": hashlib.sha256(data).hexdigest(),
+    "bytes": len(data),
+}
+root_payload = (
+    "agentbox-evidence-root-v1\n"
+    + f"{file_entry['path']}\0{file_entry['sha256']}\0{file_entry['bytes']}\0{file_entry['media_type']}"
+).encode()
 index = {
     "schema_version": 1,
     "bundle_id": "smoke-bundle",
     "session_id": "smoke-session",
     "provider": "direct-host",
     "status": "Stopped",
+    "root_sha256": hashlib.sha256(root_payload).hexdigest(),
     "generated_at": "2026-05-14T00:00:00Z",
-    "files": [
-        {
-            "path": "manifest.json",
-            "media_type": "application/json",
-            "description": "smoke manifest",
-            "sha256": hashlib.sha256(data).hexdigest(),
-            "bytes": len(data),
-        }
-    ],
+    "files": [file_entry],
 }
 (bundle / "index.json").write_text(json.dumps(index, indent=2), encoding="utf-8")
 PY

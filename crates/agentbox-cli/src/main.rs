@@ -2891,6 +2891,7 @@ struct EvidenceBundleIndex {
     session_id: String,
     provider: String,
     status: String,
+    root_sha256: String,
     generated_at: chrono::DateTime<Utc>,
     files: Vec<EvidenceBundleFile>,
 }
@@ -2942,6 +2943,7 @@ fn write_session_evidence_bundle_dir(
         session_id: bundle.session_id.clone(),
         provider: bundle.provider.clone(),
         status: format!("{:?}", bundle.status),
+        root_sha256: evidence_bundle_root_sha256(&files),
         generated_at: bundle.generated_at,
         files,
     };
@@ -3004,6 +3006,13 @@ fn verify_evidence_bundle_dir(bundle_dir: &Path) -> Result<usize, String> {
     if index.files.is_empty() {
         return Err("evidence bundle index does not list any files".to_string());
     }
+    let actual_root_sha256 = evidence_bundle_root_sha256(&index.files);
+    if index.root_sha256 != actual_root_sha256 {
+        return Err(format!(
+            "bundle root sha256 mismatch: expected {}, got {}",
+            index.root_sha256, actual_root_sha256
+        ));
+    }
 
     for file in &index.files {
         let relative_path = safe_bundle_relative_path(&file.path)?;
@@ -3028,6 +3037,20 @@ fn verify_evidence_bundle_dir(bundle_dir: &Path) -> Result<usize, String> {
     }
 
     Ok(index.files.len())
+}
+
+fn evidence_bundle_root_sha256(files: &[EvidenceBundleFile]) -> String {
+    let mut entries = files
+        .iter()
+        .map(|file| {
+            format!(
+                "{}\0{}\0{}\0{}",
+                file.path, file.sha256, file.bytes, file.media_type
+            )
+        })
+        .collect::<Vec<_>>();
+    entries.sort();
+    sha256_hex(format!("agentbox-evidence-root-v1\n{}", entries.join("\n")).as_bytes())
 }
 
 fn safe_bundle_relative_path(path: &str) -> Result<PathBuf, String> {
@@ -4457,6 +4480,7 @@ mod tests {
             serde_json::from_slice(&fs::read(output_dir.join("index.json")).unwrap()).unwrap();
         assert_eq!(index["schema_version"], 1);
         assert_eq!(index["session_id"], bundle.session_id);
+        assert_eq!(index["root_sha256"].as_str().unwrap().len(), 64);
         assert_eq!(index["files"].as_array().unwrap().len(), 4);
         for file in index["files"].as_array().unwrap() {
             assert_eq!(file["sha256"].as_str().unwrap().len(), 64);

@@ -298,9 +298,10 @@ agentbox evidence --session <session-id> --bundle ./agentbox-evidence
 agentbox evidence --verify --bundle ./agentbox-evidence
 ```
 
-The generated `index.json` includes per-file SHA-256 digests and byte counts so
-the same artifact can be handed to remote evidence upload, AGIT lineage, or
-FIDES-style verification without trusting loose local filenames.
+The generated `index.json` includes per-file SHA-256 digests, byte counts, and a
+bundle `root_sha256` so the same artifact can be handed to remote evidence
+upload, AGIT lineage, or FIDES-style verification without trusting loose local
+filenames.
 
 For macOS specifically, see
 [docs/macos-minipod-limitations.md](docs/macos-minipod-limitations.md).
