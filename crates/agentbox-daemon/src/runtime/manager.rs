@@ -12,13 +12,15 @@ use crate::runtime::provider::{RuntimeError, RuntimeProvider};
 use crate::runtime::session::RuntimeSessionStore;
 use crate::runtime::types::{
     ApprovalGrant, CommandResult, CommandTranscript, CredentialGrant, CredentialGrantKind,
-    ExecCommand, MinipodSpec, RuntimeSession, RuntimeStatus,
+    ExecCommand, MinipodSpec, RuntimeSession, RuntimeStatus, SessionEvidenceBundle,
 };
 use crate::runtime::workspace::{
     WorkspaceDiffSnapshot, WorkspaceDiffSnapshotter, WorkspaceProjectionApplier,
     WorkspaceProjectionApply, WorkspaceProjectionCommit, WorkspaceProjectionCommitter,
     WorkspaceProjectionDiscard, WorkspaceProjectionDiscarder,
 };
+
+const DEFAULT_SESSION_EVIDENCE_LIMIT: usize = 10_000;
 
 pub struct RuntimeManager {
     provider: Arc<dyn RuntimeProvider>,
@@ -186,8 +188,20 @@ impl RuntimeManager {
             Some(self.provider.name().to_string()),
         )?;
         self.sessions
-            .upsert(session)
+            .upsert(session.clone())
             .map_err(|e| RuntimeError::Internal(e.to_string()))?;
+        let events = self
+            .audit
+            .query_session_evidence(
+                &session.id,
+                Some(session.spec.agent.name.as_str()),
+                DEFAULT_SESSION_EVIDENCE_LIMIT,
+            )
+            .map_err(|e| RuntimeError::Internal(e.to_string()))?;
+        let bundle = SessionEvidenceBundle::from_session_events(&session, &events);
+        self.provider
+            .seal_evidence_bundle(&session, &bundle)
+            .await?;
 
         Ok(())
     }
@@ -702,6 +716,7 @@ mod tests {
     use crate::runtime::types::{
         ApprovalScope, CredentialGrant, CredentialGrantKind, RuntimeCapability,
     };
+    use std::sync::Mutex;
 
     struct MockProvider;
 
@@ -763,6 +778,72 @@ mod tests {
         }
 
         async fn destroy(&self, _session_id: &str) -> Result<(), RuntimeError> {
+            Ok(())
+        }
+
+        async fn list(&self) -> Result<Vec<RuntimeSession>, RuntimeError> {
+            Ok(vec![])
+        }
+    }
+
+    struct SealRecordingProvider {
+        sealed: Arc<Mutex<Vec<SessionEvidenceBundle>>>,
+    }
+
+    #[async_trait]
+    impl RuntimeProvider for SealRecordingProvider {
+        fn name(&self) -> &str {
+            "seal-recording"
+        }
+
+        fn platform(&self) -> &str {
+            "test"
+        }
+
+        fn capabilities(&self) -> &[RuntimeCapability] {
+            &[RuntimeCapability::EvidenceExport]
+        }
+
+        async fn is_available(&self) -> bool {
+            true
+        }
+
+        async fn create(&self, spec: &MinipodSpec) -> Result<RuntimeSession, RuntimeError> {
+            Ok(RuntimeSession::new(
+                spec.name.clone(),
+                self.name().to_string(),
+                self.platform().to_string(),
+                spec.clone(),
+            ))
+        }
+
+        async fn exec(
+            &self,
+            _session_id: &str,
+            _command: &ExecCommand,
+        ) -> Result<CommandResult, RuntimeError> {
+            Ok(CommandResult {
+                exit_code: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+                duration_ms: 0,
+            })
+        }
+
+        async fn status(&self, _session_id: &str) -> Result<RuntimeStatus, RuntimeError> {
+            Ok(RuntimeStatus::Running)
+        }
+
+        async fn destroy(&self, _session_id: &str) -> Result<(), RuntimeError> {
+            Ok(())
+        }
+
+        async fn seal_evidence_bundle(
+            &self,
+            _session: &RuntimeSession,
+            bundle: &SessionEvidenceBundle,
+        ) -> Result<(), RuntimeError> {
+            self.sealed.lock().unwrap().push(bundle.clone());
             Ok(())
         }
 
@@ -1484,6 +1565,34 @@ mod tests {
         let audit = manager.audit.recent(1).unwrap();
         assert_eq!(audit[0].decision, "destroyed");
         assert!(audit[0].command.contains("runtime.destroy"));
+    }
+
+    #[tokio::test]
+    async fn destroy_seals_final_session_evidence_bundle() {
+        let sealed = Arc::new(Mutex::new(Vec::new()));
+        let manager = RuntimeManager::new(
+            Arc::new(SealRecordingProvider {
+                sealed: sealed.clone(),
+            }),
+            session_store("destroy-seal-evidence"),
+            AuditStore::in_memory().unwrap(),
+        );
+        let spec = MinipodSpec::for_agent_task("aspendos", "/tmp/agentbox-work");
+        let session = manager.create(&spec).await.unwrap();
+
+        manager.destroy(&session.id).await.unwrap();
+
+        let sealed = sealed.lock().unwrap();
+        assert_eq!(sealed.len(), 1);
+        let bundle = &sealed[0];
+        assert_eq!(bundle.session_id, session.id);
+        assert!(matches!(bundle.status, RuntimeStatus::Stopped));
+        assert!(bundle
+            .lifecycle_events
+            .iter()
+            .any(
+                |event| event.command.contains("runtime.destroy") && event.decision == "destroyed"
+            ));
     }
 
     #[tokio::test]

@@ -4,6 +4,7 @@ use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use crate::runtime::bridge::HostBridgeTransportKind;
@@ -12,6 +13,7 @@ use crate::runtime::provider::{
 };
 use crate::runtime::types::{
     CommandResult, ExecCommand, MinipodSpec, RuntimeCapability, RuntimeSession, RuntimeStatus,
+    SessionEvidenceBundle,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -767,6 +769,36 @@ impl RemoteAgentPodEvidenceBundleUploadResponse {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct RemoteAgentPodEvidenceBundleEnvelope {
+    schema_version: i64,
+    kind: String,
+    session_id: String,
+    worker_session_id: String,
+    index: RemoteAgentPodEvidenceBundleIndex,
+    files: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct RemoteAgentPodEvidenceBundleIndex {
+    schema_version: i64,
+    bundle_id: String,
+    session_id: String,
+    provider: String,
+    status: String,
+    root_sha256: String,
+    generated_at: DateTime<Utc>,
+    files: Vec<RemoteAgentPodEvidenceBundleFile>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct RemoteAgentPodEvidenceBundleFile {
+    path: String,
+    media_type: String,
+    sha256: String,
+    bytes: usize,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RemoteAgentPodEvidenceStatusRequest {
     pub session_id: String,
@@ -1180,6 +1212,30 @@ fn sha256_hex(bytes: &[u8]) -> String {
     digest.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
+fn evidence_bundle_root_sha256(files: &[RemoteAgentPodEvidenceBundleFile]) -> String {
+    let mut entries = files
+        .iter()
+        .map(|file| {
+            format!(
+                "{}\0{}\0{}\0{}",
+                file.path, file.sha256, file.bytes, file.media_type
+            )
+        })
+        .collect::<Vec<_>>();
+    entries.sort();
+    sha256_hex(format!("agentbox-evidence-root-v1\n{}", entries.join("\n")).as_bytes())
+}
+
+fn remote_evidence_event_count(bundle: &SessionEvidenceBundle) -> u64 {
+    (bundle.lifecycle_events.len()
+        + bundle.approvals.len()
+        + bundle.commands.len()
+        + bundle.boundary_events.len()
+        + bundle.credential_events.len())
+    .try_into()
+    .unwrap_or(u64::MAX)
+}
+
 fn require_lifecycle_events(
     actual: &[RemoteAgentPodLifecycleEvent],
     required: &[RemoteAgentPodLifecycleEvent],
@@ -1279,6 +1335,108 @@ impl RemoteAgentPodProvider {
                     "remote AgentPod session is missing worker session metadata".into(),
                 )
             })
+    }
+
+    fn evidence_bundle_upload_requests(
+        &self,
+        session: &RuntimeSession,
+        worker_session_id: &str,
+        bundle: &SessionEvidenceBundle,
+    ) -> Result<
+        (
+            RemoteAgentPodEvidenceUploadRequest,
+            RemoteAgentPodEvidenceBundleUploadRequest,
+        ),
+        RuntimeError,
+    > {
+        let file_specs = [
+            (
+                "bundle.json",
+                "Full redacted AgentPod session evidence bundle",
+                serde_json::to_string_pretty(bundle),
+            ),
+            (
+                "manifest.json",
+                "Redacted AgentPod session manifest",
+                serde_json::to_string_pretty(&bundle.manifest),
+            ),
+            (
+                "replay.json",
+                "Metadata-only session replay plan",
+                serde_json::to_string_pretty(&bundle.replay),
+            ),
+            (
+                "transcripts.json",
+                "Redacted command transcripts",
+                serde_json::to_string_pretty(&bundle.transcripts),
+            ),
+        ];
+        let mut files = BTreeMap::new();
+        let mut index_files = Vec::with_capacity(file_specs.len());
+        for (path, _description, serialized) in file_specs {
+            let contents = serialized.map_err(|err| {
+                RuntimeError::Internal(format!(
+                    "failed to serialize remote AgentPod evidence file {path}: {err}"
+                ))
+            })?;
+            let bytes = contents.len();
+            let sha256 = sha256_hex(contents.as_bytes());
+            files.insert(path.to_string(), contents);
+            index_files.push(RemoteAgentPodEvidenceBundleFile {
+                path: path.to_string(),
+                media_type: "application/json".to_string(),
+                sha256,
+                bytes,
+            });
+        }
+        let root_sha256 = evidence_bundle_root_sha256(&index_files);
+        let index = RemoteAgentPodEvidenceBundleIndex {
+            schema_version: 1,
+            bundle_id: bundle.bundle_id.clone(),
+            session_id: bundle.session_id.clone(),
+            provider: bundle.provider.clone(),
+            status: format!("{:?}", bundle.status),
+            root_sha256: root_sha256.clone(),
+            generated_at: bundle.generated_at,
+            files: index_files,
+        };
+        let envelope = RemoteAgentPodEvidenceBundleEnvelope {
+            schema_version: 1,
+            kind: "AgentboxEvidenceBundleUpload".to_string(),
+            session_id: session.id.clone(),
+            worker_session_id: worker_session_id.to_string(),
+            index,
+            files,
+        };
+        let bundle_json = serde_json::to_string(&envelope).map_err(|err| {
+            RuntimeError::Internal(format!(
+                "failed to serialize remote AgentPod evidence upload envelope: {err}"
+            ))
+        })?;
+        let bundle_sha256 = sha256_hex(bundle_json.as_bytes());
+        let event_count = remote_evidence_event_count(bundle);
+        let receipt = RemoteAgentPodEvidenceUploadRequest {
+            session_id: session.id.clone(),
+            worker_session_id: worker_session_id.to_string(),
+            evidence_mode: RemoteAgentPodEvidenceMode::BundleUpload,
+            bundle_sha256: root_sha256.clone(),
+            derived_from_bundle: true,
+            bundle_id: Some(bundle.bundle_id.clone()),
+            bundle_root_sha256: Some(root_sha256),
+            event_count,
+            sealed_at: bundle.generated_at,
+            secret_material_included: false,
+        };
+        receipt.validate()?;
+        let payload = RemoteAgentPodEvidenceBundleUploadRequest {
+            session_id: session.id.clone(),
+            worker_session_id: worker_session_id.to_string(),
+            bundle_sha256,
+            bundle_json,
+            secret_material_included: false,
+        };
+        payload.validate()?;
+        Ok((receipt, payload))
     }
 }
 
@@ -1424,6 +1582,21 @@ impl RuntimeProvider for RemoteAgentPodProvider {
         Ok(())
     }
 
+    async fn seal_evidence_bundle(
+        &self,
+        session: &RuntimeSession,
+        bundle: &SessionEvidenceBundle,
+    ) -> Result<(), RuntimeError> {
+        let endpoint = self.endpoint_from_session(session)?;
+        let worker_session_id = self.worker_session_from_session(session)?;
+        let transport = self.transport_for(endpoint)?;
+        let (receipt, payload) =
+            self.evidence_bundle_upload_requests(session, worker_session_id, bundle)?;
+        transport.upload_evidence(receipt).await?;
+        transport.upload_evidence_bundle(payload).await?;
+        Ok(())
+    }
+
     async fn list(&self) -> Result<Vec<RuntimeSession>, RuntimeError> {
         Err(self.unavailable())
     }
@@ -1432,6 +1605,7 @@ impl RuntimeProvider for RemoteAgentPodProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::audit::AuditEvent;
     use crate::runtime::providers::conformance::{
         assert_network_enforcement_metadata, assert_provider_metadata,
     };
@@ -1653,6 +1827,54 @@ mod tests {
         assert_eq!(result.stdout, "ok\n");
 
         provider.destroy_session(&session).await.unwrap();
+    }
+
+    #[test]
+    fn remote_agentpod_evidence_bundle_upload_requests_wrap_session_bundle() {
+        let provider = RemoteAgentPodProvider::with_transport(
+            "https://worker.example.com/agentpod",
+            Arc::new(FakeRemoteAgentPodTransport),
+        );
+        let mut spec = MinipodSpec::for_agent_task("hermes", "/tmp/workspace");
+        spec.labels.insert(
+            REMOTE_LABEL_WORKER_SESSION_ID.to_string(),
+            "worker-session-1".to_string(),
+        );
+        let mut session = RuntimeSession::new(
+            spec.name.clone(),
+            "remote-agentpod".to_string(),
+            "remote".to_string(),
+            spec,
+        );
+        session.status = RuntimeStatus::Stopped;
+        let event = AuditEvent::new(
+            0,
+            Some("hermes".to_string()),
+            format!("runtime.destroy {}", session.id),
+            "/tmp/workspace".to_string(),
+            "runtime".to_string(),
+            "destroyed".to_string(),
+            None,
+            None,
+        );
+        let bundle = SessionEvidenceBundle::from_session_events(&session, &[event]);
+
+        let (receipt, payload) = provider
+            .evidence_bundle_upload_requests(&session, "worker-session-1", &bundle)
+            .unwrap();
+        let envelope: serde_json::Value = serde_json::from_str(&payload.bundle_json).unwrap();
+
+        assert_eq!(receipt.session_id, session.id);
+        assert_eq!(receipt.worker_session_id, "worker-session-1");
+        assert!(receipt.derived_from_bundle);
+        assert_eq!(receipt.bundle_id, Some(bundle.bundle_id.clone()));
+        assert_eq!(receipt.event_count, 1);
+        assert_eq!(envelope["kind"], "AgentboxEvidenceBundleUpload");
+        assert_eq!(envelope["session_id"], session.id);
+        assert_eq!(envelope["worker_session_id"], "worker-session-1");
+        assert_eq!(envelope["index"]["status"], "Stopped");
+        assert!(envelope["files"]["bundle.json"].is_string());
+        assert_ne!(payload.bundle_sha256, receipt.bundle_sha256);
     }
 
     #[test]

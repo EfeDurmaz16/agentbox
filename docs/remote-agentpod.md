@@ -115,6 +115,10 @@ agentbox remote-evidence-upload \
 The command verifies the local bundle directory, builds an
 `AgentboxEvidenceBundleUpload` envelope, posts the receipt metadata, uploads the
 bundle payload, and prints both validated worker acknowledgements.
+When `agentbox run --provider remote-agentpod` is destroyed through the daemon,
+the runtime also seals the final stopped-session evidence bundle after the local
+`runtime.destroy` audit event is written, then sends the same receipt and
+verified bundle envelope through the remote transport.
 After a worker accepts evidence, the CLI can query its evidence status route:
 
 ```sh

@@ -209,6 +209,27 @@ impl AuditStore {
             .map_err(AuditError::from)
     }
 
+    /// Return session-scoped evidence events in replay order.
+    pub fn query_session_evidence(
+        &self,
+        session_id: &str,
+        agent_name: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<AuditEvent>> {
+        let conn = self.pool.get()?;
+        let mut stmt = conn.prepare(
+            "SELECT id, schema_version, timestamp, agent_pid, agent_name, command, cwd, bucket, decision, user_response_ms, parent_process, prev_hash, event_hash
+             FROM audit_log
+             WHERE command LIKE ?1 OR agent_name = ?2
+             ORDER BY timestamp ASC
+             LIMIT ?3",
+        )?;
+        let pattern = format!("%{session_id}%");
+        let rows = stmt.query_map(params![pattern, agent_name, limit as i64], row_to_event)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(AuditError::from)
+    }
+
     pub fn verify_hash_chain(&self) -> Result<AuditVerification> {
         let conn = self.pool.get()?;
         let mut stmt = conn.prepare(

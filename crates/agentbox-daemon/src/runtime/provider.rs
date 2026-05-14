@@ -4,7 +4,7 @@ use thiserror::Error;
 use crate::runtime::bridge::HostBridgeTransportKind;
 use crate::runtime::types::{
     CommandResult, ExecCommand, MinipodSpec, NetworkEnforcementCapability, RuntimeCapability,
-    RuntimeSession, RuntimeStatus,
+    RuntimeSession, RuntimeStatus, SessionEvidenceBundle,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -147,6 +147,14 @@ pub trait RuntimeProvider: Send + Sync {
 
     async fn destroy_session(&self, session: &RuntimeSession) -> Result<(), RuntimeError> {
         self.destroy(&session.id).await
+    }
+
+    async fn seal_evidence_bundle(
+        &self,
+        _session: &RuntimeSession,
+        _bundle: &SessionEvidenceBundle,
+    ) -> Result<(), RuntimeError> {
+        Ok(())
     }
 
     async fn list(&self) -> Result<Vec<RuntimeSession>, RuntimeError>;
