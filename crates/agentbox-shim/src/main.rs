@@ -44,6 +44,12 @@ struct ShimResponse {
     real_binary: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FailMode {
+    Open,
+    Closed,
+}
+
 // ---------------------------------------------------------------------------
 // Socket path
 // ---------------------------------------------------------------------------
@@ -51,6 +57,19 @@ struct ShimResponse {
 fn socket_path() -> PathBuf {
     let home = env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
     PathBuf::from(home).join(".agentbox").join("agentbox.sock")
+}
+
+fn fail_mode_from_env() -> FailMode {
+    parse_fail_mode(std::env::var("AGENTBOX_FAIL_MODE").ok().as_deref())
+}
+
+fn parse_fail_mode(value: Option<&str>) -> FailMode {
+    match value.map(|v| v.trim().to_ascii_lowercase()) {
+        Some(value) if matches!(value.as_str(), "closed" | "fail-closed" | "deny") => {
+            FailMode::Closed
+        }
+        _ => FailMode::Open,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -174,10 +193,18 @@ fn run_binary(binary_path: &str, args: &[String]) -> ! {
 }
 
 // ---------------------------------------------------------------------------
-// Fallback: daemon unreachable, fail-open by running the real binary
+// Fallback: daemon unreachable; fail-open runs the real binary, fail-closed denies.
 // ---------------------------------------------------------------------------
 
 fn fallback(binary_name: &str, args: &[String], reason: &str) -> ! {
+    if matches!(fail_mode_from_env(), FailMode::Closed) {
+        eprintln!(
+            "agentbox-shim: daemon unavailable ({}), fail-closed denying `{}`",
+            reason, binary_name
+        );
+        std::process::exit(111);
+    }
+
     eprintln!(
         "agentbox-shim: daemon unavailable ({}), passing through `{}`",
         reason, binary_name
@@ -274,5 +301,25 @@ fn main() {
             );
             std::process::exit(1);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_fail_mode_defaults_open() {
+        assert_eq!(parse_fail_mode(None), FailMode::Open);
+        assert_eq!(parse_fail_mode(Some("")), FailMode::Open);
+        assert_eq!(parse_fail_mode(Some("open")), FailMode::Open);
+    }
+
+    #[test]
+    fn parse_fail_mode_accepts_closed_aliases() {
+        assert_eq!(parse_fail_mode(Some("closed")), FailMode::Closed);
+        assert_eq!(parse_fail_mode(Some("fail-closed")), FailMode::Closed);
+        assert_eq!(parse_fail_mode(Some("deny")), FailMode::Closed);
+        assert_eq!(parse_fail_mode(Some(" CLOSED ")), FailMode::Closed);
     }
 }

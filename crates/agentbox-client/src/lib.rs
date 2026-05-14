@@ -26,7 +26,7 @@
 //!         }
 //!     }
 //!     Err(e) => {
-//!         // Daemon unreachable — fail-open or fail-closed is caller's choice
+//!         // Daemon unreachable -- fail-open or fail-closed is caller's choice.
 //!         eprintln!("Agentbox unavailable: {}", e);
 //!     }
 //! }
@@ -86,6 +86,18 @@ pub struct CheckResponse {
     /// Resolved path to the real binary (e.g., "/usr/bin/git").
     #[serde(default)]
     pub real_binary: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FailMode {
+    Open,
+    Closed,
+}
+
+impl FailMode {
+    pub fn allows_when_unavailable(self) -> bool {
+        matches!(self, Self::Open)
+    }
 }
 
 impl CheckResponse {
@@ -178,9 +190,21 @@ impl AgentboxClient {
     /// If the daemon is unreachable, returns `default` (true = fail-open,
     /// false = fail-closed).
     pub fn is_allowed(&self, req: &CheckRequest, default: bool) -> bool {
+        self.is_allowed_with_fail_mode(
+            req,
+            if default {
+                FailMode::Open
+            } else {
+                FailMode::Closed
+            },
+        )
+    }
+
+    /// Check a command and return a simple bool using an explicit fail mode.
+    pub fn is_allowed_with_fail_mode(&self, req: &CheckRequest, fail_mode: FailMode) -> bool {
         match self.check(req) {
             Ok(resp) => resp.is_allowed(),
-            Err(_) => default,
+            Err(_) => fail_mode.allows_when_unavailable(),
         }
     }
 }
@@ -199,6 +223,16 @@ impl Default for AgentboxClient {
 ///
 /// Returns true if allowed/approved, or if the daemon is unavailable (fail-open).
 pub fn quick_check(binary: &str, args: &[&str], cwd: &str) -> bool {
+    quick_check_with_fail_mode(binary, args, cwd, FailMode::Open)
+}
+
+/// Quick check with explicit daemon-unavailable behavior.
+pub fn quick_check_with_fail_mode(
+    binary: &str,
+    args: &[&str],
+    cwd: &str,
+    fail_mode: FailMode,
+) -> bool {
     let client = AgentboxClient::new();
     let req = CheckRequest {
         binary: binary.into(),
@@ -207,7 +241,7 @@ pub fn quick_check(binary: &str, args: &[&str], cwd: &str) -> bool {
         parent_process: "unknown".into(),
         pid: std::process::id(),
     };
-    client.is_allowed(&req, true) // fail-open by default
+    client.is_allowed_with_fail_mode(&req, fail_mode)
 }
 
 #[cfg(test)]
@@ -277,5 +311,22 @@ mod tests {
     fn quick_check_fails_open_when_daemon_unavailable() {
         // No daemon running, should return true (fail-open)
         assert!(quick_check("ls", &["-la"], "/tmp"));
+    }
+
+    #[test]
+    fn explicit_fail_modes_control_unavailable_daemon() {
+        let client = AgentboxClient::with_socket("/tmp/nonexistent-agentbox-fail-mode.sock");
+        let req = CheckRequest {
+            binary: "git".into(),
+            args: vec!["push".into()],
+            cwd: "/tmp".into(),
+            parent_process: "test".into(),
+            pid: 1,
+        };
+
+        assert!(client.is_allowed_with_fail_mode(&req, FailMode::Open));
+        assert!(!client.is_allowed_with_fail_mode(&req, FailMode::Closed));
+        assert!(FailMode::Open.allows_when_unavailable());
+        assert!(!FailMode::Closed.allows_when_unavailable());
     }
 }
