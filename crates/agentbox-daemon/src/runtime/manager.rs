@@ -11,7 +11,8 @@ use crate::runtime::policy::validate_minipod_spec;
 use crate::runtime::provider::{RuntimeError, RuntimeProvider};
 use crate::runtime::session::RuntimeSessionStore;
 use crate::runtime::types::{
-    ApprovalGrant, CommandResult, ExecCommand, MinipodSpec, RuntimeSession, RuntimeStatus,
+    ApprovalGrant, CommandResult, CommandTranscript, ExecCommand, MinipodSpec, RuntimeSession,
+    RuntimeStatus,
 };
 use crate::runtime::workspace::{WorkspaceDiffSnapshot, WorkspaceDiffSnapshotter};
 
@@ -86,6 +87,16 @@ impl RuntimeManager {
         }
 
         let result = self.provider.exec(session_id, command).await?;
+        session
+            .transcripts
+            .push(CommandTranscript::from_command_result(
+                session_id.to_string(),
+                command,
+                &result,
+            ));
+        self.sessions
+            .upsert(session.clone())
+            .map_err(|e| RuntimeError::Internal(e.to_string()))?;
         let command_text = format!("runtime.exec {} {}", session_id, command.argv.join(" "));
         let decision = grant_id
             .map(|grant_id| format!("grant:{grant_id}:exit_code:{}", result.exit_code))
@@ -566,6 +577,36 @@ mod tests {
         assert_eq!(audit[0].decision, "exit_code:0");
         assert!(audit[0].command.contains("runtime.exec"));
         assert_eq!(audit[0].prev_hash, audit[1].event_hash);
+    }
+
+    #[tokio::test]
+    async fn exec_persists_redacted_command_transcript() {
+        let manager = manager("exec-transcript");
+        let spec = MinipodSpec::for_agent_task("openclaw", "/tmp/agentbox-work");
+        let session = manager.create(&spec).await.unwrap();
+        let command = ExecCommand {
+            argv: vec!["echo".to_string(), "sk-test-secret".to_string()],
+            working_dir: Some("/tmp/project/.env".into()),
+            env: Default::default(),
+            timeout_seconds: None,
+        };
+
+        manager.exec(&session.id, &command).await.unwrap();
+
+        let saved = manager
+            .sessions
+            .get(&session.id)
+            .unwrap()
+            .expect("session should remain persisted");
+        assert_eq!(saved.transcripts.len(), 1);
+        let transcript = &saved.transcripts[0];
+        let json = serde_json::to_string(transcript).unwrap();
+        assert_eq!(transcript.session_id, session.id);
+        assert_eq!(transcript.exit_code, 0);
+        assert_eq!(transcript.duration_ms, 3);
+        assert!(json.contains("<redacted>"));
+        assert!(!json.contains("sk-test-secret"));
+        assert!(!json.contains("/tmp/project/.env"));
     }
 
     #[tokio::test]

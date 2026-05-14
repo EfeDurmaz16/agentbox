@@ -224,6 +224,7 @@ fn pod_session_to_runtime_session(session: PodSession, spec: MinipodSpec) -> Run
         status: pod_status_to_runtime_status(session.status),
         spec,
         approval_grants,
+        transcripts: vec![],
         started_at: session.created_at,
         stopped_at: None,
     }

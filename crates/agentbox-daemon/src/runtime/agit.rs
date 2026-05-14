@@ -111,6 +111,7 @@ mod tests {
             status: RuntimeStatus::Running,
             spec,
             approval_grants: vec![],
+            transcripts: vec![],
             started_at: Utc::now(),
             stopped_at: None,
         }

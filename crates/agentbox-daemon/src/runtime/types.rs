@@ -566,6 +566,8 @@ pub struct RuntimeSession {
     pub spec: MinipodSpec,
     #[serde(default)]
     pub approval_grants: Vec<ApprovalGrant>,
+    #[serde(default)]
+    pub transcripts: Vec<CommandTranscript>,
     pub started_at: DateTime<Utc>,
     pub stopped_at: Option<DateTime<Utc>>,
 }
@@ -597,6 +599,7 @@ impl RuntimeSession {
             status: RuntimeStatus::Creating,
             spec,
             approval_grants,
+            transcripts: vec![],
             started_at: Utc::now(),
             stopped_at: None,
         }
@@ -639,6 +642,8 @@ pub struct SessionEvidenceBundle {
     pub approvals: Vec<SessionEvidenceEvent>,
     pub commands: Vec<SessionEvidenceEvent>,
     pub boundary_events: Vec<SessionEvidenceEvent>,
+    #[serde(default)]
+    pub transcripts: Vec<CommandTranscript>,
     pub generated_at: DateTime<Utc>,
 }
 
@@ -669,6 +674,7 @@ impl SessionEvidenceBundle {
             approvals,
             commands,
             boundary_events,
+            transcripts: session.transcripts.clone(),
             generated_at: Utc::now(),
         }
     }
@@ -688,6 +694,111 @@ pub struct CommandResult {
     pub stdout: String,
     pub stderr: String,
     pub duration_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommandTranscript {
+    pub schema_version: i64,
+    pub transcript_id: String,
+    pub session_id: String,
+    pub command_argv: Vec<String>,
+    pub working_dir: Option<String>,
+    pub exit_code: i32,
+    pub duration_ms: u64,
+    pub stdout: TranscriptStream,
+    pub stderr: TranscriptStream,
+    pub redaction: TranscriptRedaction,
+    pub generated_at: DateTime<Utc>,
+}
+
+impl CommandTranscript {
+    pub fn from_command_result(
+        session_id: impl Into<String>,
+        command: &ExecCommand,
+        result: &CommandResult,
+    ) -> Self {
+        Self {
+            schema_version: 1,
+            transcript_id: Ulid::new().to_string(),
+            session_id: session_id.into(),
+            command_argv: command
+                .argv
+                .iter()
+                .map(|arg| crate::audit::redact_sensitive_text(arg))
+                .collect(),
+            working_dir: command
+                .working_dir
+                .as_deref()
+                .map(crate::audit::redact_sensitive_text),
+            exit_code: result.exit_code,
+            duration_ms: result.duration_ms,
+            stdout: TranscriptStream::redacted(&result.stdout),
+            stderr: TranscriptStream::redacted(&result.stderr),
+            redaction: TranscriptRedaction::default(),
+            generated_at: Utc::now(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TranscriptStream {
+    pub text: String,
+    pub original_bytes: usize,
+    pub original_lines: usize,
+    pub stored_bytes: usize,
+    pub truncated: bool,
+}
+
+impl TranscriptStream {
+    pub fn redacted(input: &str) -> Self {
+        const MAX_TRANSCRIPT_BYTES: usize = 16 * 1024;
+        let redacted = input
+            .lines()
+            .map(crate::audit::redact_sensitive_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        let original_bytes = input.len();
+        let original_lines = input.lines().count();
+        let (text, truncated) = truncate_utf8(&redacted, MAX_TRANSCRIPT_BYTES);
+        let stored_bytes = text.len();
+
+        Self {
+            text,
+            original_bytes,
+            original_lines,
+            stored_bytes,
+            truncated,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TranscriptRedaction {
+    pub marker: String,
+    pub values_redacted: bool,
+    pub max_stream_bytes: usize,
+}
+
+impl Default for TranscriptRedaction {
+    fn default() -> Self {
+        Self {
+            marker: "<redacted>".to_string(),
+            values_redacted: true,
+            max_stream_bytes: 16 * 1024,
+        }
+    }
+}
+
+fn truncate_utf8(input: &str, max_bytes: usize) -> (String, bool) {
+    if input.len() <= max_bytes {
+        return (input.to_string(), false);
+    }
+
+    let mut end = max_bytes;
+    while !input.is_char_boundary(end) {
+        end -= 1;
+    }
+    (input[..end].to_string(), true)
 }
 
 fn default_protected_paths() -> Vec<ProtectedPath> {
@@ -948,12 +1059,29 @@ mod tests {
     #[test]
     fn session_evidence_bundle_groups_audit_events() {
         let spec = MinipodSpec::for_agent_task("openclaw", "/tmp/agentbox-work");
-        let session = RuntimeSession::new(
+        let mut session = RuntimeSession::new(
             spec.name.clone(),
             "agentpod-linux".into(),
             "linux".into(),
             spec,
         );
+        session
+            .transcripts
+            .push(CommandTranscript::from_command_result(
+                session.id.clone(),
+                &ExecCommand {
+                    argv: vec!["echo".into(), "hello".into()],
+                    working_dir: Some("/workspace".into()),
+                    env: Default::default(),
+                    timeout_seconds: None,
+                },
+                &CommandResult {
+                    exit_code: 0,
+                    stdout: "hello\n".into(),
+                    stderr: String::new(),
+                    duration_ms: 2,
+                },
+            ));
         let events = vec![
             AuditEvent::new(
                 1,
@@ -995,7 +1123,40 @@ mod tests {
         assert_eq!(bundle.approvals.len(), 1);
         assert_eq!(bundle.commands.len(), 1);
         assert_eq!(bundle.boundary_events.len(), 1);
+        assert_eq!(bundle.transcripts.len(), 1);
+        assert_eq!(bundle.transcripts[0].stdout.text, "hello");
         assert_eq!(bundle.manifest.agent.name, "openclaw");
+    }
+
+    #[test]
+    fn command_transcript_redacts_sensitive_streams_and_args() {
+        let command = ExecCommand {
+            argv: vec![
+                "curl".into(),
+                "-H".into(),
+                "Authorization: Bearer sk-test-secret".into(),
+            ],
+            working_dir: Some("/tmp/project/.env".into()),
+            env: Default::default(),
+            timeout_seconds: None,
+        };
+        let result = CommandResult {
+            exit_code: 1,
+            stdout: "token sk-test-secret\nnormal line".into(),
+            stderr: "Authorization: Bearer sk-test-secret".into(),
+            duration_ms: 5,
+        };
+
+        let transcript =
+            CommandTranscript::from_command_result("01agentboxsession", &command, &result);
+        let json = serde_json::to_string(&transcript).unwrap();
+
+        assert_eq!(transcript.session_id, "01agentboxsession");
+        assert_eq!(transcript.exit_code, 1);
+        assert!(transcript.redaction.values_redacted);
+        assert!(json.contains("<redacted>"));
+        assert!(!json.contains("sk-test-secret"));
+        assert!(!json.contains("/tmp/project/.env"));
     }
 
     #[test]

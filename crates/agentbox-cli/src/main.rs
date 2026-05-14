@@ -156,7 +156,7 @@ enum Commands {
         #[arg(long)]
         verify: bool,
 
-        /// Export a session-scoped evidence bundle for a persisted minipod id
+        /// Export a session-scoped evidence bundle with redacted command transcripts
         #[arg(long)]
         session: Option<String>,
     },

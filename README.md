@@ -229,6 +229,8 @@ AGIT-style lineage drafts, but both intentionally require external authority or
 adapter code before claiming live integration.
 Runtime sessions can also capture Git workspace diff snapshots as evidence
 references for later AGIT lineage attachment.
+Session evidence bundles include redacted command transcripts so operators can
+inspect what ran without storing raw credential-like output.
 For macOS specifically, see
 [docs/macos-minipod-limitations.md](docs/macos-minipod-limitations.md).
 For file boundaries, see

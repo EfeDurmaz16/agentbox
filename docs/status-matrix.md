@@ -31,6 +31,7 @@ implemented yet.
 | Localhost service policy | Shipped | Minipod manifests model localhost/loopback access and `--deny-localhost` makes runtime exec policy block loopback HTTP commands. |
 | Network boundary evidence | Shipped | Runtime exec records network-specific audit events for allowed, blocked, and approval-required HTTP boundary decisions. |
 | Workspace diff snapshots | Shipped | Runtime sessions can capture Git workspace diff snapshots and record hash-chained workspace evidence without claiming AGIT commit creation. |
+| Command transcript export | Shipped | Runtime exec stores redacted stdout/stderr transcripts in the session evidence bundle with size metadata and truncation limits. |
 | Minipod manifest CLI | Shipped | `agentbox minipod-spec` generates and validates a deny-by-default manifest, including `--policy-bundle` task policy JSON files. |
 | Runtime provider registry | Shipped | `RuntimeProviderRegistry` can resolve AgentPod provider descriptors and compatibility providers. |
 | Runtime provider listing | Shipped | `agentbox providers` reports shipped, experimental, unavailable, and planned provider surfaces. |
