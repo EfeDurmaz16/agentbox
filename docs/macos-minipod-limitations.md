@@ -51,6 +51,9 @@ This is useful defense in depth. It is not bypass-proof yet.
 
 - Treat Podman-backed minipods as experimental until live smoke tests prove
   socket mount, shim execution, lifecycle cleanup, and evidence export.
+- macOS-built `agentbox-shim` binaries cannot execute inside Linux containers.
+  The Podman bridge needs a Linux-compatible shim artifact before shim execution
+  proof can pass on macOS.
 - Mount the smallest workspace possible.
 - Do not mount the home directory.
 - Do not mount browser profiles, keychains, `.ssh`, `.aws`, `.config/gcloud`,

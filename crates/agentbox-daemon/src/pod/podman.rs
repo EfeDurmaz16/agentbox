@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::fs;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -100,6 +101,8 @@ impl PodmanProvider {
         container: &ContainerSpec,
         spec: &PodSpec,
     ) -> Result<(), PodError> {
+        validate_linux_guest_shim(&self.shim_binary)?;
+
         let pod_name = Self::pod_name(id);
         let container_name = Self::container_name(id, "workspace");
 
@@ -480,9 +483,38 @@ impl PodProvider for PodmanProvider {
     }
 }
 
+fn validate_linux_guest_shim(path: &str) -> Result<(), PodError> {
+    let magic = fs::read(path)
+        .map_err(|e| PodError::Unavailable(format!("agentbox-shim not readable: {e}")))?;
+    if magic.starts_with(b"\x7fELF") {
+        return Ok(());
+    }
+    if is_macho_magic(&magic) {
+        return Err(PodError::Unavailable(
+            "Podman compatibility runs Linux containers; the configured agentbox-shim is a macOS Mach-O binary and cannot execute in the minipod. Provide a Linux-compatible agentbox-shim artifact for shim bridge proof.".into(),
+        ));
+    }
+    Err(PodError::Unavailable(
+        "configured agentbox-shim is not a Linux ELF binary".into(),
+    ))
+}
+
+fn is_macho_magic(bytes: &[u8]) -> bool {
+    matches!(
+        bytes.get(0..4),
+        Some([0xfe, 0xed, 0xfa, 0xce])
+            | Some([0xce, 0xfa, 0xed, 0xfe])
+            | Some([0xfe, 0xed, 0xfa, 0xcf])
+            | Some([0xcf, 0xfa, 0xed, 0xfe])
+            | Some([0xca, 0xfe, 0xba, 0xbe])
+            | Some([0xbe, 0xba, 0xfe, 0xca])
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
     use std::path::PathBuf;
 
     fn test_provider() -> PodmanProvider {
@@ -568,6 +600,28 @@ mod tests {
         assert!(SHIMMED_COMMANDS.contains(&"git"));
         assert!(SHIMMED_COMMANDS.contains(&"ssh"));
         assert!(SHIMMED_COMMANDS.contains(&"psql"));
+    }
+
+    #[test]
+    fn linux_guest_shim_accepts_elf_binary() {
+        let path = std::env::temp_dir().join(format!("agentbox-shim-elf-{}", std::process::id()));
+        fs::write(&path, b"\x7fELFdemo").unwrap();
+
+        validate_linux_guest_shim(&path.to_string_lossy()).unwrap();
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn linux_guest_shim_rejects_macos_macho_binary() {
+        let path = std::env::temp_dir().join(format!("agentbox-shim-macho-{}", std::process::id()));
+        let mut file = fs::File::create(&path).unwrap();
+        file.write_all(&[0xcf, 0xfa, 0xed, 0xfe, 0x00]).unwrap();
+
+        let error = validate_linux_guest_shim(&path.to_string_lossy()).unwrap_err();
+
+        assert!(error.to_string().contains("Mach-O"));
+        let _ = fs::remove_file(path);
     }
 
     #[test]
