@@ -73,6 +73,8 @@ a network adapter yet. A conforming worker must:
 - emit `WorkerAllocated` and `SessionCreated` for session creation
 - emit `CommandStarted`, `CommandFinished`, and `EvidenceSealed` for command
   execution
+- acknowledge submitted evidence bundle hashes and event counts without secret
+  material
 - emit `KillSwitchAck` and `WorkerDestroyed` for session destruction when the
   kill switch is required
 
@@ -86,6 +88,7 @@ API. It posts:
 - `POST /handshake`
 - `POST /sessions`
 - `POST /sessions/{worker_session_id}/exec`
+- `POST /sessions/{worker_session_id}/evidence`
 - `POST /sessions/{worker_session_id}/destroy`
 
 The adapter validates the same handshake, create, exec, and lifecycle evidence
@@ -93,6 +96,12 @@ contracts before returning responses, and the handshake path now requires the
 canonical challenge-binding verifier. It is not wired into
 `RemoteAgentPodProvider` yet because there is no shipped remote worker server or
 cryptographic signed response verifier.
+
+Evidence upload is currently metadata-only: the worker must identify the session,
+worker session, evidence mode, SHA-256 bundle hash, event count, and sealed time.
+Agentbox rejects evidence upload metadata that embeds secret material, carries an
+invalid bundle hash, or accepts a different bundle than the one submitted. The
+actual evidence stream/storage backend is still future work.
 
 ## Lifecycle Contract
 

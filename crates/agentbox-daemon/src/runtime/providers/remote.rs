@@ -421,6 +421,88 @@ impl RemoteAgentPodDestroySessionResponse {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteAgentPodEvidenceUploadRequest {
+    pub session_id: String,
+    pub worker_session_id: String,
+    pub evidence_mode: RemoteAgentPodEvidenceMode,
+    pub bundle_sha256: String,
+    pub event_count: u64,
+    pub sealed_at: DateTime<Utc>,
+    pub secret_material_included: bool,
+}
+
+impl RemoteAgentPodEvidenceUploadRequest {
+    pub fn validate(&self) -> Result<(), RuntimeError> {
+        if self.session_id.trim().is_empty()
+            || self.worker_session_id.trim().is_empty()
+            || self.bundle_sha256.trim().is_empty()
+        {
+            return Err(RuntimeError::ManifestRejected(
+                "remote evidence upload request must include session ids and bundle hash".into(),
+            ));
+        }
+        if self.bundle_sha256.len() != 64
+            || !self
+                .bundle_sha256
+                .chars()
+                .all(|value| value.is_ascii_hexdigit())
+        {
+            return Err(RuntimeError::ManifestRejected(
+                "remote evidence bundle hash must be a SHA-256 hex digest".into(),
+            ));
+        }
+        if self.event_count == 0 {
+            return Err(RuntimeError::ManifestRejected(
+                "remote evidence upload request must include at least one event".into(),
+            ));
+        }
+        if self.secret_material_included {
+            return Err(RuntimeError::ManifestRejected(
+                "remote evidence upload request must not include secret material".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteAgentPodEvidenceUploadResponse {
+    pub session_id: String,
+    pub worker_session_id: String,
+    pub accepted_bundle_sha256: String,
+    pub accepted_event_count: u64,
+    pub lifecycle_events: Vec<RemoteAgentPodLifecycleEvent>,
+}
+
+impl RemoteAgentPodEvidenceUploadResponse {
+    pub fn validate_for(
+        &self,
+        request: &RemoteAgentPodEvidenceUploadRequest,
+    ) -> Result<(), RuntimeError> {
+        request.validate()?;
+        if self.session_id != request.session_id
+            || self.worker_session_id != request.worker_session_id
+        {
+            return Err(RuntimeError::ManifestRejected(
+                "remote evidence upload response session ids do not match request".into(),
+            ));
+        }
+        if self.accepted_bundle_sha256 != request.bundle_sha256
+            || self.accepted_event_count != request.event_count
+        {
+            return Err(RuntimeError::ManifestRejected(
+                "remote evidence upload response must acknowledge the submitted bundle".into(),
+            ));
+        }
+        require_lifecycle_events(
+            &self.lifecycle_events,
+            &[RemoteAgentPodLifecycleEvent::EvidenceSealed],
+            "evidence upload response",
+        )
+    }
+}
+
 #[async_trait]
 pub trait RemoteAgentPodTransport: Send + Sync {
     async fn handshake(
@@ -442,6 +524,11 @@ pub trait RemoteAgentPodTransport: Send + Sync {
         &self,
         request: RemoteAgentPodDestroySessionRequest,
     ) -> Result<RemoteAgentPodDestroySessionResponse, RuntimeError>;
+
+    async fn upload_evidence(
+        &self,
+        request: RemoteAgentPodEvidenceUploadRequest,
+    ) -> Result<RemoteAgentPodEvidenceUploadResponse, RuntimeError>;
 }
 
 #[derive(Debug, Clone)]
@@ -571,6 +658,35 @@ impl RemoteAgentPodTransport for HttpRemoteAgentPodTransport {
             .map_err(|err| {
                 RuntimeError::ManifestRejected(format!(
                     "remote destroy response was invalid JSON: {err}"
+                ))
+            })?;
+        response.validate_for(&request)?;
+        Ok(response)
+    }
+
+    async fn upload_evidence(
+        &self,
+        request: RemoteAgentPodEvidenceUploadRequest,
+    ) -> Result<RemoteAgentPodEvidenceUploadResponse, RuntimeError> {
+        request.validate()?;
+        let response = self
+            .client
+            .post(self.route(format!("sessions/{}/evidence", request.worker_session_id)))
+            .json(&request)
+            .send()
+            .await
+            .map_err(|err| {
+                RuntimeError::Unavailable(format!("remote evidence upload failed: {err}"))
+            })?
+            .error_for_status()
+            .map_err(|err| {
+                RuntimeError::Unavailable(format!("remote evidence upload rejected: {err}"))
+            })?
+            .json::<RemoteAgentPodEvidenceUploadResponse>()
+            .await
+            .map_err(|err| {
+                RuntimeError::ManifestRejected(format!(
+                    "remote evidence upload response was invalid JSON: {err}"
                 ))
             })?;
         response.validate_for(&request)?;
@@ -817,6 +933,21 @@ mod tests {
             response.validate_for(&request)?;
             Ok(response)
         }
+
+        async fn upload_evidence(
+            &self,
+            request: RemoteAgentPodEvidenceUploadRequest,
+        ) -> Result<RemoteAgentPodEvidenceUploadResponse, RuntimeError> {
+            let response = RemoteAgentPodEvidenceUploadResponse {
+                session_id: request.session_id.clone(),
+                worker_session_id: request.worker_session_id.clone(),
+                accepted_bundle_sha256: request.bundle_sha256.clone(),
+                accepted_event_count: request.event_count,
+                lifecycle_events: vec![RemoteAgentPodLifecycleEvent::EvidenceSealed],
+            };
+            response.validate_for(&request)?;
+            Ok(response)
+        }
     }
 
     #[tokio::test]
@@ -903,6 +1034,10 @@ mod tests {
         assert_eq!(
             transport.route("sessions/worker-1/destroy"),
             "https://worker.example.com/agentpod/sessions/worker-1/destroy"
+        );
+        assert_eq!(
+            transport.route("sessions/worker-1/evidence"),
+            "https://worker.example.com/agentpod/sessions/worker-1/evidence"
         );
     }
 
@@ -1177,6 +1312,60 @@ mod tests {
             .contains("session ids"));
     }
 
+    #[test]
+    fn remote_evidence_upload_request_rejects_secrets_or_invalid_hashes() {
+        let mut request = RemoteAgentPodEvidenceUploadRequest {
+            session_id: "session-1".into(),
+            worker_session_id: "worker-session-1".into(),
+            evidence_mode: RemoteAgentPodEvidenceMode::BundleUpload,
+            bundle_sha256: "a".repeat(64),
+            event_count: 2,
+            sealed_at: Utc::now(),
+            secret_material_included: false,
+        };
+
+        request.validate().unwrap();
+
+        request.bundle_sha256 = "not-a-sha".into();
+        assert!(request
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("SHA-256"));
+
+        request.bundle_sha256 = "b".repeat(64);
+        request.secret_material_included = true;
+        assert!(request
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("secret material"));
+    }
+
+    #[test]
+    fn remote_evidence_upload_response_must_acknowledge_submitted_bundle() {
+        let request = RemoteAgentPodEvidenceUploadRequest {
+            session_id: "session-1".into(),
+            worker_session_id: "worker-session-1".into(),
+            evidence_mode: RemoteAgentPodEvidenceMode::BundleUpload,
+            bundle_sha256: "c".repeat(64),
+            event_count: 3,
+            sealed_at: Utc::now(),
+            secret_material_included: false,
+        };
+        let response = RemoteAgentPodEvidenceUploadResponse {
+            session_id: "session-1".into(),
+            worker_session_id: "worker-session-1".into(),
+            accepted_bundle_sha256: "d".repeat(64),
+            accepted_event_count: 3,
+            lifecycle_events: vec![RemoteAgentPodLifecycleEvent::EvidenceSealed],
+        };
+
+        let err = response.validate_for(&request).unwrap_err();
+
+        assert!(err.to_string().contains("submitted bundle"));
+    }
+
     #[tokio::test]
     async fn fake_remote_transport_proves_contract_without_provider_execution() {
         let transport = RemoteAgentPodTransportDescriptor::new(
@@ -1235,6 +1424,23 @@ mod tests {
         assert!(destroyed
             .lifecycle_events
             .contains(&RemoteAgentPodLifecycleEvent::KillSwitchAck));
+        let evidence = fake
+            .upload_evidence(RemoteAgentPodEvidenceUploadRequest {
+                session_id: destroyed.session_id,
+                worker_session_id: destroyed.worker_session_id,
+                evidence_mode: RemoteAgentPodEvidenceMode::BundleUpload,
+                bundle_sha256: "e".repeat(64),
+                event_count: 4,
+                sealed_at: Utc::now(),
+                secret_material_included: false,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(evidence.accepted_event_count, 4);
+        assert!(evidence
+            .lifecycle_events
+            .contains(&RemoteAgentPodLifecycleEvent::EvidenceSealed));
 
         let provider = RemoteAgentPodProvider;
         assert_eq!(
