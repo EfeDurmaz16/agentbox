@@ -2821,6 +2821,7 @@ fn parse_credential_file_grant(
             target: host_path.display().to_string(),
             one_time: true,
             requires_approval: true,
+            expires_at: None,
         },
     )
 }
@@ -2855,6 +2856,7 @@ fn parse_simple_credential_grant(
         target: target.to_string(),
         one_time: true,
         requires_approval: true,
+        expires_at: None,
     }
 }
 

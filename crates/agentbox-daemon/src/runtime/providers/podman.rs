@@ -382,6 +382,7 @@ mod tests {
                 target: "/tmp/agentbox-openai-key".into(),
                 one_time: true,
                 requires_approval: true,
+                expires_at: None,
             });
 
         let pod_spec = minipod_to_pod_spec(&spec);

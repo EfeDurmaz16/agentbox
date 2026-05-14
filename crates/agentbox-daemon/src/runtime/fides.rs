@@ -120,6 +120,7 @@ mod tests {
             target: "/tmp/agentbox-openai-key".into(),
             one_time: true,
             requires_approval: true,
+            expires_at: None,
         };
         spec.filesystem = FilesystemPolicy::workspace("/tmp/agentbox-work");
         let session = RuntimeSession {

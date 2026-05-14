@@ -82,9 +82,13 @@ impl RuntimeManager {
             .map_err(|e| RuntimeError::Internal(e.to_string()))?
             .ok_or_else(|| RuntimeError::NotFound(session_id.to_string()))?;
 
+        let expired_credentials_removed = self.expire_credential_grants(&mut session)?;
         let grant_count_before = session.approval_grants.len();
         let grant_id = self.enforce_exec_policy(&mut session, command)?;
-        if grant_id.is_some() || session.approval_grants.len() != grant_count_before {
+        if expired_credentials_removed
+            || grant_id.is_some()
+            || session.approval_grants.len() != grant_count_before
+        {
             self.sessions
                 .upsert(session.clone())
                 .map_err(|e| RuntimeError::Internal(e.to_string()))?;
@@ -243,11 +247,16 @@ impl RuntimeManager {
         &self,
         session_id: &str,
     ) -> Result<Vec<CredentialGrant>, RuntimeError> {
-        let session = self
+        let mut session = self
             .sessions
             .get(session_id)
             .map_err(|e| RuntimeError::Internal(e.to_string()))?
             .ok_or_else(|| RuntimeError::NotFound(session_id.to_string()))?;
+        if self.expire_credential_grants(&mut session)? {
+            self.sessions
+                .upsert(session.clone())
+                .map_err(|e| RuntimeError::Internal(e.to_string()))?;
+        }
 
         Ok(session.spec.credentials.grants.clone())
     }
@@ -560,6 +569,28 @@ impl RuntimeManager {
             .map_err(|e| RuntimeError::Internal(e.to_string()))
     }
 
+    fn expire_credential_grants(&self, session: &mut RuntimeSession) -> Result<bool, RuntimeError> {
+        let now = Utc::now();
+        let mut retained = Vec::with_capacity(session.spec.credentials.grants.len());
+        let mut expired = Vec::new();
+
+        for grant in session.spec.credentials.grants.drain(..) {
+            if grant.is_expired_at(now) {
+                expired.push(grant);
+            } else {
+                retained.push(grant);
+            }
+        }
+
+        session.spec.credentials.grants = retained;
+
+        for grant in &expired {
+            self.audit_credential_revocation(session, grant, "expired")?;
+        }
+
+        Ok(!expired.is_empty())
+    }
+
     fn audit_credential_revocations(&self, session: &RuntimeSession) -> Result<(), RuntimeError> {
         for grant in session
             .spec
@@ -847,6 +878,7 @@ mod tests {
                 target: "AGENTBOX_TEST_SECRET".into(),
                 one_time: true,
                 requires_approval: true,
+                expires_at: None,
             });
             let session = manager.create(&spec).await.unwrap();
             let command = ExecCommand {
@@ -894,6 +926,7 @@ mod tests {
                     target: "AGENTBOX_TEST_ONCE_SECRET".into(),
                     one_time: true,
                     requires_approval: true,
+                    expires_at: None,
                 });
                 let session = manager.create(&spec).await.unwrap();
                 let command = ExecCommand {
@@ -924,6 +957,7 @@ mod tests {
                 target: "AGENTBOX_MISSING_TEST_SECRET".into(),
                 one_time: true,
                 requires_approval: true,
+                expires_at: None,
             });
             let session = manager.create(&spec).await.unwrap();
             let command = ExecCommand {
@@ -951,6 +985,7 @@ mod tests {
             target: "AGENTBOX_TEST_SECRET".into(),
             one_time: true,
             requires_approval: true,
+            expires_at: None,
         });
         let session = manager.create(&spec).await.unwrap();
 
@@ -959,6 +994,73 @@ mod tests {
         assert_eq!(grants.len(), 1);
         assert_eq!(grants[0].name, "OPENAI_API_KEY");
         assert!(matches!(grants[0].kind, CredentialGrantKind::EnvVar));
+    }
+
+    #[tokio::test]
+    async fn list_credential_grants_expires_stale_grants_with_evidence() {
+        let manager = manager("credential-list-expired");
+        let mut spec = MinipodSpec::for_agent_task("openclaw", "/tmp/agentbox-work");
+        spec.credentials.grants.push(CredentialGrant {
+            name: "OPENAI_API_KEY".into(),
+            kind: CredentialGrantKind::EnvVar,
+            target: "AGENTBOX_TEST_SECRET".into(),
+            one_time: false,
+            requires_approval: true,
+            expires_at: Some(Utc::now() - chrono::Duration::seconds(1)),
+        });
+        let session = manager.create(&spec).await.unwrap();
+
+        let grants = manager.list_credential_grants(&session.id).unwrap();
+
+        assert!(grants.is_empty());
+        let saved = manager
+            .sessions
+            .get(&session.id)
+            .unwrap()
+            .expect("session should remain persisted");
+        assert!(saved.spec.credentials.grants.is_empty());
+        let audit = manager.audit.recent(4).unwrap();
+        assert!(audit.iter().any(|event| event.bucket == "credential"
+            && event.command.contains("credential.revoke OPENAI_API_KEY")
+            && event.decision.contains("expired")));
+    }
+
+    #[tokio::test]
+    async fn exec_does_not_inject_expired_env_credential_grants() {
+        let manager = manager("exec-env-credential-expired");
+        temp_env_var(
+            "AGENTBOX_EXPIRED_SECRET",
+            Some("sk-test-secret"),
+            || async {
+                let mut spec = MinipodSpec::for_agent_task("openclaw", "/tmp/agentbox-work");
+                spec.credentials.grants.push(CredentialGrant {
+                    name: "OPENAI_API_KEY".into(),
+                    kind: CredentialGrantKind::EnvVar,
+                    target: "AGENTBOX_EXPIRED_SECRET".into(),
+                    one_time: false,
+                    requires_approval: true,
+                    expires_at: Some(Utc::now() - chrono::Duration::seconds(1)),
+                });
+                let session = manager.create(&spec).await.unwrap();
+                let command = ExecCommand {
+                    argv: vec!["printenv".into(), "OPENAI_API_KEY".into()],
+                    working_dir: Some("/workspace".into()),
+                    env: Default::default(),
+                    timeout_seconds: None,
+                };
+
+                let result = manager.exec(&session.id, &command).await.unwrap();
+
+                assert_eq!(result.stdout, "");
+                let saved = manager
+                    .sessions
+                    .get(&session.id)
+                    .unwrap()
+                    .expect("session should remain persisted");
+                assert!(saved.spec.credentials.grants.is_empty());
+            },
+        )
+        .await;
     }
 
     #[tokio::test]
@@ -971,6 +1073,7 @@ mod tests {
             target: "AGENTBOX_TEST_SECRET".into(),
             one_time: true,
             requires_approval: true,
+            expires_at: None,
         });
         let session = manager.create(&spec).await.unwrap();
 
@@ -1533,6 +1636,7 @@ mod tests {
             target: "/tmp/agentbox-openai-key".into(),
             one_time: true,
             requires_approval: true,
+            expires_at: None,
         });
         let session = manager.create(&spec).await.unwrap();
 

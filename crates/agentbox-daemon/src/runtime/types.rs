@@ -278,6 +278,14 @@ pub struct CredentialGrant {
     pub target: String,
     pub one_time: bool,
     pub requires_approval: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<DateTime<Utc>>,
+}
+
+impl CredentialGrant {
+    pub fn is_expired_at(&self, now: DateTime<Utc>) -> bool {
+        self.expires_at.is_some_and(|expires_at| expires_at <= now)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1393,6 +1401,7 @@ mod tests {
             target: "OPENAI_API_KEY".into(),
             one_time: true,
             requires_approval: true,
+            expires_at: None,
         });
         spec.resources.timeout_seconds = Some(600);
         spec.approvals.push(ApprovalGrant {
@@ -1440,6 +1449,7 @@ mod tests {
             target: "/tmp/agentbox-openai-key".into(),
             one_time: true,
             requires_approval: true,
+            expires_at: None,
         };
 
         let event =
@@ -1788,6 +1798,7 @@ mod tests {
                 target: "GITHUB_TOKEN".into(),
                 one_time: true,
                 requires_approval: true,
+                expires_at: None,
             }],
             approval_grants: vec![ApprovalGrant {
                 id: "approve-github".into(),

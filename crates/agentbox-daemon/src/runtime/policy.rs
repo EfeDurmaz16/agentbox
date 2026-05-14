@@ -443,6 +443,7 @@ mod tests {
             target: "/tmp/agentbox-secret/key".into(),
             one_time: true,
             requires_approval: true,
+            expires_at: None,
         });
 
         validate_minipod_spec(&spec).unwrap();
@@ -548,6 +549,7 @@ mod tests {
             target: "/tmp/agentbox-secret/key".into(),
             one_time: true,
             requires_approval: false,
+            expires_at: None,
         });
 
         let reason = rejection_reason(validate_minipod_spec(&spec));
@@ -601,6 +603,7 @@ mod tests {
             target: "/tmp/agentbox-secret/key".into(),
             one_time: true,
             requires_approval: true,
+            expires_at: None,
         });
 
         validate_minipod_spec(&spec).unwrap();
