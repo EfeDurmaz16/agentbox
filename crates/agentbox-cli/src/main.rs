@@ -253,6 +253,10 @@ enum Commands {
         /// Export only session credential grants/events as JSONL
         #[arg(long)]
         credentials: bool,
+
+        /// Export only network boundary audit events as JSONL
+        #[arg(long)]
+        network: bool,
     },
     /// Generate a governed minipod manifest for an agent task
     MinipodSpec {
@@ -2387,7 +2391,13 @@ fn cmd_history(show_all: bool, bucket_filter: Option<String>, json_output: bool)
     }
 }
 
-fn cmd_evidence(limit: usize, verify: bool, session: Option<String>, credentials: bool) {
+fn cmd_evidence(
+    limit: usize,
+    verify: bool,
+    session: Option<String>,
+    credentials: bool,
+    network: bool,
+) {
     let db_path = audit_db_path();
     if !db_path.exists() {
         eprintln!("no audit log found at {}", db_path.display());
@@ -2429,6 +2439,14 @@ fn cmd_evidence(limit: usize, verify: bool, session: Option<String>, credentials
         eprintln!("error: --credentials requires --session <id>");
         std::process::exit(1);
     }
+    if network && session.is_some() {
+        eprintln!("error: --network currently exports global network evidence; omit --session");
+        std::process::exit(1);
+    }
+    if network && credentials {
+        eprintln!("error: --network and --credentials cannot be combined");
+        std::process::exit(1);
+    }
 
     if let Some(session_id) = session {
         if credentials {
@@ -2439,6 +2457,15 @@ fn cmd_evidence(limit: usize, verify: bool, session: Option<String>, credentials
         return;
     }
 
+    if network {
+        cmd_bucket_evidence_jsonl(&db_path, "network", limit);
+        return;
+    }
+
+    cmd_all_evidence_jsonl(&db_path, limit);
+}
+
+fn cmd_all_evidence_jsonl(db_path: &PathBuf, limit: usize) {
     let conn = Connection::open(&db_path).expect("failed to open audit db");
     ensure_evidence_columns(&conn);
     let mut stmt = conn
@@ -2470,6 +2497,51 @@ fn cmd_evidence(limit: usize, verify: bool, session: Option<String>, credentials
             }))
         })
         .expect("failed to query evidence");
+
+    for row in rows {
+        match row {
+            Ok(value) => println!("{}", value),
+            Err(e) => {
+                eprintln!("failed to read evidence row: {}", e);
+                std::process::exit(1);
+            }
+        }
+    }
+}
+
+fn cmd_bucket_evidence_jsonl(db_path: &PathBuf, bucket: &str, limit: usize) {
+    let conn = Connection::open(db_path).expect("failed to open audit db");
+    ensure_evidence_columns(&conn);
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, schema_version, timestamp, agent_pid, agent_name, command, cwd,
+                    bucket, decision, user_response_ms, parent_process, prev_hash, event_hash
+             FROM audit_log
+             WHERE bucket = ?1
+             ORDER BY timestamp ASC
+             LIMIT ?2",
+        )
+        .expect("failed to prepare filtered evidence query");
+
+    let rows = stmt
+        .query_map((bucket, limit as i64), |row| {
+            Ok(serde_json::json!({
+                "id": row.get::<_, String>(0)?,
+                "schema_version": row.get::<_, i64>(1)?,
+                "timestamp": row.get::<_, String>(2)?,
+                "agent_pid": row.get::<_, i64>(3)?,
+                "agent_name": row.get::<_, Option<String>>(4)?,
+                "command": agentbox_daemon::audit::redact_sensitive_text(&row.get::<_, String>(5)?),
+                "cwd": agentbox_daemon::audit::redact_sensitive_text(&row.get::<_, String>(6)?),
+                "bucket": row.get::<_, String>(7)?,
+                "decision": row.get::<_, String>(8)?,
+                "user_response_ms": row.get::<_, Option<i64>>(9)?,
+                "parent_process": row.get::<_, Option<String>>(10)?.map(|value| agentbox_daemon::audit::redact_sensitive_text(&value)),
+                "prev_hash": row.get::<_, Option<String>>(11)?,
+                "event_hash": row.get::<_, Option<String>>(12)?,
+            }))
+        })
+        .expect("failed to query filtered evidence");
 
     for row in rows {
         match row {
@@ -3548,7 +3620,8 @@ async fn main() {
             verify,
             session,
             credentials,
-        } => cmd_evidence(limit, verify, session, credentials),
+            network,
+        } => cmd_evidence(limit, verify, session, credentials, network),
         Commands::MinipodSpec {
             agent,
             workspace,
