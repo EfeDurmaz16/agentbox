@@ -365,6 +365,28 @@ enum Commands {
         #[arg(long = "ttl-seconds", default_value_t = 300)]
         ttl_seconds: i64,
     },
+    /// Generate remote AgentPod evidence upload metadata without uploading it
+    RemoteEvidence {
+        /// Agentbox session id
+        #[arg(long = "session")]
+        session_id: String,
+
+        /// Worker-side session id
+        #[arg(long = "worker-session")]
+        worker_session_id: String,
+
+        /// Evidence mode: append-only-stream, bundle-upload, local-pull
+        #[arg(long = "evidence", default_value = "bundle-upload")]
+        evidence: String,
+
+        /// SHA-256 hex digest of the sealed evidence bundle
+        #[arg(long = "bundle-sha256")]
+        bundle_sha256: String,
+
+        /// Number of evidence events in the sealed bundle
+        #[arg(long = "event-count")]
+        event_count: u64,
+    },
     /// Generate a native provider execution plan without running it
     NativePlan {
         /// Native provider: agentpod-linux
@@ -3249,6 +3271,39 @@ fn cmd_remote_handshake(endpoint: String, auth: String, ttl_seconds: i64) {
     );
 }
 
+fn cmd_remote_evidence(
+    session_id: String,
+    worker_session_id: String,
+    evidence: String,
+    bundle_sha256: String,
+    event_count: u64,
+) {
+    use agentbox_daemon::runtime::providers::remote::RemoteAgentPodEvidenceUploadRequest;
+
+    let request = RemoteAgentPodEvidenceUploadRequest {
+        session_id,
+        worker_session_id,
+        evidence_mode: parse_remote_evidence_mode(&evidence),
+        bundle_sha256,
+        event_count,
+        sealed_at: chrono::Utc::now(),
+        secret_material_included: false,
+    };
+    request.validate().unwrap_or_else(|e| {
+        eprintln!(
+            "error: failed to build remote AgentPod evidence upload metadata: {}",
+            e
+        );
+        std::process::exit(1);
+    });
+
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&request)
+            .expect("failed to serialize remote AgentPod evidence upload metadata")
+    );
+}
+
 fn cmd_native_plan(
     provider: String,
     workspace: Option<PathBuf>,
@@ -3936,6 +3991,19 @@ async fn main() {
             auth,
             ttl_seconds,
         } => cmd_remote_handshake(endpoint, auth, ttl_seconds),
+        Commands::RemoteEvidence {
+            session_id,
+            worker_session_id,
+            evidence,
+            bundle_sha256,
+            event_count,
+        } => cmd_remote_evidence(
+            session_id,
+            worker_session_id,
+            evidence,
+            bundle_sha256,
+            event_count,
+        ),
         Commands::NativePlan {
             provider,
             workspace,

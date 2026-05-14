@@ -63,6 +63,23 @@ This is a verifier boundary, not final worker authentication. It proves the
 adapter is no longer accepting loose challenge substrings, while keeping the
 future Ed25519, mTLS, workload-identity, or SSH verifier pluggable.
 
+## Evidence Upload Metadata
+
+The CLI can emit the metadata a future worker would submit when uploading or
+acknowledging sealed evidence:
+
+```sh
+agentbox remote-evidence \
+  --session agentbox-session-id \
+  --worker-session worker-session-id \
+  --evidence bundle-upload \
+  --bundle-sha256 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef \
+  --event-count 12
+```
+
+This only validates and prints upload metadata. It does not upload evidence or
+claim a live worker connection.
+
 ## Transport Conformance
 
 The daemon models the minimum remote transport contract in code without shipping
