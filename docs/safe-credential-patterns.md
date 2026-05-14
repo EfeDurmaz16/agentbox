@@ -35,7 +35,7 @@ path mounts require explicit file grants.
 | Need | Pattern | Avoid |
 |------|---------|-------|
 | Read one token file | `--credential-file name=host:guest` | Mounting a whole config directory. |
-| Use cloud CLI briefly | short-lived task credential file | Passing the user's normal shell environment. |
+| Use cloud CLI briefly | short-lived task credential file or `--credential-env name=HOST_ENV` | Passing the user's normal shell environment. |
 | Push to GitHub | session-scoped approval plus exact credential path | Mounting `~/.ssh` broadly. |
 | Query a database | task-specific connection file with expiration | Long-lived `.env` from the host project root. |
 | Browser automation | separate browser profile created for the task | Operator's real browser profile. |
@@ -54,6 +54,24 @@ agentbox minipod-spec deploy-agent \
 This records a credential grant in the minipod manifest and distinguishes the
 mount from ordinary read-only reference data. One-time grants should produce
 revocation evidence when the session is destroyed.
+
+## Explicit Env Grants
+
+`--credential-env name=HOST_ENV` should be used only when a tool truly expects a
+secret in its process environment:
+
+```sh
+agentbox run deploy-agent \
+  --workspace ./release-work \
+  --credential-env OPENAI_API_KEY=AGENTBOX_OPENAI_API_KEY
+```
+
+Agentbox does not inherit the host environment by default. A runtime exec
+injects only the named host env target into the command environment, and denies
+the command if the host env target is missing. This is command-level mediation,
+not a complete secret manager: a process that receives the env value can still
+print it, copy it, or pass it to children. Transcripts are redacted, but the
+main control is explicit least-privilege exposure.
 
 ## FIDES Authority Boundary
 

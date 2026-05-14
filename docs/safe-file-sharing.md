@@ -77,13 +77,15 @@ general host mount.
 
 ## Credential Grants
 
-Credential grants are first-class minipod manifest entries for exact files or
-future provider-mediated secret sources. `--credential-file name=host:guest`
-creates a read-only credential mount and a one-time file grant, and provider
-adapters preserve that metadata separately from ordinary read-only mounts.
-Agentbox also exposes a FIDES-compatible credential authority request shape so a
-future FIDES runtime can sign or reject grants without becoming a hard product
-dependency today.
+Credential grants are first-class minipod manifest entries for exact files,
+explicit env values, or future provider-mediated secret sources.
+`--credential-file name=host:guest` creates a read-only credential mount and a
+one-time file grant, and provider adapters preserve that metadata separately
+from ordinary read-only mounts. `--credential-env name=HOST_ENV` injects only
+that named host env target into runtime exec command environments. Agentbox also
+exposes a FIDES-compatible credential authority request shape so a future FIDES
+runtime can sign or reject grants without becoming a hard product dependency
+today.
 
 Until native provider enforcement is complete:
 

@@ -21,6 +21,7 @@ Not every provider boundary is implemented yet.
 | AgentPod workspace modes | Shipped partial | Manifests can declare `direct`, `overlay-review`, `ephemeral`, and `commit-gated` workspace modes. Non-direct modes allocate validated upper/work paths and can materialize a projected review workspace before provider create. Native overlayfs/provider mount wiring is still incomplete. |
 | AgentPod risk model | Shipped model | Manifests carry `low`, `medium`, `high`, or `very-high` risk intent for provider selection and evidence. |
 | One-time credential file grants | Shipped | `--credential-file` creates read-only credential mounts and one-time file grants; provider mount metadata distinguishes them from ordinary read-only host mounts. |
+| Explicit credential env grants | Shipped partial | `--credential-env name=HOST_ENV` records an explicit env grant and runtime exec injects only that named host env value into the command environment. Missing host env targets deny execution, and transcripts redact credential-like output. Socket and provider-token grants remain manifest/authority metadata until provider-mediated sources are implemented. |
 | Credential revocation evidence | Shipped | Destroying a runtime session records hash-chained credential revocation audit events for one-time grants. |
 | Per-agent policy profiles | Shipped | `general`, `coding`, `research`, `deploy`, and custom profile ids can set policy defaults without hardcoding specific agent products. |
 | Runtime session store | Shipped | Runtime sessions persist to a local JSON store. |
