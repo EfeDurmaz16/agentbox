@@ -18,7 +18,7 @@ Not every provider boundary is implemented yet.
 | Doctor command | Shipped | `agentbox doctor` reports daemon, shim, audit, PATH, and provider readiness. |
 | AgentPod manifest model | Shipped | `MinipodSpec` is now the compatibility type behind the AgentPod manifest surface. New manifests carry `schema_version`, `kind: AgentPod`, risk, workspace mode, filesystem, network, credentials, resources, services, labels, approvals, and task policy bundles. |
 | Manifest policy validation | Shipped | Unsafe host env inheritance, host network mode, and protected mounts are rejected before provider create. |
-| AgentPod workspace modes | Shipped model | Manifests can declare `direct`, `overlay-review`, `ephemeral`, and `commit-gated` workspace modes. Non-direct modes map to writable overlay policy with validated upper/work paths; provider execution wiring is not fully claimed. |
+| AgentPod workspace modes | Shipped partial | Manifests can declare `direct`, `overlay-review`, `ephemeral`, and `commit-gated` workspace modes. Non-direct modes allocate validated upper/work paths and can materialize a projected review workspace before provider create. Native overlayfs/provider mount wiring, apply, discard, and commit-gated semantics are still incomplete. |
 | AgentPod risk model | Shipped model | Manifests carry `low`, `medium`, `high`, or `very-high` risk intent for provider selection and evidence. |
 | One-time credential file grants | Shipped | `--credential-file` creates read-only credential mounts and one-time file grants; provider mount metadata distinguishes them from ordinary read-only host mounts. |
 | Credential revocation evidence | Shipped | Destroying a runtime session records hash-chained credential revocation audit events for one-time grants. |
@@ -30,10 +30,11 @@ Not every provider boundary is implemented yet.
 | Approval scope enforcement | Shipped | Runtime manager exec enforces once, command, path, domain, and session approval grants for approve-bucket commands. Expired grants are ignored and block-bucket commands cannot be grant-bypassed. |
 | Signed approval model | Shipped | Approval grants can be represented as signed approval records with evidence refs and optional FIDES-style signatures; no fake signing provider is shipped. |
 | First-contact network mode | Shipped | `ApprovalOnFirstContact` is a first-class minipod network mode exposed through `--network-mode first-contact`. |
-| Open-with-guardrails network mode | Shipped model | General AgentPod manifests default to usable internet with metadata endpoints denied. Provider packet/domain enforcement is still reported separately. |
+| Open-with-guardrails network mode | Shipped command mediation | General AgentPod manifests default to usable internet with metadata endpoints denied. Runtime command mediation allows unknown HTTP in this mode while recording network boundary evidence; provider packet/domain enforcement is still reported separately. |
 | Network denylist | Shipped | Minipod network policy and daemon policy config carry denied domains; denied network destinations are blocked before allowlists or approval grants. |
 | Localhost service policy | Shipped | Minipod manifests model localhost/loopback access and `--deny-localhost` makes runtime exec policy block loopback HTTP commands. |
 | Network boundary evidence | Shipped | Runtime exec records network-specific audit events for allowed, blocked, and approval-required HTTP boundary decisions. |
+| Network explain CLI | Shipped | `agentbox network-explain <url>` explains URL policy buckets for a selected network mode without making the request and states that it is command mediation, not packet filtering. |
 | Workspace diff snapshots | Shipped | Runtime sessions can capture Git workspace diff snapshots and record hash-chained workspace evidence without claiming AGIT commit creation. |
 | Command transcript export | Shipped | Runtime exec stores redacted stdout/stderr transcripts in the session evidence bundle with size metadata and truncation limits. |
 | Session replay metadata | Shipped | Session evidence bundles include ordered replay metadata with audit ids, hash links, policy buckets, decisions, and explicit metadata-only limitations. |
@@ -41,8 +42,9 @@ Not every provider boundary is implemented yet.
 | Runtime provider registry | Shipped | `RuntimeProviderRegistry` can resolve AgentPod provider descriptors and compatibility providers, and can explain provider selection by risk and explicit provider hints. |
 | Runtime provider listing | Shipped | `agentbox providers` reports family, platform, shipped/experimental/descriptor-only status, and network enforcement claims. |
 | Network enforcement capability flags | Shipped | Runtime providers separately report active network enforcement strength, so planned policy support is not confused with packet/domain enforcement. |
-| AgentPod provider descriptors | Shipped | `agentpod-macos`, `agentpod-linux`, and `agentpod-windows` expose capability metadata while returning unavailable for execution. |
+| AgentPod provider descriptors | Shipped | `agentpod-macos`, `agentpod-linux`, `agentpod-windows`, and `remote-agentpod` expose capability metadata while returning unavailable for execution. |
 | Podman compatibility adapter | Shipped | `agentbox run` now routes through `RuntimeManager` and the Podman `RuntimeProvider` adapter, creating governed runtime sessions and evidence events. |
+| AgentPod lifecycle CLI | Shipped partial | `agentbox pods` lists persisted runtime sessions and `agentbox stop-pod` stops runtime sessions through `RuntimeManager` before falling back to legacy Podman ids. Stopped sessions are retained for review and evidence, while transient approval grants are cleared. |
 
 ## Runtime Backends
 
@@ -52,7 +54,8 @@ Not every provider boundary is implemented yet.
 | AgentPod macOS | Descriptor only | Candidate surfaces include Apple Virtualization for local cells, Endpoint Security for host-event enforcement, and Network Extension for egress governance. Execution intentionally returns unavailable. See [Endpoint Security design](macos-endpoint-security.md) and [system extension scaffold](macos-system-extension-scaffold.md). |
 | AgentPod Linux | Prototype primitives | Candidate surfaces include namespaces, cgroups, Landlock, seccomp, eBPF, nftables, and overlayfs. Linux-only user, mount, PID namespace, cgroups v2, seccomp, Landlock, isolation benchmark, and eBPF observability design primitives exist, but provider execution intentionally remains unavailable until the full boundary is wired and verified. |
 | AgentPod Windows | Prototype primitives | Candidate surfaces include Job Objects, AppContainer, WFP, ETW, and Windows sandbox primitives. A Windows Job Object plan/controller exists with Windows-only apply behavior, but provider execution intentionally remains unavailable. See [Windows native provider](windows-native-provider.md). |
-| Podman compatibility minipods | Experimental | `agentbox run` uses the daemon-owned runtime manager path. `agentbox pods` and `agentbox stop-pod` still use the older Podman CLI path, workspace overlay policy is only manifest metadata, and `scripts/smoke-podman-bridge.sh` is the live gate for socket/shim bridge proof. The provider now resolves Linux guest shim artifacts through `AGENTBOX_LINUX_SHIM`, `.linux` sidecar artifacts, or common Rust target paths, and rejects non-Linux shim binaries before injecting them into Linux containers. |
+| Remote AgentPod | Descriptor only | The `remote-agentpod` descriptor models remote/disposable worker execution over a remote bridge, but transport, auth, worker lifecycle, evidence streaming, and kill-switch semantics are not implemented. |
+| Podman compatibility minipods | Experimental | `agentbox run` uses the daemon-owned runtime manager path. `agentbox pods` lists persisted runtime sessions and `agentbox stop-pod` stops sessions through `RuntimeManager` before falling back to legacy Podman ids. Non-direct workspace modes can prepare a projected review workspace, but native provider overlayfs/apply/discard semantics are not complete. `scripts/smoke-podman-bridge.sh` remains the live gate for socket/shim bridge proof. The provider resolves Linux guest shim artifacts through `AGENTBOX_LINUX_SHIM`, `.linux` sidecar artifacts, or common Rust target paths, and rejects non-Linux shim binaries before injecting them into Linux containers. |
 
 ## Ecosystem Integrations
 
