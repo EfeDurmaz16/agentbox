@@ -433,6 +433,32 @@ enum Commands {
         #[arg(long = "bundle-dir")]
         bundle_dir: PathBuf,
     },
+    /// Export a remote AgentPod worker workspace into a local review directory
+    RemoteWorkspaceExport {
+        /// Remote worker endpoint, e.g. https://worker.example.com/agentpod
+        #[arg(long)]
+        endpoint: String,
+
+        /// Agentbox session id
+        #[arg(long = "session")]
+        session_id: String,
+
+        /// Worker-side session id
+        #[arg(long = "worker-session")]
+        worker_session_id: String,
+
+        /// Local directory where exported workspace files should be written
+        #[arg(long = "output-dir")]
+        output_dir: PathBuf,
+
+        /// Allow writing into an existing empty output directory
+        #[arg(long)]
+        force: bool,
+
+        /// Emit JSON
+        #[arg(long)]
+        json: bool,
+    },
     /// Generate a native provider execution plan without running it
     NativePlan {
         /// Native provider: agentpod-linux
@@ -2954,6 +2980,28 @@ struct EvidenceBundleFile {
     bytes: usize,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+struct RemoteWorkspaceExportManifest {
+    schema_version: i64,
+    session_id: String,
+    worker_session_id: String,
+    status: String,
+    output_dir: String,
+    manifest_path: String,
+    root_sha256: String,
+    file_count: usize,
+    total_bytes: usize,
+    files: Vec<RemoteWorkspaceExportFile>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct RemoteWorkspaceExportFile {
+    path: String,
+    media_type: String,
+    sha256: String,
+    bytes: usize,
+}
+
 fn write_session_evidence_bundle_dir(
     bundle: &agentbox_daemon::runtime::types::SessionEvidenceBundle,
     output_dir: &Path,
@@ -3183,6 +3231,86 @@ fn build_remote_evidence_bundle_upload_payload(
         envelope_json,
         envelope_sha256,
     })
+}
+
+fn write_remote_workspace_export_dir(
+    response: &agentbox_daemon::runtime::providers::remote::RemoteAgentPodWorkspaceExportResponse,
+    output_dir: &Path,
+    force: bool,
+) -> Result<RemoteWorkspaceExportManifest, String> {
+    response
+        .workspace_bundle
+        .validate()
+        .map_err(|e| format!("remote workspace bundle validation failed: {e}"))?;
+    prepare_remote_workspace_output_dir(output_dir, force)?;
+
+    let mut manifest_files = Vec::with_capacity(response.workspace_bundle.files.len());
+    let mut total_bytes = 0_usize;
+    for file in &response.workspace_bundle.files {
+        let relative_path = safe_bundle_relative_path(&file.path)?;
+        let destination = output_dir.join(&relative_path);
+        if let Some(parent) = destination.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|e| format!("failed to create {}: {e}", parent.display()))?;
+        }
+        fs::write(&destination, file.contents_utf8.as_bytes())
+            .map_err(|e| format!("failed to write {}: {e}", destination.display()))?;
+        total_bytes += file.bytes;
+        manifest_files.push(RemoteWorkspaceExportFile {
+            path: file.path.clone(),
+            media_type: file.media_type.clone(),
+            sha256: file.sha256.clone(),
+            bytes: file.bytes,
+        });
+    }
+
+    let manifest_path = output_dir.join("agentbox-workspace-export.json");
+    let manifest = RemoteWorkspaceExportManifest {
+        schema_version: 1,
+        session_id: response.session_id.clone(),
+        worker_session_id: response.worker_session_id.clone(),
+        status: format!("{:?}", response.status),
+        output_dir: output_dir.display().to_string(),
+        manifest_path: manifest_path.display().to_string(),
+        root_sha256: response.workspace_bundle.root_sha256.clone(),
+        file_count: manifest_files.len(),
+        total_bytes,
+        files: manifest_files,
+    };
+    fs::write(
+        &manifest_path,
+        serde_json::to_vec_pretty(&manifest)
+            .map_err(|e| format!("failed to serialize workspace export manifest: {e}"))?,
+    )
+    .map_err(|e| format!("failed to write {}: {e}", manifest_path.display()))?;
+    Ok(manifest)
+}
+
+fn prepare_remote_workspace_output_dir(output_dir: &Path, force: bool) -> Result<(), String> {
+    if output_dir.exists() {
+        if !output_dir.is_dir() {
+            return Err("output path exists and is not a directory".to_string());
+        }
+        let is_empty = fs::read_dir(output_dir)
+            .map_err(|e| format!("failed to inspect {}: {e}", output_dir.display()))?
+            .next()
+            .is_none();
+        if !is_empty {
+            return Err(
+                "output directory already exists and is not empty; choose a new directory"
+                    .to_string(),
+            );
+        }
+        if !force {
+            return Err(
+                "output directory already exists; pass --force to use an existing empty directory"
+                    .to_string(),
+            );
+        }
+        return Ok(());
+    }
+    fs::create_dir_all(output_dir)
+        .map_err(|e| format!("failed to create {}: {e}", output_dir.display()))
 }
 
 fn evidence_bundle_root_sha256(files: &[EvidenceBundleFile]) -> String {
@@ -4039,6 +4167,73 @@ async fn cmd_remote_evidence_upload(
     );
 }
 
+async fn cmd_remote_workspace_export(
+    endpoint: String,
+    session_id: String,
+    worker_session_id: String,
+    output_dir: PathBuf,
+    force: bool,
+    json: bool,
+) {
+    use agentbox_daemon::runtime::providers::remote::{
+        HttpRemoteAgentPodTransport, RemoteAgentPodTransport, RemoteAgentPodWorkspaceExportRequest,
+    };
+
+    let transport = HttpRemoteAgentPodTransport::new(endpoint).unwrap_or_else(|e| {
+        eprintln!(
+            "error: failed to build remote AgentPod workspace export transport: {}",
+            e
+        );
+        std::process::exit(1);
+    });
+    let request = RemoteAgentPodWorkspaceExportRequest {
+        session_id,
+        worker_session_id,
+    };
+    request.validate().unwrap_or_else(|e| {
+        eprintln!(
+            "error: failed to build remote AgentPod workspace export request: {}",
+            e
+        );
+        std::process::exit(1);
+    });
+    let response = transport
+        .export_workspace(request)
+        .await
+        .unwrap_or_else(|e| {
+            eprintln!("error: failed to export remote AgentPod workspace: {}", e);
+            std::process::exit(1);
+        });
+    let manifest =
+        write_remote_workspace_export_dir(&response, &output_dir, force).unwrap_or_else(|e| {
+            eprintln!(
+                "error: failed to materialize remote AgentPod workspace at {}: {}",
+                output_dir.display(),
+                e
+            );
+            std::process::exit(1);
+        });
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&manifest)
+                .expect("failed to serialize remote AgentPod workspace export manifest")
+        );
+        return;
+    }
+
+    println!("Remote AgentPod workspace exported.");
+    println!("session:        {}", manifest.session_id);
+    println!("worker session: {}", manifest.worker_session_id);
+    println!("status:         {}", manifest.status);
+    println!("output:         {}", manifest.output_dir);
+    println!("files:          {}", manifest.file_count);
+    println!("bytes:          {}", manifest.total_bytes);
+    println!("root sha256:    {}", manifest.root_sha256);
+    println!("manifest:       {}", manifest.manifest_path);
+}
+
 fn cmd_native_plan(
     provider: String,
     workspace: Option<PathBuf>,
@@ -4755,6 +4950,24 @@ async fn main() {
             worker_session_id,
             bundle_dir,
         } => cmd_remote_evidence_upload(endpoint, session_id, worker_session_id, bundle_dir).await,
+        Commands::RemoteWorkspaceExport {
+            endpoint,
+            session_id,
+            worker_session_id,
+            output_dir,
+            force,
+            json,
+        } => {
+            cmd_remote_workspace_export(
+                endpoint,
+                session_id,
+                worker_session_id,
+                output_dir,
+                force,
+                json,
+            )
+            .await
+        }
         Commands::NativePlan {
             provider,
             workspace,
@@ -4785,6 +4998,10 @@ async fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use agentbox_daemon::runtime::providers::remote::{
+        RemoteAgentPodLifecycleEvent, RemoteAgentPodWorkspaceBundle,
+        RemoteAgentPodWorkspaceExportResponse, RemoteAgentPodWorkspaceFile,
+    };
     use agentbox_daemon::runtime::types::{MinipodSpec, RuntimeSession, SessionEvidenceBundle};
 
     #[test]
@@ -5005,5 +5222,96 @@ mod tests {
 
         assert!(err.contains("does not match requested session"));
         let _ = fs::remove_dir_all(output_dir);
+    }
+
+    #[test]
+    fn remote_workspace_export_writes_verified_files_and_manifest() {
+        let output_dir = std::env::temp_dir().join(format!(
+            "agentbox-remote-workspace-export-test-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&output_dir);
+        let file = remote_workspace_file("src/main.rs", "fn main() {}\n");
+        let response = remote_workspace_export_response(vec![file]);
+
+        let manifest = write_remote_workspace_export_dir(&response, &output_dir, false).unwrap();
+
+        assert_eq!(manifest.session_id, "session-test");
+        assert_eq!(manifest.worker_session_id, "worker-session-test");
+        assert_eq!(manifest.file_count, 1);
+        assert_eq!(manifest.total_bytes, "fn main() {}\n".len());
+        assert_eq!(
+            fs::read_to_string(output_dir.join("src/main.rs")).unwrap(),
+            "fn main() {}\n"
+        );
+        assert!(output_dir.join("agentbox-workspace-export.json").exists());
+
+        let _ = fs::remove_dir_all(output_dir);
+    }
+
+    #[test]
+    fn remote_workspace_export_rejects_non_empty_output_dir() {
+        let output_dir = std::env::temp_dir().join(format!(
+            "agentbox-remote-workspace-export-nonempty-test-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&output_dir);
+        fs::create_dir_all(&output_dir).unwrap();
+        fs::write(output_dir.join("existing.txt"), b"do not overwrite").unwrap();
+        let response = remote_workspace_export_response(vec![remote_workspace_file(
+            "README.md",
+            "remote workspace\n",
+        )]);
+
+        let err = write_remote_workspace_export_dir(&response, &output_dir, false).unwrap_err();
+
+        assert!(err.contains("not empty"), "{err}");
+        assert_eq!(
+            fs::read_to_string(output_dir.join("existing.txt")).unwrap(),
+            "do not overwrite"
+        );
+        let _ = fs::remove_dir_all(output_dir);
+    }
+
+    fn remote_workspace_file(path: &str, contents: &str) -> RemoteAgentPodWorkspaceFile {
+        RemoteAgentPodWorkspaceFile {
+            path: path.to_string(),
+            media_type: "text/plain; charset=utf-8".into(),
+            sha256: sha256_hex(contents.as_bytes()),
+            bytes: contents.len(),
+            contents_utf8: contents.to_string(),
+        }
+    }
+
+    fn remote_workspace_export_response(
+        files: Vec<RemoteAgentPodWorkspaceFile>,
+    ) -> RemoteAgentPodWorkspaceExportResponse {
+        let root_sha256 = remote_workspace_bundle_root_sha256(&files);
+        RemoteAgentPodWorkspaceExportResponse {
+            session_id: "session-test".into(),
+            worker_session_id: "worker-session-test".into(),
+            status: agentbox_daemon::runtime::types::RuntimeStatus::Running,
+            workspace_bundle: RemoteAgentPodWorkspaceBundle {
+                schema_version: 1,
+                root_sha256,
+                files,
+                secret_material_included: false,
+            },
+            lifecycle_events: vec![RemoteAgentPodLifecycleEvent::EvidenceSealed],
+        }
+    }
+
+    fn remote_workspace_bundle_root_sha256(files: &[RemoteAgentPodWorkspaceFile]) -> String {
+        let mut entries = files
+            .iter()
+            .map(|file| {
+                format!(
+                    "{}\0{}\0{}\0{}",
+                    file.path, file.sha256, file.bytes, file.media_type
+                )
+            })
+            .collect::<Vec<_>>();
+        entries.sort();
+        sha256_hex(format!("agentbox-workspace-root-v1\n{}", entries.join("\n")).as_bytes())
     }
 }

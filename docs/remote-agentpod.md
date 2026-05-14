@@ -144,6 +144,19 @@ agentbox remote-evidence-status \
 The command prints the validated worker response, including session status,
 evidence metadata receipts, and stored bundle payload references.
 
+Workers can also export the current session workspace as a verified pullback
+bundle. The CLI validates the worker response, materializes the files into a
+local review directory, and writes `agentbox-workspace-export.json` with the
+session ids, file index, byte counts, and root hash:
+
+```sh
+agentbox remote-workspace-export \
+  --endpoint https://worker.example.com/agentpod \
+  --session agentbox-session-id \
+  --worker-session worker-session-id \
+  --output-dir ./agentbox-workspace-review
+```
+
 ## Transport Conformance
 
 The daemon models the minimum remote transport contract in code without shipping
@@ -258,16 +271,20 @@ receipts, and stored bundle payload references after binding the caller-provided
 When the daemon-side provider creates a remote session, it persists the worker
 endpoint, worker session id, worker identity, and worker evidence endpoint in
 session labels so later exec/destroy calls can route back to the same worker.
-Workspace materialization, policy enforcement, credential handoff, full evidence
-streaming, and supervised worker restarts remain future work.
+Workspace materialization and workspace export now exist as hash-checked
+bundles. Policy enforcement inside the worker, credential handoff, full evidence
+streaming, supervised worker restarts, and first-class apply/merge UX remain
+future work.
 
 `scripts/smoke-remote-worker.sh` starts this worker on a random loopback port,
 posts a handshake descriptor, checks the Ed25519 acknowledgement shape, creates
 worker sessions from generated AgentPod specs, runs a direct `printf` exec
-request, uploads a bundle metadata receipt, verifies the returned lifecycle
-evidence, uploads and verifies a hash-bound bundle payload, restarts the worker
-to prove persisted session reload, then starts a long-running command and proves
-destroy sends a kill signal that returns exit code `130` plus `KillSwitchAck`.
+request, exports the worker workspace through both direct HTTP and the CLI
+pullback command, uploads a bundle metadata receipt, verifies the returned
+lifecycle evidence, uploads and verifies a hash-bound bundle payload, restarts
+the worker to prove persisted session reload, then starts a long-running command
+and proves destroy sends a kill signal that returns exit code `130` plus
+`KillSwitchAck`.
 
 ## Lifecycle Contract
 
@@ -308,6 +325,6 @@ implementation.
 ## Current Boundary
 
 `remote-agentpod` is now an experimental gated provider. The missing pieces are
-sandboxed remote execution, workspace materialization, policy enforcement inside
-the worker, credential handoff, evidence streaming, and live HTTPS worker
-conformance tests.
+sandboxed remote execution, worker-side policy enforcement, credential handoff,
+evidence streaming, supervised worker lifecycle, first-class workspace apply or
+merge UX, and live HTTPS worker conformance tests.

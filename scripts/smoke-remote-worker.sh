@@ -165,6 +165,29 @@ assert paths["export.txt"]["contents_utf8"] == "worker export smoke\n"
 assert "EvidenceSealed" in data["lifecycle_events"]
 PY
 
+AGENTBOX_REMOTE_AGENTPOD_ALLOW_HTTP_LOOPBACK=1 \
+"$ROOT/target/debug/agentbox-cli" remote-workspace-export \
+  --endpoint "http://127.0.0.1:${PORT}" \
+  --session "$SESSION_ID" \
+  --worker-session "$WORKER_SESSION_ID" \
+  --output-dir "$TMPDIR/workspace-pullback" \
+  --json >"$TMPDIR/workspace-pullback.json"
+
+python3 - "$TMPDIR/workspace-pullback.json" "$TMPDIR/workspace-pullback" <<'PY'
+import json
+import pathlib
+import sys
+
+with open(sys.argv[1], "r", encoding="utf-8") as fh:
+    data = json.load(fh)
+
+pullback = pathlib.Path(sys.argv[2])
+assert data["file_count"] >= 1
+assert data["root_sha256"]
+assert (pullback / "export.txt").read_text(encoding="utf-8") == "worker export smoke\n"
+assert (pullback / "agentbox-workspace-export.json").exists()
+PY
+
 SEALED_AT="$(python3 - <<'PY'
 from datetime import datetime, timezone
 print(datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"))
