@@ -415,6 +415,94 @@ mod tests {
     }
 
     #[test]
+    fn minipod_manifest_roundtrips_all_boundary_fields() {
+        let mut spec = MinipodSpec::for_agent_task("hermes", "/tmp/agentbox-work");
+        spec.agent.command = vec!["hermes".into(), "run".into()];
+        spec.filesystem.mounts.push(MountRule {
+            host_path: "/tmp/docs".into(),
+            guest_path: "/mnt/docs".into(),
+            mode: MountMode::ReadOnly,
+            kind: MountKind::ReadOnlyHost,
+        });
+        spec.network.mode = NetworkMode::AllowListed;
+        spec.network.allowed_domains = vec!["api.openai.com".into()];
+        spec.network.denied_domains = vec!["metadata.google.internal".into()];
+        spec.credentials.grants.push(CredentialGrant {
+            name: "OPENAI_API_KEY".into(),
+            kind: CredentialGrantKind::EnvVar,
+            target: "OPENAI_API_KEY".into(),
+            one_time: true,
+            requires_approval: true,
+        });
+        spec.resources.timeout_seconds = Some(600);
+        spec.services.push(ServiceSpec {
+            name: "postgres".into(),
+            image: "postgres:17-alpine".into(),
+            env: HashMap::from([("POSTGRES_PASSWORD".into(), "agentbox".into())]),
+        });
+        spec.labels
+            .insert("agentbox.provider".into(), "agentpod-linux".into());
+
+        let encoded = serde_json::to_string_pretty(&spec).unwrap();
+        let decoded: MinipodSpec = serde_json::from_str(&encoded).unwrap();
+
+        assert_eq!(decoded, spec);
+        assert!(encoded.contains("\"network\""));
+        assert!(encoded.contains("\"credentials\""));
+        assert!(encoded.contains("\"agentbox.provider\""));
+    }
+
+    #[test]
+    fn legacy_minipod_manifest_mounts_default_to_read_only_host_kind() {
+        let json = serde_json::json!({
+            "id": "01legacyagentpod",
+            "name": "agentbox-legacy",
+            "agent": {
+                "name": "codex",
+                "kind": "autonomous-agent",
+                "command": ["codex"]
+            },
+            "filesystem": {
+                "workspace_host_path": "/tmp/work",
+                "workspace_guest_path": "/workspace",
+                "mounts": [{
+                    "host_path": "/tmp/docs",
+                    "guest_path": "/mnt/docs",
+                    "mode": "ReadOnly"
+                }],
+                "protected_paths": [],
+                "deny_home_by_default": true
+            },
+            "network": {
+                "mode": "DenyByDefault",
+                "allowed_domains": [],
+                "denied_domains": [],
+                "allow_localhost": true
+            },
+            "credentials": {
+                "inherit_host_env": false,
+                "grants": [],
+                "redact_in_audit": true
+            },
+            "resources": {
+                "memory_bytes": 1073741824,
+                "cpu_shares": 2048,
+                "timeout_seconds": null
+            },
+            "services": [],
+            "labels": {},
+            "created_at": "2026-05-14T00:00:00Z"
+        });
+
+        let spec: MinipodSpec = serde_json::from_value(json).unwrap();
+
+        assert!(matches!(
+            spec.filesystem.mounts[0].kind,
+            MountKind::ReadOnlyHost
+        ));
+    }
+
+    #[test]
     fn approval_scope_models_sensitive_file_access() {
         let grant = ApprovalGrant {
             id: "grant-1".to_string(),
