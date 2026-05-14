@@ -18,6 +18,7 @@ implemented yet.
 | Doctor command | Shipped | `agentbox doctor` reports daemon, shim, audit, PATH, and provider readiness. |
 | Minipod manifest model | Shipped | `MinipodSpec` models filesystem, network, credentials, resources, services, labels, agent profile, approvals, and task policy bundles. |
 | Manifest policy validation | Shipped | Unsafe host env inheritance, host network mode, and protected mounts are rejected before provider create. |
+| Per-agent policy profiles | Shipped | `general`, `coding`, `research`, `deploy`, and custom profile ids can set policy defaults without hardcoding specific agent products. |
 | Runtime session store | Shipped | Runtime sessions persist to a local JSON store. |
 | Runtime manager | Shipped | Provider create, exec, status refresh, destroy, session persistence, and evidence events share one daemon-owned manager. |
 | Session-scoped approval grants | Shipped | Runtime sessions can carry approval grants that are persisted with the session and removed when the session is destroyed. |

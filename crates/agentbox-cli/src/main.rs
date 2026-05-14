@@ -67,6 +67,10 @@ enum Commands {
         #[arg(long)]
         runtime: Option<String>,
 
+        /// Agent policy profile (general, coding, research, deploy, or custom)
+        #[arg(long = "agent-profile", default_value = "general")]
+        agent_profile: String,
+
         /// Add a service sidecar (postgres, redis, mysql, mongo)
         #[arg(long = "with", num_args = 1..)]
         services: Vec<String>,
@@ -152,6 +156,10 @@ enum Commands {
         /// Workspace directory exposed to the minipod
         #[arg(long)]
         workspace: Option<PathBuf>,
+
+        /// Agent policy profile (general, coding, research, deploy, or custom)
+        #[arg(long = "agent-profile", default_value = "general")]
+        agent_profile: String,
 
         /// Network domain allowed without first-contact approval
         #[arg(long = "allow-domain")]
@@ -803,6 +811,7 @@ fn cmd_install() {
 struct RunOptions {
     command: Vec<String>,
     runtime: Option<String>,
+    agent_profile: String,
     services: Vec<String>,
     mount_cwd: bool,
     memory: u64,
@@ -894,7 +903,8 @@ async fn cmd_run(options: RunOptions) {
         .cloned()
         .or_else(|| options.runtime.clone())
         .unwrap_or_else(|| "agent".to_string());
-    let mut spec = MinipodSpec::for_agent_task(agent_name, workspace);
+    let mut spec =
+        MinipodSpec::for_agent_task_with_profile(agent_name, workspace, options.agent_profile);
     spec.agent.command = if options.command.is_empty() {
         vec!["sleep".to_string(), "infinity".to_string()]
     } else {
@@ -1948,6 +1958,7 @@ fn cmd_session_evidence_bundle(db_path: &PathBuf, session_id: &str, limit: usize
 fn cmd_minipod_spec(
     agent: String,
     workspace: Option<PathBuf>,
+    agent_profile: String,
     allow_domains: Vec<String>,
     read_only_mounts: Vec<String>,
     credential_files: Vec<String>,
@@ -1962,7 +1973,7 @@ fn cmd_minipod_spec(
             std::process::exit(1);
         })
     });
-    let mut spec = MinipodSpec::for_agent_task(agent, workspace);
+    let mut spec = MinipodSpec::for_agent_task_with_profile(agent, workspace, agent_profile);
 
     for bundle_path in policy_bundles {
         let bundle = load_task_policy_bundle(&bundle_path);
@@ -2293,6 +2304,7 @@ async fn main() {
         Commands::Run {
             command,
             runtime,
+            agent_profile,
             services,
             mount_cwd,
             memory,
@@ -2304,6 +2316,7 @@ async fn main() {
             cmd_run(RunOptions {
                 command,
                 runtime,
+                agent_profile,
                 services,
                 mount_cwd,
                 memory,
@@ -2329,6 +2342,7 @@ async fn main() {
         Commands::MinipodSpec {
             agent,
             workspace,
+            agent_profile,
             allow_domains,
             read_only_mounts,
             credential_files,
@@ -2336,6 +2350,7 @@ async fn main() {
         } => cmd_minipod_spec(
             agent,
             workspace,
+            agent_profile,
             allow_domains,
             read_only_mounts,
             credential_files,

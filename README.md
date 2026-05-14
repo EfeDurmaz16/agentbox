@@ -178,6 +178,9 @@ agentbox minipod-spec hermes --workspace . --allow-domain api.openai.com
 # Bind a task-scoped policy bundle into the manifest
 agentbox minipod-spec hermes --workspace . --policy-bundle ./agentbox.task-policy.json
 
+# Select policy defaults by agent role without hardcoding a specific agent brand
+agentbox minipod-spec hermes --workspace . --agent-profile research
+
 # With specific runtime and services
 agentbox run --runtime node --with postgres "npm test"
 

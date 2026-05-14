@@ -31,6 +31,10 @@ pub fn validate_minipod_spec(spec: &MinipodSpec) -> Result<(), RuntimeError> {
         return reject("agent command cannot be empty");
     }
 
+    if spec.policy_profile.id.trim().is_empty() {
+        return reject("agent policy profile id cannot be empty");
+    }
+
     if spec.filesystem.workspace_host_path.as_os_str().is_empty() {
         return reject("workspace host path cannot be empty");
     }
@@ -181,6 +185,16 @@ mod tests {
         let reason = rejection_reason(validate_minipod_spec(&spec));
 
         assert!(reason.contains("host environment"));
+    }
+
+    #[test]
+    fn rejects_empty_agent_policy_profile_id() {
+        let mut spec = spec();
+        spec.policy_profile.id = " ".into();
+
+        let reason = rejection_reason(validate_minipod_spec(&spec));
+
+        assert!(reason.contains("policy profile"));
     }
 
     #[test]

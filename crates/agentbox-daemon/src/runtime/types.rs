@@ -317,6 +317,84 @@ pub struct AgentProfile {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentPolicyProfile {
+    pub id: String,
+    pub description: String,
+    pub network: NetworkPolicy,
+    #[serde(default)]
+    pub labels: HashMap<String, String>,
+}
+
+impl Default for AgentPolicyProfile {
+    fn default() -> Self {
+        Self::named("general")
+    }
+}
+
+impl AgentPolicyProfile {
+    pub fn named(id: impl Into<String>) -> Self {
+        let id = id.into();
+        let normalized = id.trim().to_ascii_lowercase();
+        match normalized.as_str() {
+            "" | "general" => Self::profile(
+                "general",
+                "Conservative default profile for general autonomous agents.",
+                NetworkPolicy::default(),
+            ),
+            "coding" => Self::profile(
+                "coding",
+                "Software engineering agent profile with metadata endpoints denied.",
+                NetworkPolicy {
+                    denied_domains: cloud_metadata_domains(),
+                    ..NetworkPolicy::default()
+                },
+            ),
+            "research" => Self::profile(
+                "research",
+                "Research agent profile that expects first-contact approval for external domains.",
+                NetworkPolicy {
+                    mode: NetworkMode::ApprovalOnFirstContact,
+                    denied_domains: cloud_metadata_domains(),
+                    allow_localhost: false,
+                    ..NetworkPolicy::default()
+                },
+            ),
+            "deploy" => Self::profile(
+                "deploy",
+                "Deployment agent profile with deny-by-default egress and metadata endpoints denied.",
+                NetworkPolicy {
+                    denied_domains: cloud_metadata_domains(),
+                    allow_localhost: false,
+                    ..NetworkPolicy::default()
+                },
+            ),
+            custom => Self::profile(
+                custom,
+                "Custom agent policy profile with conservative defaults.",
+                NetworkPolicy::default(),
+            ),
+        }
+    }
+
+    fn profile(id: &str, description: &str, network: NetworkPolicy) -> Self {
+        Self {
+            id: id.to_string(),
+            description: description.to_string(),
+            network,
+            labels: HashMap::from([("agentbox.policy_profile".into(), id.to_string())]),
+        }
+    }
+}
+
+fn cloud_metadata_domains() -> Vec<String> {
+    vec![
+        "169.254.169.254".into(),
+        "metadata.google.internal".into(),
+        "metadata.aws.internal".into(),
+    ]
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ServiceSpec {
     pub name: String,
     pub image: String,
@@ -328,6 +406,8 @@ pub struct MinipodSpec {
     pub id: String,
     pub name: String,
     pub agent: AgentProfile,
+    #[serde(default)]
+    pub policy_profile: AgentPolicyProfile,
     pub filesystem: FilesystemPolicy,
     pub network: NetworkPolicy,
     pub credentials: CredentialPolicy,
@@ -343,10 +423,19 @@ pub struct MinipodSpec {
 
 impl MinipodSpec {
     pub fn for_agent_task(agent_name: impl Into<String>, workspace: impl Into<PathBuf>) -> Self {
+        Self::for_agent_task_with_profile(agent_name, workspace, "general")
+    }
+
+    pub fn for_agent_task_with_profile(
+        agent_name: impl Into<String>,
+        workspace: impl Into<PathBuf>,
+        policy_profile: impl Into<String>,
+    ) -> Self {
         let id = Ulid::new().to_string().to_lowercase();
         let short = &id[..12];
         let agent_name = agent_name.into();
         let workspace = workspace.into();
+        let policy_profile = AgentPolicyProfile::named(policy_profile);
         let mut labels = HashMap::new();
         labels.insert("agentbox.agent".to_string(), agent_name.clone());
         labels.insert("agentbox.task".to_string(), id.clone());
@@ -363,14 +452,18 @@ impl MinipodSpec {
                 kind: "autonomous-agent".to_string(),
                 command: vec![agent_name],
             },
+            policy_profile: policy_profile.clone(),
             filesystem: FilesystemPolicy::workspace(workspace),
-            network: NetworkPolicy::default(),
+            network: policy_profile.network.clone(),
             credentials: CredentialPolicy::default(),
             resources: ResourcePolicy::default(),
             approvals: vec![],
             policy_bundles: vec![],
             services: vec![],
-            labels,
+            labels: labels
+                .into_iter()
+                .chain(policy_profile.labels.clone())
+                .collect(),
             created_at: Utc::now(),
         }
     }
@@ -571,8 +664,54 @@ mod tests {
         assert_eq!(spec.labels.get("agentbox.agent"), Some(&"openclaw".into()));
         assert_eq!(spec.labels.get("agentbox.task"), Some(&spec.id));
         assert_eq!(
+            spec.labels.get("agentbox.policy_profile"),
+            Some(&"general".into())
+        );
+        assert_eq!(
             spec.labels.get("agentbox.workspace"),
             Some(&"/tmp/agentbox-work".into())
+        );
+    }
+
+    #[test]
+    fn per_agent_policy_profiles_set_network_defaults() {
+        let coding =
+            MinipodSpec::for_agent_task_with_profile("codex", "/tmp/agentbox-work", "coding");
+        let research =
+            MinipodSpec::for_agent_task_with_profile("hermes", "/tmp/agentbox-work", "research");
+        let deploy =
+            MinipodSpec::for_agent_task_with_profile("aspendos", "/tmp/agentbox-work", "deploy");
+
+        assert_eq!(coding.policy_profile.id, "coding");
+        assert!(matches!(coding.network.mode, NetworkMode::DenyByDefault));
+        assert!(coding
+            .network
+            .denied_domains
+            .contains(&"169.254.169.254".into()));
+        assert_eq!(
+            research.labels.get("agentbox.policy_profile"),
+            Some(&"research".into())
+        );
+        assert!(matches!(
+            research.network.mode,
+            NetworkMode::ApprovalOnFirstContact
+        ));
+        assert!(!research.network.allow_localhost);
+        assert_eq!(deploy.policy_profile.id, "deploy");
+        assert!(!deploy.network.allow_localhost);
+    }
+
+    #[test]
+    fn custom_agent_policy_profile_uses_conservative_defaults() {
+        let spec =
+            MinipodSpec::for_agent_task_with_profile("openclaw", "/tmp/agentbox-work", "browser");
+
+        assert_eq!(spec.policy_profile.id, "browser");
+        assert!(matches!(spec.network.mode, NetworkMode::DenyByDefault));
+        assert!(spec.network.denied_domains.is_empty());
+        assert_eq!(
+            spec.labels.get("agentbox.policy_profile"),
+            Some(&"browser".into())
         );
     }
 
@@ -831,6 +970,7 @@ mod tests {
             spec.filesystem.mounts[0].kind,
             MountKind::ReadOnlyHost
         ));
+        assert_eq!(spec.policy_profile.id, "general");
         assert!(spec.approvals.is_empty());
         assert!(spec.policy_bundles.is_empty());
     }
