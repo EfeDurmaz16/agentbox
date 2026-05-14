@@ -226,10 +226,10 @@ async fn handshake(
 async fn create_session(
     State(state): State<Arc<RemoteWorkerState>>,
     Json(request): Json<RemoteAgentPodCreateSessionRequest>,
-) -> Json<RemoteAgentPodCreateSessionResponse> {
+) -> WorkerRouteResult<RemoteAgentPodCreateSessionResponse> {
     let worker_session_id = format!("worker-{}", request.spec.id);
     let workspace_host_path = request.spec.filesystem.workspace_host_path.clone();
-    let _ = tokio::fs::create_dir_all(&workspace_host_path).await;
+    prepare_worker_workspace(&workspace_host_path).await?;
     let session = WorkerSession::new(request.spec.id.clone(), workspace_host_path);
     state
         .sessions
@@ -237,7 +237,7 @@ async fn create_session(
         .await
         .insert(worker_session_id.clone(), session);
     persist_sessions(&state).await;
-    Json(RemoteAgentPodCreateSessionResponse {
+    Ok(Json(RemoteAgentPodCreateSessionResponse {
         session_id: request.spec.id.clone(),
         worker_session_id,
         status: RuntimeStatus::Running,
@@ -245,7 +245,44 @@ async fn create_session(
             RemoteAgentPodLifecycleEvent::WorkerAllocated,
             RemoteAgentPodLifecycleEvent::SessionCreated,
         ],
-    })
+    }))
+}
+
+async fn prepare_worker_workspace(
+    workspace_host_path: &Path,
+) -> Result<(), (StatusCode, Json<WorkerError>)> {
+    tokio::fs::create_dir_all(workspace_host_path)
+        .await
+        .map_err(|err| {
+            worker_error(
+                StatusCode::BAD_REQUEST,
+                format!(
+                    "agentbox remote worker failed to prepare workspace {}: {err}",
+                    workspace_host_path.display()
+                ),
+            )
+        })?;
+    let metadata = tokio::fs::metadata(workspace_host_path)
+        .await
+        .map_err(|err| {
+            worker_error(
+                StatusCode::BAD_REQUEST,
+                format!(
+                    "agentbox remote worker failed to inspect workspace {}: {err}",
+                    workspace_host_path.display()
+                ),
+            )
+        })?;
+    if !metadata.is_dir() {
+        return Err(worker_error(
+            StatusCode::BAD_REQUEST,
+            format!(
+                "agentbox remote worker workspace is not a directory: {}",
+                workspace_host_path.display()
+            ),
+        ));
+    }
+    Ok(())
 }
 
 async fn exec_command(
@@ -620,8 +657,9 @@ mod tests {
     use agentbox_daemon::runtime::providers::remote::{
         Ed25519HandshakeVerifier, RemoteAgentPodAuthKind, RemoteAgentPodDestroySessionRequest,
         RemoteAgentPodEvidenceMode, RemoteAgentPodHandshakeVerifier,
+        RemoteAgentPodTransportDescriptor,
     };
-    use agentbox_daemon::runtime::types::ExecCommand;
+    use agentbox_daemon::runtime::types::{ExecCommand, MinipodSpec};
     use std::collections::HashMap;
 
     fn test_state(config: RemoteWorkerConfig) -> Arc<RemoteWorkerState> {
@@ -638,6 +676,28 @@ mod tests {
         ));
         let _ = std::fs::remove_file(&path);
         path
+    }
+
+    fn create_session_request(workspace: PathBuf) -> RemoteAgentPodCreateSessionRequest {
+        RemoteAgentPodCreateSessionRequest {
+            transport: RemoteAgentPodTransportDescriptor::new(
+                "https://worker.example.com/agentpod",
+                RemoteAgentPodAuthKind::SignedChallenge,
+                RemoteAgentPodEvidenceMode::BundleUpload,
+            )
+            .unwrap(),
+            handshake_ack: RemoteAgentPodHandshakeAck {
+                worker_identity: "worker.local/dev".into(),
+                worker_public_key: "ed25519:placeholder".into(),
+                signed_challenge: "ed25519:placeholder".into(),
+                capabilities: Vec::new(),
+                evidence_endpoint: "https://worker.example.com/agentpod/evidence".into(),
+                lifecycle_ack: true,
+                secret_material_included: false,
+                expires_at: chrono::Utc::now() + Duration::seconds(60),
+            },
+            spec: MinipodSpec::for_agent_task("remote-test-agent", workspace),
+        }
     }
 
     #[tokio::test]
@@ -789,6 +849,28 @@ mod tests {
 
         assert_eq!(response.result.exit_code, 126);
         assert!(response.result.stderr.contains("outside workspace"));
+    }
+
+    #[tokio::test]
+    async fn create_session_rejects_unpreparable_workspace() {
+        let config = RemoteWorkerConfig::new(
+            "worker.local/dev",
+            "https://worker.example.com/agentpod/evidence",
+            SigningKey::from_bytes(&[31_u8; 32]),
+        );
+        let state = test_state(config);
+        let workspace_file = state_file("workspace-file");
+        std::fs::write(&workspace_file, b"not-a-directory").unwrap();
+        let request = create_session_request(workspace_file.clone());
+
+        let err = create_session(State(state.clone()), Json(request))
+            .await
+            .unwrap_err();
+
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+        assert!(err.1 .0.error.contains("failed to prepare workspace"));
+        assert!(state.sessions.lock().await.is_empty());
+        let _ = std::fs::remove_file(workspace_file);
     }
 
     #[tokio::test]

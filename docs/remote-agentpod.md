@@ -166,8 +166,9 @@ When `--state-dir` is set, created sessions, stopped status, and evidence
 receipt metadata are written to `worker-sessions.json` and loaded again when the
 worker starts.
 Worker contract violations such as unknown worker sessions, mismatched session
-ids, stopped-session exec, or invalid evidence metadata return HTTP error
-statuses so the daemon-side transport treats them as rejected remote operations.
+ids, unpreparable workspace paths, stopped-session exec, or invalid evidence
+metadata return HTTP error statuses so the daemon-side transport treats them as
+rejected remote operations.
 
 This is still a contract worker, not the final sandboxed remote execution
 engine. The `exec` route runs the provided argv directly, without invoking a
@@ -175,8 +176,9 @@ shell, and returns exit code, stdout, stderr, duration, and lifecycle evidence.
 Exec now requires a created, running worker session, so the worker will not
 accept an arbitrary `worker_session_id` before `/sessions` has allocated it.
 Each worker session also carries the AgentPod workspace host path from the create
-request. Exec defaults to that workspace and refuses an explicit working
-directory outside it.
+request. The worker prepares that directory during create-session and refuses to
+record a running session if it cannot be created or is not a directory. Exec
+defaults to that workspace and refuses an explicit working directory outside it.
 Evidence upload validates the evidence metadata and records an in-memory receipt
 on the matching worker session before acknowledging the bundle hash and event
 count. With `--state-dir`, those receipts are also persisted in the worker state
