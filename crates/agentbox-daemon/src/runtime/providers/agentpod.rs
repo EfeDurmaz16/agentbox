@@ -6,13 +6,13 @@ use crate::runtime::types::{
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum NativeProviderKind {
+pub enum AgentPodProviderKind {
     MacOs,
     Linux,
     Windows,
 }
 
-impl NativeProviderKind {
+impl AgentPodProviderKind {
     pub fn current_platform_candidate() -> Self {
         if cfg!(target_os = "macos") {
             Self::MacOs
@@ -71,17 +71,17 @@ impl NativeProviderKind {
     }
 }
 
-pub struct NativeProvider {
-    kind: NativeProviderKind,
+pub struct AgentPodProvider {
+    kind: AgentPodProviderKind,
 }
 
-impl NativeProvider {
-    pub fn new(kind: NativeProviderKind) -> Self {
+impl AgentPodProvider {
+    pub fn new(kind: AgentPodProviderKind) -> Self {
         Self { kind }
     }
 
     pub fn current_platform_candidate() -> Self {
-        Self::new(NativeProviderKind::current_platform_candidate())
+        Self::new(AgentPodProviderKind::current_platform_candidate())
     }
 
     fn unavailable(&self) -> RuntimeError {
@@ -93,7 +93,7 @@ impl NativeProvider {
 }
 
 #[async_trait]
-impl RuntimeProvider for NativeProvider {
+impl RuntimeProvider for AgentPodProvider {
     fn name(&self) -> &str {
         self.kind.name()
     }
@@ -143,24 +143,24 @@ mod tests {
     };
 
     #[test]
-    fn native_provider_names_are_explicit() {
+    fn agentpod_provider_names_are_explicit() {
         assert_eq!(
-            NativeProvider::new(NativeProviderKind::MacOs).name(),
+            AgentPodProvider::new(AgentPodProviderKind::MacOs).name(),
             "agentpod-macos"
         );
         assert_eq!(
-            NativeProvider::new(NativeProviderKind::Linux).name(),
+            AgentPodProvider::new(AgentPodProviderKind::Linux).name(),
             "agentpod-linux"
         );
         assert_eq!(
-            NativeProvider::new(NativeProviderKind::Windows).name(),
+            AgentPodProvider::new(AgentPodProviderKind::Windows).name(),
             "agentpod-windows"
         );
     }
 
     #[test]
-    fn native_provider_describes_planned_capabilities() {
-        let macos = NativeProvider::new(NativeProviderKind::MacOs);
+    fn agentpod_provider_describes_planned_capabilities() {
+        let macos = AgentPodProvider::new(AgentPodProviderKind::MacOs);
 
         assert_provider_metadata(
             &macos,
@@ -174,8 +174,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn native_provider_is_not_available_until_enforcement_lands() {
-        let provider = NativeProvider::new(NativeProviderKind::Linux);
+    async fn agentpod_provider_is_not_available_until_enforcement_lands() {
+        let provider = AgentPodProvider::new(AgentPodProviderKind::Linux);
 
         assert_provider_metadata(
             &provider,

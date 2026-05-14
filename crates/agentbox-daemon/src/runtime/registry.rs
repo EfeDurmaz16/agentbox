@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use crate::runtime::provider::{RuntimeError, RuntimeProvider};
-use crate::runtime::providers::native::{NativeProvider, NativeProviderKind};
+use crate::runtime::providers::agentpod::{AgentPodProvider, AgentPodProviderKind};
 use crate::runtime::providers::podman::PodmanRuntimeProvider;
 
 #[derive(Default)]
@@ -54,11 +54,13 @@ impl RuntimeProviderRegistry {
         self.get(name)
     }
 
-    pub fn with_native_descriptors() -> Self {
+    pub fn with_agentpod_descriptors() -> Self {
         let mut registry = Self::new();
-        registry.register(Arc::new(NativeProvider::new(NativeProviderKind::MacOs)));
-        registry.register(Arc::new(NativeProvider::new(NativeProviderKind::Linux)));
-        registry.register(Arc::new(NativeProvider::new(NativeProviderKind::Windows)));
+        registry.register(Arc::new(AgentPodProvider::new(AgentPodProviderKind::MacOs)));
+        registry.register(Arc::new(AgentPodProvider::new(AgentPodProviderKind::Linux)));
+        registry.register(Arc::new(AgentPodProvider::new(
+            AgentPodProviderKind::Windows,
+        )));
         registry
     }
 
@@ -68,9 +70,11 @@ impl RuntimeProviderRegistry {
             agentbox_socket,
             shim_binary,
         )));
-        registry.register(Arc::new(NativeProvider::new(NativeProviderKind::MacOs)));
-        registry.register(Arc::new(NativeProvider::new(NativeProviderKind::Linux)));
-        registry.register(Arc::new(NativeProvider::new(NativeProviderKind::Windows)));
+        registry.register(Arc::new(AgentPodProvider::new(AgentPodProviderKind::MacOs)));
+        registry.register(Arc::new(AgentPodProvider::new(AgentPodProviderKind::Linux)));
+        registry.register(Arc::new(AgentPodProvider::new(
+            AgentPodProviderKind::Windows,
+        )));
         registry
     }
 }
@@ -173,8 +177,8 @@ mod tests {
     }
 
     #[test]
-    fn native_descriptors_are_registered_without_claiming_availability() {
-        let registry = RuntimeProviderRegistry::with_native_descriptors();
+    fn agentpod_descriptors_are_registered_without_claiming_availability() {
+        let registry = RuntimeProviderRegistry::with_agentpod_descriptors();
 
         assert_eq!(
             registry.names(),
@@ -184,7 +188,7 @@ mod tests {
     }
 
     #[test]
-    fn local_provider_set_includes_podman_adapter_and_native_candidates() {
+    fn local_provider_set_includes_podman_adapter_and_agentpod_candidates() {
         let registry = RuntimeProviderRegistry::with_local_providers(
             "/tmp/agentbox.sock".into(),
             "/tmp/agentbox-shim".into(),
