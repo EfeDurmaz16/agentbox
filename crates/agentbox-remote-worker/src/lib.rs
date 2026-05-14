@@ -5,7 +5,8 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use agentbox_daemon::runtime::providers::remote::{
-    Ed25519HandshakeVerifier, RemoteAgentPodCreateSessionRequest,
+    Ed25519HandshakeVerifier, RemoteAgentPodApprovalGrantRequest,
+    RemoteAgentPodApprovalGrantResponse, RemoteAgentPodCreateSessionRequest,
     RemoteAgentPodCreateSessionResponse, RemoteAgentPodDestroySessionRequest,
     RemoteAgentPodDestroySessionResponse, RemoteAgentPodEvidenceStreamChunkRequest,
     RemoteAgentPodEvidenceStreamChunkResponse, RemoteAgentPodEvidenceStreamStatus,
@@ -578,6 +579,10 @@ pub fn router(config: RemoteWorkerConfig) -> Router {
         .route(
             "/sessions/{worker_session_id}/evidence/stream",
             post(upload_evidence_stream_chunk),
+        )
+        .route(
+            "/sessions/{worker_session_id}/approvals/grant",
+            post(grant_approval),
         )
         .route(
             "/sessions/{worker_session_id}/workspace/export",
@@ -1358,6 +1363,26 @@ async fn upload_evidence_stream_chunk(
     }))
 }
 
+async fn grant_approval(
+    State(state): State<Arc<RemoteWorkerState>>,
+    AxumPath(route_worker_session_id): AxumPath<String>,
+    Json(request): Json<RemoteAgentPodApprovalGrantRequest>,
+) -> WorkerRouteResult<RemoteAgentPodApprovalGrantResponse> {
+    require_route_worker_session_id(&route_worker_session_id, &request.worker_session_id)?;
+    request
+        .validate()
+        .map_err(|err| worker_error(StatusCode::BAD_REQUEST, err.to_string()))?;
+    let remaining_pending_approvals = accept_approval_grant(&state, &request).await?;
+    Ok(Json(RemoteAgentPodApprovalGrantResponse {
+        session_id: request.session_id,
+        worker_session_id: request.worker_session_id,
+        request_id: request.request_id,
+        accepted_grant_id: request.grant.id,
+        remaining_pending_approvals,
+        lifecycle_events: vec![RemoteAgentPodLifecycleEvent::EvidenceSealed],
+    }))
+}
+
 async fn evidence_status(
     State(state): State<Arc<RemoteWorkerState>>,
     AxumPath(worker_session_id): AxumPath<String>,
@@ -1934,6 +1959,83 @@ fn worker_evidence_stream_status(
         stream_sha256: stream.stream_sha256.clone(),
         updated_at: stream.updated_at,
     }
+}
+
+async fn accept_approval_grant(
+    state: &Arc<RemoteWorkerState>,
+    request: &RemoteAgentPodApprovalGrantRequest,
+) -> Result<u64, (StatusCode, Json<WorkerError>)> {
+    let mut sessions = state.sessions.lock().await;
+    let session = get_matching_session_mut(
+        &mut sessions,
+        &request.worker_session_id,
+        &request.session_id,
+    )?;
+    let Some(index) = session
+        .pending_approvals
+        .iter()
+        .position(|approval| approval.request_id == request.request_id)
+    else {
+        return Err(worker_error(
+            StatusCode::NOT_FOUND,
+            "agentbox remote worker pending approval request was not found",
+        ));
+    };
+    let pending = &session.pending_approvals[index];
+    ensure_grant_matches_pending_approval(&request.grant, pending)?;
+    if !session
+        .approval_grants
+        .iter()
+        .any(|grant| grant.id == request.grant.id)
+    {
+        session
+            .approval_grants
+            .push(request.grant.clone().bound_to_session(&request.session_id));
+    }
+    session.pending_approvals.remove(index);
+    let remaining = session
+        .pending_approvals
+        .len()
+        .try_into()
+        .unwrap_or(u64::MAX);
+    drop(sessions);
+    persist_sessions(state).await.map_err(worker_state_error)?;
+    Ok(remaining)
+}
+
+fn ensure_grant_matches_pending_approval(
+    grant: &ApprovalGrant,
+    pending: &WorkerPendingApproval,
+) -> Result<(), (StatusCode, Json<WorkerError>)> {
+    let ApprovalScope::Command {
+        binary,
+        args_prefix,
+    } = &grant.scope
+    else {
+        return Err(worker_error(
+            StatusCode::BAD_REQUEST,
+            "agentbox remote worker only accepts command-scope approval grants",
+        ));
+    };
+    if pending.command_argv.first() != Some(binary) {
+        return Err(worker_error(
+            StatusCode::BAD_REQUEST,
+            "agentbox remote worker approval grant binary does not match pending command",
+        ));
+    }
+    let pending_args = pending
+        .command_argv
+        .iter()
+        .skip(1)
+        .cloned()
+        .collect::<Vec<_>>();
+    if !pending_args.starts_with(args_prefix) {
+        return Err(worker_error(
+            StatusCode::BAD_REQUEST,
+            "agentbox remote worker approval grant args do not match pending command",
+        ));
+    }
+    Ok(())
 }
 
 fn worker_pending_approval_status(
@@ -2740,6 +2842,112 @@ mod tests {
             vec!["curl", "https://approval.example.com"]
         );
         assert!(!approvals[0].reason.is_empty());
+    }
+
+    #[tokio::test]
+    async fn grant_approval_accepts_pending_command_scope_grant() {
+        let config = RemoteWorkerConfig::new(
+            "worker.local/dev",
+            "https://worker.example.com/agentpod/evidence",
+            SigningKey::from_bytes(&[49_u8; 32]),
+        );
+        let state = test_state(config);
+        let mut session = WorkerSession::new(
+            "session-1".into(),
+            std::env::temp_dir(),
+            WorkerPolicy::default(),
+        );
+        session.pending_approvals.push(WorkerPendingApproval {
+            request_id: "approval-1".into(),
+            command_argv: vec!["curl".into(), "https://approval.example.com".into()],
+            reason: "first contact".into(),
+            created_at: Utc::now(),
+        });
+        state
+            .sessions
+            .lock()
+            .await
+            .insert("worker-session-1".into(), session);
+
+        let response = grant_approval(
+            State(state.clone()),
+            worker_session_path(),
+            Json(RemoteAgentPodApprovalGrantRequest {
+                session_id: "session-1".into(),
+                worker_session_id: "worker-session-1".into(),
+                request_id: "approval-1".into(),
+                grant: ApprovalGrant {
+                    id: "grant-1".into(),
+                    scope: ApprovalScope::Command {
+                        binary: "curl".into(),
+                        args_prefix: vec!["https://approval.example.com".into()],
+                    },
+                    reason: "operator approved".into(),
+                    expires_at: None,
+                },
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+
+        assert_eq!(response.accepted_grant_id, "grant-1");
+        assert_eq!(response.remaining_pending_approvals, 0);
+        let sessions = state.sessions.lock().await;
+        let session = sessions.get("worker-session-1").unwrap();
+        assert!(session.pending_approvals.is_empty());
+        assert_eq!(session.approval_grants.len(), 1);
+        assert_eq!(session.approval_grants[0].id, "grant-1");
+    }
+
+    #[tokio::test]
+    async fn grant_approval_rejects_mismatched_pending_command() {
+        let config = RemoteWorkerConfig::new(
+            "worker.local/dev",
+            "https://worker.example.com/agentpod/evidence",
+            SigningKey::from_bytes(&[50_u8; 32]),
+        );
+        let state = test_state(config);
+        let mut session = WorkerSession::new(
+            "session-1".into(),
+            std::env::temp_dir(),
+            WorkerPolicy::default(),
+        );
+        session.pending_approvals.push(WorkerPendingApproval {
+            request_id: "approval-1".into(),
+            command_argv: vec!["curl".into(), "https://approval.example.com".into()],
+            reason: "first contact".into(),
+            created_at: Utc::now(),
+        });
+        state
+            .sessions
+            .lock()
+            .await
+            .insert("worker-session-1".into(), session);
+
+        let err = grant_approval(
+            State(state),
+            worker_session_path(),
+            Json(RemoteAgentPodApprovalGrantRequest {
+                session_id: "session-1".into(),
+                worker_session_id: "worker-session-1".into(),
+                request_id: "approval-1".into(),
+                grant: ApprovalGrant {
+                    id: "grant-1".into(),
+                    scope: ApprovalScope::Command {
+                        binary: "rm".into(),
+                        args_prefix: Vec::new(),
+                    },
+                    reason: "operator approved".into(),
+                    expires_at: None,
+                },
+            }),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+        assert!(err.1 .0.error.contains("does not match"));
     }
 
     #[test]

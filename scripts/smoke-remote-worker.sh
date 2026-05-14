@@ -248,6 +248,110 @@ assert "unknown.example.com" in data["result"]["stderr"]
 assert "EvidenceSealed" in data["lifecycle_events"]
 PY
 
+mkdir -p "$TMPDIR/approval-workspace"
+cargo run --locked -q -p agentbox-cli -- minipod-spec remote-approval-smoke \
+  --risk medium \
+  --workspace "$TMPDIR/approval-workspace" \
+  --network-mode first-contact \
+  >"$TMPDIR/approval-spec.json"
+python3 - "$TMPDIR/approval-spec.json" "$TMPDIR/handshake-ack.json" >"$TMPDIR/approval-create-request.json" <<'PY'
+import json
+import sys
+from datetime import datetime, timezone
+
+with open(sys.argv[1], "r", encoding="utf-8") as fh:
+    spec = json.load(fh)
+with open(sys.argv[2], "r", encoding="utf-8") as fh:
+    handshake_ack = json.load(fh)
+
+now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+json.dump({
+    "transport": {
+        "schema_version": 1,
+        "provider": "remote-agentpod",
+        "endpoint": "https://worker.example.com/agentpod",
+        "auth_kind": "SignedChallenge",
+        "evidence_mode": "BundleUpload",
+        "kill_switch_required": True,
+        "secret_material_included": False,
+        "lifecycle": {
+            "schema_version": 1,
+            "create_timeout_seconds": 120,
+            "command_timeout_seconds": 3600,
+            "idle_timeout_seconds": 300,
+            "destroy_timeout_seconds": 60,
+            "required_events": [
+                "WorkerAllocated",
+                "SessionCreated",
+                "CommandStarted",
+                "CommandFinished",
+                "EvidenceSealed",
+                "KillSwitchAck",
+                "WorkerDestroyed",
+            ],
+            "kill_switch_required": True,
+        },
+        "created_at": now,
+    },
+    "handshake_ack": handshake_ack,
+    "spec": spec,
+}, sys.stdout)
+PY
+
+curl -fsS "http://127.0.0.1:${PORT}/sessions" \
+  -H 'content-type: application/json' \
+  --data @"$TMPDIR/approval-create-request.json" \
+  >"$TMPDIR/approval-create-response.json"
+APPROVAL_SESSION_ID="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["session_id"])' "$TMPDIR/approval-create-response.json")"
+APPROVAL_WORKER_SESSION_ID="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["worker_session_id"])' "$TMPDIR/approval-create-response.json")"
+
+curl -fsS "http://127.0.0.1:${PORT}/sessions/${APPROVAL_WORKER_SESSION_ID}/exec" \
+  -H 'content-type: application/json' \
+  --data "{\"session_id\":\"${APPROVAL_SESSION_ID}\",\"worker_session_id\":\"${APPROVAL_WORKER_SESSION_ID}\",\"command\":{\"argv\":[\"curl\",\"https://approval.example.com\"],\"working_dir\":null,\"env\":{},\"timeout_seconds\":1}}" \
+  >"$TMPDIR/approval-exec-response.json"
+curl -fsS "http://127.0.0.1:${PORT}/sessions/${APPROVAL_WORKER_SESSION_ID}/evidence/status?session_id=${APPROVAL_SESSION_ID}" \
+  >"$TMPDIR/approval-status-before.json"
+APPROVAL_REQUEST_ID="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["pending_approvals"][0]["request_id"])' "$TMPDIR/approval-status-before.json")"
+
+AGENTBOX_REMOTE_AGENTPOD_ALLOW_HTTP_LOOPBACK=1 \
+"$ROOT/target/debug/agentbox-cli" remote-approval-grant \
+  --endpoint "http://127.0.0.1:${PORT}" \
+  --session "$APPROVAL_SESSION_ID" \
+  --worker-session "$APPROVAL_WORKER_SESSION_ID" \
+  --request "$APPROVAL_REQUEST_ID" \
+  --ttl-seconds 60 \
+  >"$TMPDIR/approval-grant-response.json"
+
+curl -fsS "http://127.0.0.1:${PORT}/sessions/${APPROVAL_WORKER_SESSION_ID}/exec" \
+  -H 'content-type: application/json' \
+  --data "{\"session_id\":\"${APPROVAL_SESSION_ID}\",\"worker_session_id\":\"${APPROVAL_WORKER_SESSION_ID}\",\"command\":{\"argv\":[\"curl\",\"https://approval.example.com\"],\"working_dir\":null,\"env\":{},\"timeout_seconds\":1}}" \
+  >"$TMPDIR/approval-exec-after-grant-response.json"
+curl -fsS "http://127.0.0.1:${PORT}/sessions/${APPROVAL_WORKER_SESSION_ID}/evidence/status?session_id=${APPROVAL_SESSION_ID}" \
+  >"$TMPDIR/approval-status-after.json"
+
+python3 - "$TMPDIR/approval-exec-response.json" "$TMPDIR/approval-status-before.json" "$TMPDIR/approval-grant-response.json" "$TMPDIR/approval-exec-after-grant-response.json" "$TMPDIR/approval-status-after.json" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], "r", encoding="utf-8") as fh:
+    before_exec = json.load(fh)
+with open(sys.argv[2], "r", encoding="utf-8") as fh:
+    before_status = json.load(fh)
+with open(sys.argv[3], "r", encoding="utf-8") as fh:
+    grant = json.load(fh)
+with open(sys.argv[4], "r", encoding="utf-8") as fh:
+    after_exec = json.load(fh)
+with open(sys.argv[5], "r", encoding="utf-8") as fh:
+    after_status = json.load(fh)
+
+assert before_exec["result"]["exit_code"] == 126
+assert "policy denied" in before_exec["result"]["stderr"]
+assert before_status["pending_approvals"]
+assert grant["remaining_pending_approvals"] == 0
+assert after_status["pending_approvals"] == []
+assert "policy denied" not in after_exec["result"]["stderr"]
+PY
+
 printf 'worker export smoke\n' >"$TMPDIR/workspace/export.txt"
 curl -fsS "http://127.0.0.1:${PORT}/sessions/${WORKER_SESSION_ID}/workspace/export?session_id=${SESSION_ID}" \
   >"$TMPDIR/workspace-export-response.json"

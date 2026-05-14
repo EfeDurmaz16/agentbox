@@ -459,6 +459,32 @@ enum Commands {
         #[arg(long = "chunk-bytes", default_value_t = 65536)]
         chunk_bytes: usize,
     },
+    /// Grant a pending remote AgentPod command approval
+    RemoteApprovalGrant {
+        /// Remote worker endpoint, e.g. https://worker.example.com/agentpod
+        #[arg(long)]
+        endpoint: String,
+
+        /// Agentbox session id
+        #[arg(long = "session")]
+        session_id: String,
+
+        /// Worker-side session id
+        #[arg(long = "worker-session")]
+        worker_session_id: String,
+
+        /// Pending approval request id from remote-evidence-status
+        #[arg(long = "request")]
+        request_id: String,
+
+        /// Optional grant reason
+        #[arg(long, default_value = "operator approved pending remote command")]
+        reason: String,
+
+        /// Optional grant expiry in seconds
+        #[arg(long = "ttl-seconds")]
+        ttl_seconds: Option<i64>,
+    },
     /// Export a remote AgentPod worker workspace into a local review directory
     RemoteWorkspaceExport {
         /// Remote worker endpoint, e.g. https://worker.example.com/agentpod
@@ -4551,6 +4577,98 @@ async fn cmd_remote_evidence_stream(
     );
 }
 
+async fn cmd_remote_approval_grant(
+    endpoint: String,
+    session_id: String,
+    worker_session_id: String,
+    request_id: String,
+    reason: String,
+    ttl_seconds: Option<i64>,
+) {
+    use agentbox_daemon::runtime::providers::remote::{
+        HttpRemoteAgentPodTransport, RemoteAgentPodApprovalGrantRequest,
+        RemoteAgentPodEvidenceStatusRequest, RemoteAgentPodTransport,
+    };
+    use agentbox_daemon::runtime::types::{ApprovalGrant, ApprovalScope};
+
+    let transport = HttpRemoteAgentPodTransport::new(endpoint).unwrap_or_else(|e| {
+        eprintln!(
+            "error: failed to build remote AgentPod approval grant transport: {}",
+            e
+        );
+        std::process::exit(1);
+    });
+    let status_request = RemoteAgentPodEvidenceStatusRequest {
+        session_id: session_id.clone(),
+        worker_session_id: worker_session_id.clone(),
+    };
+    let status = transport
+        .evidence_status(status_request)
+        .await
+        .unwrap_or_else(|e| {
+            eprintln!(
+                "error: failed to query remote AgentPod pending approvals: {}",
+                e
+            );
+            std::process::exit(1);
+        });
+    let Some(pending) = status
+        .pending_approvals
+        .iter()
+        .find(|approval| approval.request_id == request_id)
+    else {
+        eprintln!("error: pending remote AgentPod approval request was not found");
+        std::process::exit(1);
+    };
+    let Some(binary) = pending.command_argv.first().cloned() else {
+        eprintln!("error: pending remote AgentPod approval has no command binary");
+        std::process::exit(1);
+    };
+    let args_prefix = pending.command_argv.iter().skip(1).cloned().collect();
+    let expires_at = ttl_seconds.map(|seconds| {
+        if seconds <= 0 {
+            eprintln!("error: --ttl-seconds must be greater than zero");
+            std::process::exit(1);
+        }
+        chrono::Utc::now() + chrono::Duration::seconds(seconds)
+    });
+    let grant = ApprovalGrant {
+        id: format!(
+            "grant-remote-command-{}",
+            ulid::Ulid::new().to_string().to_lowercase()
+        ),
+        scope: ApprovalScope::Command {
+            binary,
+            args_prefix,
+        },
+        reason,
+        expires_at,
+    };
+    let request = RemoteAgentPodApprovalGrantRequest {
+        session_id,
+        worker_session_id,
+        request_id,
+        grant,
+    };
+    request.validate().unwrap_or_else(|e| {
+        eprintln!(
+            "error: failed to build remote AgentPod approval grant request: {}",
+            e
+        );
+        std::process::exit(1);
+    });
+    let response = transport.grant_approval(request).await.unwrap_or_else(|e| {
+        eprintln!("error: failed to grant remote AgentPod approval: {}", e);
+        std::process::exit(1);
+    });
+
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&response)
+            .expect("failed to serialize remote AgentPod approval grant response")
+    );
+}
+
 async fn cmd_remote_workspace_export(
     endpoint: String,
     session_id: String,
@@ -5395,6 +5513,24 @@ async fn main() {
                 stream_id,
                 file,
                 chunk_bytes,
+            )
+            .await
+        }
+        Commands::RemoteApprovalGrant {
+            endpoint,
+            session_id,
+            worker_session_id,
+            request_id,
+            reason,
+            ttl_seconds,
+        } => {
+            cmd_remote_approval_grant(
+                endpoint,
+                session_id,
+                worker_session_id,
+                request_id,
+                reason,
+                ttl_seconds,
             )
             .await
         }

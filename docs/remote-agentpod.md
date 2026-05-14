@@ -161,6 +161,23 @@ The command splits on UTF-8 character boundaries, sends monotonically ordered
 chunks with byte offsets and per-chunk SHA-256 hashes, marks the final chunk,
 and prints the worker acknowledgements plus the sealed stream SHA-256.
 
+Pending command approvals can be resolved explicitly with a command-scope grant:
+
+```sh
+agentbox remote-approval-grant \
+  --endpoint https://worker.example.com/agentpod \
+  --session agentbox-session-id \
+  --worker-session worker-session-id \
+  --request approval-request-id \
+  --ttl-seconds 300
+```
+
+The CLI first reads the worker evidence status, finds the pending request, and
+derives a command-scope grant from the blocked argv. The worker accepts the
+grant only when it matches the pending command, removes the pending request, and
+uses that grant on later exec calls. It does not mint broad session grants or
+consume `Once` grants.
+
 Workers can also export the current session workspace as a verified pullback
 bundle. The CLI validates the worker response, materializes the files into a
 local review directory, and writes `agentbox-workspace-export.json` with the
@@ -293,11 +310,11 @@ without being spawned. Approval-required commands can run only when the
 session manifest already carries a matching, non-expired approval grant for the
 command, path, domain, or session. `Once` approval grants are deliberately not
 honored by the worker yet because the worker cannot safely synchronize one-time
-grant consumption back to the daemon. Dynamic worker-side approval prompts are
-still future work, but approval-required commands without a matching grant now
-record pending approval metadata on the worker session so the operator can see
-the blocked command and policy reason through status instead of losing that
-intent.
+grant consumption back to the daemon. Approval-required commands without a
+matching grant record pending approval metadata on the worker session. The
+operator can then submit an explicit command-scope grant through the CLI. Rich
+interactive approval prompts, signatures, and grant revocation synchronization
+are still future work.
 Evidence upload validates the evidence metadata and records an in-memory receipt
 on the matching worker session before acknowledging the bundle hash and event
 count. With `--state-dir`, those receipts are also persisted in the worker state
@@ -336,8 +353,8 @@ worker evidence-status route instead of treating remote status as unavailable.
 Workspace materialization, workspace export, local apply, worker-side command
 policy, manifest-bound worker approval grants, command supervision counters, and
 session-bound env credential handoff now exist as governed flows. Ordered
-evidence stream chunks and pending approval status also exist at the worker
-contract layer. Dynamic approval resolution prompts, file/socket/provider-token
+evidence stream chunks and command-scope pending approval resolution also exist
+at the worker contract layer. Rich approval prompts, file/socket/provider-token
 credential handoff, full evidence event streaming, supervised worker restarts,
 and merge/conflict UX beyond overwrite protection remain future work.
 
@@ -350,7 +367,8 @@ exports the worker workspace through both direct HTTP and the CLI pullback
 command, applies the pulled workspace to a local directory, uploads a bundle
 metadata receipt, verifies the returned lifecycle evidence, uploads and verifies
 a hash-bound bundle payload, uploads ordered evidence stream chunks through the
-CLI and verifies the sealed stream hash, restarts the worker to prove persisted
+CLI and verifies the sealed stream hash, records and grants a pending
+command-scope approval through the CLI, restarts the worker to prove persisted
 session reload, then starts a long-running command and proves destroy sends a
 kill signal that returns exit code `130` plus `KillSwitchAck`.
 

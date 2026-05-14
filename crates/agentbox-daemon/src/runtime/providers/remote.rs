@@ -14,8 +14,8 @@ use crate::runtime::provider::{
     ProviderFamily, ProviderImplementationStatus, RuntimeError, RuntimeProvider,
 };
 use crate::runtime::types::{
-    CommandResult, ExecCommand, MinipodSpec, RuntimeCapability, RuntimeSession, RuntimeStatus,
-    SessionEvidenceBundle,
+    ApprovalGrant, ApprovalScope, CommandResult, ExecCommand, MinipodSpec, RuntimeCapability,
+    RuntimeSession, RuntimeStatus, SessionEvidenceBundle,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -992,6 +992,85 @@ impl RemoteAgentPodPendingApprovalStatus {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteAgentPodApprovalGrantRequest {
+    pub session_id: String,
+    pub worker_session_id: String,
+    pub request_id: String,
+    pub grant: ApprovalGrant,
+}
+
+impl RemoteAgentPodApprovalGrantRequest {
+    pub fn validate(&self) -> Result<(), RuntimeError> {
+        if self.session_id.trim().is_empty()
+            || self.worker_session_id.trim().is_empty()
+            || self.request_id.trim().is_empty()
+        {
+            return Err(RuntimeError::ManifestRejected(
+                "remote approval grant request must include session ids and request id".into(),
+            ));
+        }
+        if self.grant.id.trim().is_empty() || self.grant.reason.trim().is_empty() {
+            return Err(RuntimeError::ManifestRejected(
+                "remote approval grant request must include grant id and reason".into(),
+            ));
+        }
+        if self.grant.is_expired_at(Utc::now()) {
+            return Err(RuntimeError::ManifestRejected(
+                "remote approval grant request cannot submit an expired grant".into(),
+            ));
+        }
+        match &self.grant.scope {
+            ApprovalScope::Command { binary, .. } if binary.trim().is_empty() => {
+                Err(RuntimeError::ManifestRejected(
+                    "remote approval command grant must include binary".into(),
+                ))
+            }
+            ApprovalScope::Command { .. } => Ok(()),
+            _ => Err(RuntimeError::ManifestRejected(
+                "remote approval grant request currently accepts only command-scope grants".into(),
+            )),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteAgentPodApprovalGrantResponse {
+    pub session_id: String,
+    pub worker_session_id: String,
+    pub request_id: String,
+    pub accepted_grant_id: String,
+    pub remaining_pending_approvals: u64,
+    pub lifecycle_events: Vec<RemoteAgentPodLifecycleEvent>,
+}
+
+impl RemoteAgentPodApprovalGrantResponse {
+    pub fn validate_for(
+        &self,
+        request: &RemoteAgentPodApprovalGrantRequest,
+    ) -> Result<(), RuntimeError> {
+        request.validate()?;
+        if self.session_id != request.session_id
+            || self.worker_session_id != request.worker_session_id
+            || self.request_id != request.request_id
+        {
+            return Err(RuntimeError::ManifestRejected(
+                "remote approval grant response ids do not match request".into(),
+            ));
+        }
+        if self.accepted_grant_id != request.grant.id {
+            return Err(RuntimeError::ManifestRejected(
+                "remote approval grant response must acknowledge submitted grant".into(),
+            ));
+        }
+        require_lifecycle_events(
+            &self.lifecycle_events,
+            &[RemoteAgentPodLifecycleEvent::EvidenceSealed],
+            "approval grant response",
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RemoteAgentPodEvidenceStreamChunkRequest {
     pub session_id: String,
     pub worker_session_id: String,
@@ -1225,6 +1304,11 @@ pub trait RemoteAgentPodTransport: Send + Sync {
         &self,
         request: RemoteAgentPodEvidenceStreamChunkRequest,
     ) -> Result<RemoteAgentPodEvidenceStreamChunkResponse, RuntimeError>;
+
+    async fn grant_approval(
+        &self,
+        request: RemoteAgentPodApprovalGrantRequest,
+    ) -> Result<RemoteAgentPodApprovalGrantResponse, RuntimeError>;
 
     async fn export_workspace(
         &self,
@@ -1487,6 +1571,38 @@ impl RemoteAgentPodTransport for HttpRemoteAgentPodTransport {
             .map_err(|err| {
                 RuntimeError::ManifestRejected(format!(
                     "remote evidence stream response was invalid JSON: {err}"
+                ))
+            })?;
+        response.validate_for(&request)?;
+        Ok(response)
+    }
+
+    async fn grant_approval(
+        &self,
+        request: RemoteAgentPodApprovalGrantRequest,
+    ) -> Result<RemoteAgentPodApprovalGrantResponse, RuntimeError> {
+        request.validate()?;
+        let response = self
+            .client
+            .post(self.route(format!(
+                "sessions/{}/approvals/grant",
+                request.worker_session_id
+            )))
+            .json(&request)
+            .send()
+            .await
+            .map_err(|err| {
+                RuntimeError::Unavailable(format!("remote approval grant failed: {err}"))
+            })?
+            .error_for_status()
+            .map_err(|err| {
+                RuntimeError::Unavailable(format!("remote approval grant rejected: {err}"))
+            })?
+            .json::<RemoteAgentPodApprovalGrantResponse>()
+            .await
+            .map_err(|err| {
+                RuntimeError::ManifestRejected(format!(
+                    "remote approval grant response was invalid JSON: {err}"
                 ))
             })?;
         response.validate_for(&request)?;
@@ -2472,6 +2588,22 @@ mod tests {
                 stream_sha256: request
                     .final_chunk
                     .then(|| sha256_hex(request.chunk_utf8.as_bytes())),
+                lifecycle_events: vec![RemoteAgentPodLifecycleEvent::EvidenceSealed],
+            };
+            response.validate_for(&request)?;
+            Ok(response)
+        }
+
+        async fn grant_approval(
+            &self,
+            request: RemoteAgentPodApprovalGrantRequest,
+        ) -> Result<RemoteAgentPodApprovalGrantResponse, RuntimeError> {
+            let response = RemoteAgentPodApprovalGrantResponse {
+                session_id: request.session_id.clone(),
+                worker_session_id: request.worker_session_id.clone(),
+                request_id: request.request_id.clone(),
+                accepted_grant_id: request.grant.id.clone(),
+                remaining_pending_approvals: 0,
                 lifecycle_events: vec![RemoteAgentPodLifecycleEvent::EvidenceSealed],
             };
             response.validate_for(&request)?;
