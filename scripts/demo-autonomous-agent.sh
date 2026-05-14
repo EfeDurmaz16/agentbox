@@ -19,11 +19,13 @@ else
   cleanup_workspace=0
   mkdir -p "$WORKSPACE"
 fi
+OVERLAY_DIR="$(mktemp -d "${TMPDIR:-/tmp}/agentbox-agent-demo-overlay.XXXXXX")"
 
 cleanup() {
   if [[ "$cleanup_workspace" -eq 1 ]]; then
     rm -rf "$WORKSPACE"
   fi
+  rm -rf "$OVERLAY_DIR"
 }
 trap cleanup EXIT
 
@@ -56,6 +58,7 @@ printf 'workspace: %s\n' "$WORKSPACE"
 log "generating governed minipod manifest"
 "${CLI[@]}" minipod-spec "$AGENT_NAME" \
   --workspace "$WORKSPACE" \
+  --workspace-overlay-dir "$OVERLAY_DIR" \
   --agent-profile research \
   --network-mode first-contact \
   --allow-domain api.openai.com \
@@ -65,6 +68,17 @@ log "generating governed minipod manifest"
   --credential-file "demo-token=$WORKSPACE/secrets/demo-token:/run/agentbox/secrets/demo-token" \
   --policy-bundle "$POLICY_BUNDLE"
 
+log "showing local policy decisions"
+"${CLI[@]}" policy-simulate -- git commit -m demo
+"${CLI[@]}" policy-simulate -- curl https://metadata.google.internal/latest/meta-data
+"${CLI[@]}" policy-simulate -- git push origin main
+"${CLI[@]}" policy-simulate -- rm -rf /
+
+log "exporting local evidence if an audit log exists"
+if ! "${CLI[@]}" evidence --limit 5; then
+  printf 'No local audit log is available yet. Start the daemon and run guarded commands to populate evidence.\n'
+fi
+
 log "showing provider honesty"
 "${CLI[@]}" providers
 
@@ -73,7 +87,10 @@ cat <<'TEXT'
 Demo interpretation:
 - This does not require OpenClaw or Hermes to be installed.
 - The manifest shape is the contract those agents should run under.
+- The workspace overlay is manifest policy only until a provider wires real overlay mounts.
 - Credential access is explicit, not inherited from the host environment.
-- Unknown network contact requires approval; one high-risk metadata endpoint is denied.
+- Local policy simulation shows allow, approve, and block decisions without executing the commands.
+- Evidence export reads the local audit log when one exists; it does not fake events.
+- Unknown network contact requires approval; one high-risk metadata endpoint is denied in the manifest.
 - Native AgentPod providers still report unavailable until enforcement is proven.
 TEXT
