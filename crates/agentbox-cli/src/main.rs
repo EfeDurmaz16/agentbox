@@ -81,6 +81,10 @@ enum Commands {
         /// Add a read-only host mount as host_path:guest_path
         #[arg(long = "mount-ro")]
         read_only_mounts: Vec<String>,
+
+        /// Network domain allowed without first-contact approval
+        #[arg(long = "allow-domain")]
+        allow_domains: Vec<String>,
     },
     /// Stop and remove a minipod
     StopPod {
@@ -767,6 +771,7 @@ async fn cmd_run(
     mount_cwd: bool,
     memory: u64,
     read_only_mounts: Vec<String>,
+    allow_domains: Vec<String>,
 ) {
     use agentbox_daemon::audit::AuditStore;
     use agentbox_daemon::config;
@@ -774,7 +779,7 @@ async fn cmd_run(
     use agentbox_daemon::runtime::manager::RuntimeManager;
     use agentbox_daemon::runtime::registry::RuntimeProviderRegistry;
     use agentbox_daemon::runtime::session::RuntimeSessionStore;
-    use agentbox_daemon::runtime::types::{ExecCommand, MinipodSpec, ResourcePolicy};
+    use agentbox_daemon::runtime::types::{ExecCommand, MinipodSpec, NetworkMode, ResourcePolicy};
 
     // 1. Check whether the current compatibility backend is available.
     match Command::new("podman").arg("--version").output() {
@@ -872,6 +877,10 @@ async fn cmd_run(
         .collect();
     for mount in read_only_mounts {
         spec.filesystem.mounts.push(parse_read_only_mount(&mount));
+    }
+    if !allow_domains.is_empty() {
+        spec.network.mode = NetworkMode::AllowListed;
+        spec.network.allowed_domains = allow_domains;
     }
 
     // 5. Print progress and create minipod through RuntimeManager
@@ -1970,6 +1979,7 @@ async fn main() {
             mount_cwd,
             memory,
             read_only_mounts,
+            allow_domains,
         } => {
             cmd_run(
                 command,
@@ -1978,6 +1988,7 @@ async fn main() {
                 mount_cwd,
                 memory,
                 read_only_mounts,
+                allow_domains,
             )
             .await
         }
