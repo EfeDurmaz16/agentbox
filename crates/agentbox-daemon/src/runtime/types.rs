@@ -248,6 +248,49 @@ pub struct ApprovalGrant {
     pub expires_at: Option<DateTime<Utc>>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApprovalSignature {
+    pub signer: String,
+    pub algorithm: String,
+    pub signature: String,
+    pub signed_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SignedApprovalRecord {
+    pub schema_version: i64,
+    pub grant_id: String,
+    pub session_id: Option<String>,
+    pub scope: ApprovalScope,
+    pub reason: String,
+    pub expires_at: Option<DateTime<Utc>>,
+    pub evidence_refs: Vec<String>,
+    pub signature: Option<ApprovalSignature>,
+}
+
+impl SignedApprovalRecord {
+    pub fn unsigned_from_grant(
+        grant: &ApprovalGrant,
+        session_id: Option<String>,
+        evidence_refs: Vec<String>,
+    ) -> Self {
+        Self {
+            schema_version: 1,
+            grant_id: grant.id.clone(),
+            session_id,
+            scope: grant.scope.clone(),
+            reason: grant.reason.clone(),
+            expires_at: grant.expires_at,
+            evidence_refs,
+            signature: None,
+        }
+    }
+
+    pub fn is_signed(&self) -> bool {
+        self.signature.is_some()
+    }
+}
+
 impl ApprovalGrant {
     pub fn is_expired_at(&self, now: DateTime<Utc>) -> bool {
         self.expires_at.is_some_and(|expires_at| expires_at <= now)
@@ -1154,6 +1197,40 @@ mod tests {
         let decoded: Vec<ApprovalScope> = serde_json::from_str(&encoded).unwrap();
 
         assert_eq!(decoded, scopes);
+    }
+
+    #[test]
+    fn signed_approval_record_models_unsigned_and_signed_states() {
+        let grant = ApprovalGrant {
+            id: "grant-git-push".into(),
+            scope: ApprovalScope::Command {
+                binary: "git".into(),
+                args_prefix: vec!["push".into()],
+            },
+            reason: "operator approved git push".into(),
+            expires_at: None,
+        };
+
+        let mut record = SignedApprovalRecord::unsigned_from_grant(
+            &grant,
+            Some("01agentboxsession".into()),
+            vec!["audit-event-1".into()],
+        );
+
+        assert_eq!(record.schema_version, 1);
+        assert_eq!(record.grant_id, grant.id);
+        assert_eq!(record.session_id.as_deref(), Some("01agentboxsession"));
+        assert_eq!(record.evidence_refs, vec!["audit-event-1"]);
+        assert!(!record.is_signed());
+
+        record.signature = Some(ApprovalSignature {
+            signer: "did:fides:agentbox-authority".into(),
+            algorithm: "ed25519".into(),
+            signature: "base64url-signature-placeholder".into(),
+            signed_at: Utc::now(),
+        });
+
+        assert!(record.is_signed());
     }
 
     #[test]
