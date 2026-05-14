@@ -46,7 +46,7 @@ implemented yet.
 |---------|--------|-------|
 | Direct host with shims | Shipped | Strongest validated path today. It governs host-impacting shell commands but does not isolate all process behavior. |
 | AgentPod macOS | Descriptor only | Candidate surfaces include Apple Virtualization for local cells, Endpoint Security for host-event enforcement, and Network Extension for egress governance. Execution intentionally returns unavailable. See [Endpoint Security design](macos-endpoint-security.md) and [system extension scaffold](macos-system-extension-scaffold.md). |
-| AgentPod Linux | Prototype primitives | Candidate surfaces include namespaces, cgroups, Landlock, seccomp, eBPF, nftables, and overlayfs. Linux-only user, mount, PID namespace, cgroups v2, seccomp, Landlock, and isolation benchmark primitives exist, but provider execution intentionally remains unavailable until the full boundary is wired and verified. |
+| AgentPod Linux | Prototype primitives | Candidate surfaces include namespaces, cgroups, Landlock, seccomp, eBPF, nftables, and overlayfs. Linux-only user, mount, PID namespace, cgroups v2, seccomp, Landlock, isolation benchmark, and eBPF observability design primitives exist, but provider execution intentionally remains unavailable until the full boundary is wired and verified. |
 | AgentPod Windows | Descriptor only | Candidate surfaces include Job Objects, AppContainer, WFP, ETW, and Windows sandbox primitives. Execution intentionally returns unavailable. |
 | Podman compatibility minipods | Experimental | `agentbox run` uses the daemon-owned runtime manager path. `agentbox pods` and `agentbox stop-pod` still use the older Podman CLI path, and live socket/shim smoke proof remains open. |
 
@@ -79,5 +79,7 @@ See [macOS minipod limitations](macos-minipod-limitations.md) for the current
 VM-backed boundary and native enforcement gap.
 See [safe file sharing](safe-file-sharing.md) for current workspace, read-only
 mount, credential, and system bridge guidance.
+See [Linux eBPF observability](linux-ebpf-observability.md) for kernel event
+evidence design that is not yet enforcement.
 See [threat model](threat-model.md), [platform isolation strategy](platform-isolation.md),
 and [public limitations](limitations.md) for the current public boundary.

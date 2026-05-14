@@ -97,6 +97,11 @@ process startup and the current `unshare` namespace combinations. On non-Linux
 hosts it exits with a skip message; on Linux it reports failed namespace layers
 as `status=fail` instead of converting missing kernel support into a fake pass.
 
+See [Linux eBPF observability](linux-ebpf-observability.md) for the planned
+kernel event stream. That design treats eBPF as evidence and telemetry first;
+it must not be described as enforcement until a live hook proves denial
+behavior.
+
 ## Windows AgentPod
 
 Status: descriptor only.
