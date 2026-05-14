@@ -70,6 +70,11 @@ log "checking remote evidence metadata JSON"
 validate_json "$TMPDIR/remote-evidence.json" \
   "data.get('session_id') == 'abx-session-1' and data.get('worker_session_id') == 'worker-session-1' and data.get('event_count') == 3 and data.get('bundle_sha256', '').startswith('012345')"
 
+log "checking remote evidence status command surface"
+"${CLI[@]}" remote-evidence-status --help >"$TMPDIR/remote-evidence-status-help.txt"
+rg --fixed-strings "Query a remote AgentPod worker for accepted evidence state" \
+  "$TMPDIR/remote-evidence-status-help.txt" >/dev/null
+
 log "checking evidence bundle verification"
 BUNDLE_DIR="$TMPDIR/evidence-bundle"
 mkdir -p "$BUNDLE_DIR"

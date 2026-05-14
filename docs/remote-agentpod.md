@@ -101,6 +101,17 @@ sign the bundle, or claim a live worker connection.
 When `--bundle-dir` is used, the printed request includes `derived_from_bundle`,
 `bundle_id`, and `bundle_root_sha256` so a future worker can distinguish manual
 hash entry from metadata derived from a verified local bundle.
+After a worker accepts evidence, the CLI can query its evidence status route:
+
+```sh
+agentbox remote-evidence-status \
+  --endpoint https://worker.example.com/agentpod \
+  --session agentbox-session-id \
+  --worker-session worker-session-id
+```
+
+The command prints the validated worker response, including session status,
+evidence metadata receipts, and stored bundle payload references.
 
 ## Transport Conformance
 

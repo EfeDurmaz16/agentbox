@@ -401,6 +401,20 @@ enum Commands {
         #[arg(long = "bundle-dir")]
         bundle_dir: Option<PathBuf>,
     },
+    /// Query a remote AgentPod worker for accepted evidence state
+    RemoteEvidenceStatus {
+        /// Remote worker endpoint, e.g. https://worker.example.com/agentpod
+        #[arg(long)]
+        endpoint: String,
+
+        /// Agentbox session id
+        #[arg(long = "session")]
+        session_id: String,
+
+        /// Worker-side session id
+        #[arg(long = "worker-session")]
+        worker_session_id: String,
+    },
     /// Generate a native provider execution plan without running it
     NativePlan {
         /// Native provider: agentpod-linux
@@ -3803,6 +3817,51 @@ fn cmd_remote_evidence(
     );
 }
 
+async fn cmd_remote_evidence_status(
+    endpoint: String,
+    session_id: String,
+    worker_session_id: String,
+) {
+    use agentbox_daemon::runtime::providers::remote::{
+        HttpRemoteAgentPodTransport, RemoteAgentPodEvidenceStatusRequest, RemoteAgentPodTransport,
+    };
+
+    let transport = HttpRemoteAgentPodTransport::new(endpoint).unwrap_or_else(|e| {
+        eprintln!(
+            "error: failed to build remote AgentPod evidence status transport: {}",
+            e
+        );
+        std::process::exit(1);
+    });
+    let request = RemoteAgentPodEvidenceStatusRequest {
+        session_id,
+        worker_session_id,
+    };
+    request.validate().unwrap_or_else(|e| {
+        eprintln!(
+            "error: failed to build remote AgentPod evidence status request: {}",
+            e
+        );
+        std::process::exit(1);
+    });
+    let response = transport
+        .evidence_status(request)
+        .await
+        .unwrap_or_else(|e| {
+            eprintln!(
+                "error: failed to query remote AgentPod evidence status: {}",
+                e
+            );
+            std::process::exit(1);
+        });
+
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&response)
+            .expect("failed to serialize remote AgentPod evidence status")
+    );
+}
+
 fn cmd_native_plan(
     provider: String,
     workspace: Option<PathBuf>,
@@ -4508,6 +4567,11 @@ async fn main() {
             event_count,
             bundle_dir,
         ),
+        Commands::RemoteEvidenceStatus {
+            endpoint,
+            session_id,
+            worker_session_id,
+        } => cmd_remote_evidence_status(endpoint, session_id, worker_session_id).await,
         Commands::NativePlan {
             provider,
             workspace,
