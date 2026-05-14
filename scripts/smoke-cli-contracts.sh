@@ -69,6 +69,45 @@ log "checking remote evidence metadata JSON"
 validate_json "$TMPDIR/remote-evidence.json" \
   "data.get('session_id') == 'abx-session-1' and data.get('worker_session_id') == 'worker-session-1' and data.get('event_count') == 3 and data.get('bundle_sha256', '').startswith('012345')"
 
+log "checking evidence bundle verification"
+BUNDLE_DIR="$TMPDIR/evidence-bundle"
+mkdir -p "$BUNDLE_DIR"
+printf '{"schema_version":1,"kind":"AgentPod"}\n' >"$BUNDLE_DIR/manifest.json"
+python3 - "$BUNDLE_DIR" <<'PY'
+import hashlib
+import json
+import pathlib
+import sys
+
+bundle = pathlib.Path(sys.argv[1])
+manifest = bundle / "manifest.json"
+data = manifest.read_bytes()
+index = {
+    "schema_version": 1,
+    "bundle_id": "smoke-bundle",
+    "session_id": "smoke-session",
+    "provider": "direct-host",
+    "status": "Stopped",
+    "generated_at": "2026-05-14T00:00:00Z",
+    "files": [
+        {
+            "path": "manifest.json",
+            "media_type": "application/json",
+            "description": "smoke manifest",
+            "sha256": hashlib.sha256(data).hexdigest(),
+            "bytes": len(data),
+        }
+    ],
+}
+(bundle / "index.json").write_text(json.dumps(index, indent=2), encoding="utf-8")
+PY
+"${CLI[@]}" evidence --verify --bundle "$BUNDLE_DIR"
+printf '{"tampered":true}\n' >"$BUNDLE_DIR/manifest.json"
+if "${CLI[@]}" evidence --verify --bundle "$BUNDLE_DIR" >/tmp/agentbox-invalid-evidence-bundle.out 2>/tmp/agentbox-invalid-evidence-bundle.err; then
+  echo "evidence bundle verification accepted tampered bundle" >&2
+  exit 1
+fi
+
 log "checking remote evidence rejects invalid bundle digests"
 if "${CLI[@]}" remote-evidence \
   --session abx-session-1 \
