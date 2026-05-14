@@ -146,6 +146,7 @@ impl RuntimeManager {
         self.provider.destroy(session_id).await?;
         session.status = RuntimeStatus::Stopped;
         session.stopped_at = Some(Utc::now());
+        session.approval_grants.clear();
 
         self.audit_credential_revocations(&session)?;
         self.audit_runtime_event(
@@ -157,7 +158,7 @@ impl RuntimeManager {
             Some(self.provider.name().to_string()),
         )?;
         self.sessions
-            .remove(session_id)
+            .upsert(session)
             .map_err(|e| RuntimeError::Internal(e.to_string()))?;
 
         Ok(())
@@ -870,14 +871,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn destroy_removes_session_and_records_evidence() {
+    async fn destroy_retains_stopped_session_and_records_evidence() {
         let manager = manager("destroy");
         let spec = MinipodSpec::for_agent_task("aspendos", "/tmp/agentbox-work");
         let session = manager.create(&spec).await.unwrap();
 
         manager.destroy(&session.id).await.unwrap();
 
-        assert!(manager.list_sessions().unwrap().is_empty());
+        let sessions = manager.list_sessions().unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert!(matches!(sessions[0].status, RuntimeStatus::Stopped));
+        assert!(sessions[0].stopped_at.is_some());
         let audit = manager.audit.recent(1).unwrap();
         assert_eq!(audit[0].decision, "destroyed");
         assert!(audit[0].command.contains("runtime.destroy"));
@@ -1007,10 +1011,10 @@ mod tests {
 
         manager.destroy(&session.id).await.unwrap();
 
-        assert!(matches!(
-            manager.session_approval_grants(&session.id),
-            Err(RuntimeError::NotFound(_))
-        ));
+        assert!(manager
+            .session_approval_grants(&session.id)
+            .unwrap()
+            .is_empty());
     }
 
     #[tokio::test]
