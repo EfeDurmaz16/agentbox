@@ -365,6 +365,27 @@ enum Commands {
         #[arg(long = "ttl-seconds", default_value_t = 300)]
         ttl_seconds: i64,
     },
+    /// Generate a native provider execution plan without running it
+    NativePlan {
+        /// Native provider: agentpod-linux
+        #[arg(long = "provider", default_value = "agentpod-linux")]
+        provider: String,
+
+        /// Workspace directory for the AgentPod plan
+        #[arg(long)]
+        workspace: Option<PathBuf>,
+
+        /// Agent policy profile (general, coding, research, deploy, or custom)
+        #[arg(long = "agent-profile", default_value = "general")]
+        agent_profile: String,
+
+        /// AgentPod task risk: low, medium, high, very-high
+        #[arg(long = "risk", default_value = "medium")]
+        risk: String,
+
+        /// Command to plan; use `--` before command flags
+        command: Vec<String>,
+    },
     /// Inspect persisted minipod session metadata
     MinipodInspect {
         /// Session id to inspect; omit to list all persisted sessions
@@ -3198,6 +3219,58 @@ fn cmd_remote_handshake(endpoint: String, auth: String, ttl_seconds: i64) {
     );
 }
 
+fn cmd_native_plan(
+    provider: String,
+    workspace: Option<PathBuf>,
+    agent_profile: String,
+    risk: String,
+    command: Vec<String>,
+) {
+    use agentbox_daemon::runtime::providers::linux::LinuxAgentPodExecutionPlan;
+    use agentbox_daemon::runtime::types::{ExecCommand, MinipodSpec};
+
+    if provider != "agentpod-linux" {
+        eprintln!(
+            "error: native plan provider `{}` is not supported yet",
+            provider
+        );
+        eprintln!("hint: supported value: agentpod-linux");
+        std::process::exit(1);
+    }
+    if command.is_empty() {
+        eprintln!("error: native plan command cannot be empty");
+        std::process::exit(1);
+    }
+
+    let workspace = workspace.unwrap_or_else(|| {
+        std::env::current_dir().unwrap_or_else(|e| {
+            eprintln!("error: failed to determine current directory: {}", e);
+            std::process::exit(1);
+        })
+    });
+    let agent_name = command.first().cloned().unwrap_or_else(|| "agent".into());
+    let mut spec = MinipodSpec::for_agent_task_with_profile(agent_name, &workspace, agent_profile);
+    spec.risk = parse_agentpod_risk(&risk);
+    spec.labels
+        .insert("agentbox.provider".into(), "agentpod-linux".into());
+
+    let exec = ExecCommand {
+        argv: command,
+        working_dir: Some(workspace.display().to_string()),
+        env: HashMap::new(),
+        timeout_seconds: None,
+    };
+    let plan = LinuxAgentPodExecutionPlan::from_minipod_spec(&spec, &exec).unwrap_or_else(|e| {
+        eprintln!("error: failed to build native AgentPod plan: {}", e);
+        std::process::exit(1);
+    });
+
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&plan).expect("failed to serialize native AgentPod plan")
+    );
+}
+
 fn parse_remote_auth_kind(
     raw: &str,
 ) -> agentbox_daemon::runtime::providers::remote::RemoteAgentPodAuthKind {
@@ -3833,6 +3906,13 @@ async fn main() {
             auth,
             ttl_seconds,
         } => cmd_remote_handshake(endpoint, auth, ttl_seconds),
+        Commands::NativePlan {
+            provider,
+            workspace,
+            agent_profile,
+            risk,
+            command,
+        } => cmd_native_plan(provider, workspace, agent_profile, risk, command),
         Commands::MinipodInspect { session_id, json } => cmd_minipod_inspect(session_id, json),
         Commands::Review {
             session_id,

@@ -77,6 +77,12 @@ must be explicitly gated with `AGENTBOX_LINUX_NATIVE`, and it is not a complete
 sandbox claim until the loaders and provider lifecycle are wired and tested on
 Linux.
 
+The plan can be inspected without execution:
+
+```sh
+agentbox native-plan --provider agentpod-linux -- /bin/true
+```
+
 ## Adaptive Runtime Selection
 
 Agentbox should choose or recommend a provider by task risk.
