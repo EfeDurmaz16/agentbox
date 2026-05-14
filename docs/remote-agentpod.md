@@ -67,6 +67,18 @@ The current test suite uses an in-memory fake transport to prove this schema and
 lifecycle ordering. `RemoteAgentPodProvider` still returns unavailable until a
 real HTTP, SSH, or tunnel adapter exists.
 
+An HTTPS transport adapter now exists in the daemon code for the future worker
+API. It posts:
+
+- `POST /handshake`
+- `POST /sessions`
+- `POST /sessions/{worker_session_id}/exec`
+
+The adapter validates the same handshake, create, exec, and lifecycle evidence
+contracts before returning responses. It is not wired into
+`RemoteAgentPodProvider` yet because there is no shipped remote worker server or
+signed response verifier.
+
 ## Lifecycle Contract
 
 Remote workers must eventually prove lifecycle events rather than only returning

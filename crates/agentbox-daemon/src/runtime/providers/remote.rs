@@ -313,6 +313,116 @@ pub trait RemoteAgentPodTransport: Send + Sync {
     ) -> Result<RemoteAgentPodExecResponse, RuntimeError>;
 }
 
+#[derive(Debug, Clone)]
+pub struct HttpRemoteAgentPodTransport {
+    client: reqwest::Client,
+    endpoint: String,
+}
+
+impl HttpRemoteAgentPodTransport {
+    pub fn new(endpoint: impl Into<String>) -> Result<Self, RuntimeError> {
+        let endpoint = endpoint.into();
+        validate_remote_endpoint(&endpoint)?;
+        if !endpoint.starts_with("https://") {
+            return Err(RuntimeError::ManifestRejected(
+                "HTTP remote AgentPod transport requires an https:// endpoint".into(),
+            ));
+        }
+
+        Ok(Self {
+            client: reqwest::Client::new(),
+            endpoint: endpoint.trim_end_matches('/').to_string(),
+        })
+    }
+
+    pub fn endpoint(&self) -> &str {
+        &self.endpoint
+    }
+
+    pub fn route(&self, suffix: impl AsRef<str>) -> String {
+        format!(
+            "{}/{}",
+            self.endpoint,
+            suffix.as_ref().trim_start_matches('/')
+        )
+    }
+}
+
+#[async_trait]
+impl RemoteAgentPodTransport for HttpRemoteAgentPodTransport {
+    async fn handshake(
+        &self,
+        descriptor: &RemoteAgentPodHandshakeDescriptor,
+    ) -> Result<RemoteAgentPodHandshakeAck, RuntimeError> {
+        let ack = self
+            .client
+            .post(self.route("handshake"))
+            .json(descriptor)
+            .send()
+            .await
+            .map_err(|err| RuntimeError::Unavailable(format!("remote handshake failed: {err}")))?
+            .error_for_status()
+            .map_err(|err| RuntimeError::Unavailable(format!("remote handshake rejected: {err}")))?
+            .json::<RemoteAgentPodHandshakeAck>()
+            .await
+            .map_err(|err| {
+                RuntimeError::ManifestRejected(format!(
+                    "remote handshake ack was invalid JSON: {err}"
+                ))
+            })?;
+        ack.validate_for(descriptor, Utc::now())?;
+        Ok(ack)
+    }
+
+    async fn create_session(
+        &self,
+        request: RemoteAgentPodCreateSessionRequest,
+    ) -> Result<RemoteAgentPodCreateSessionResponse, RuntimeError> {
+        let response = self
+            .client
+            .post(self.route("sessions"))
+            .json(&request)
+            .send()
+            .await
+            .map_err(|err| RuntimeError::Unavailable(format!("remote create failed: {err}")))?
+            .error_for_status()
+            .map_err(|err| RuntimeError::Unavailable(format!("remote create rejected: {err}")))?
+            .json::<RemoteAgentPodCreateSessionResponse>()
+            .await
+            .map_err(|err| {
+                RuntimeError::ManifestRejected(format!(
+                    "remote create response was invalid JSON: {err}"
+                ))
+            })?;
+        response.validate_for(&request)?;
+        Ok(response)
+    }
+
+    async fn exec_command(
+        &self,
+        request: RemoteAgentPodExecRequest,
+    ) -> Result<RemoteAgentPodExecResponse, RuntimeError> {
+        let response = self
+            .client
+            .post(self.route(format!("sessions/{}/exec", request.worker_session_id)))
+            .json(&request)
+            .send()
+            .await
+            .map_err(|err| RuntimeError::Unavailable(format!("remote exec failed: {err}")))?
+            .error_for_status()
+            .map_err(|err| RuntimeError::Unavailable(format!("remote exec rejected: {err}")))?
+            .json::<RemoteAgentPodExecResponse>()
+            .await
+            .map_err(|err| {
+                RuntimeError::ManifestRejected(format!(
+                    "remote exec response was invalid JSON: {err}"
+                ))
+            })?;
+        response.validate()?;
+        Ok(response)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RemoteAgentPodTransportDescriptor {
     pub schema_version: i64,
@@ -604,6 +714,25 @@ mod tests {
         )
         .unwrap_err();
         assert!(secret.to_string().contains("must not embed credentials"));
+    }
+
+    #[test]
+    fn http_remote_transport_builds_stable_routes() {
+        let transport =
+            HttpRemoteAgentPodTransport::new("https://worker.example.com/agentpod/").unwrap();
+
+        assert_eq!(transport.endpoint(), "https://worker.example.com/agentpod");
+        assert_eq!(
+            transport.route("/sessions/worker-1/exec"),
+            "https://worker.example.com/agentpod/sessions/worker-1/exec"
+        );
+    }
+
+    #[test]
+    fn http_remote_transport_requires_https_endpoint() {
+        let ssh = HttpRemoteAgentPodTransport::new("ssh://agentpod@example.com").unwrap_err();
+
+        assert!(ssh.to_string().contains("https://"));
     }
 
     #[test]
