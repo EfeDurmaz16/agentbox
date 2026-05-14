@@ -3035,6 +3035,7 @@ struct RemoteWorkspaceApplyReport {
     force: bool,
     applied_files: usize,
     skipped_files: usize,
+    unchanged_files: usize,
     conflict_files: usize,
     total_bytes: usize,
     files: Vec<RemoteWorkspaceApplyFile>,
@@ -3045,6 +3046,10 @@ struct RemoteWorkspaceApplyFile {
     path: String,
     bytes: usize,
     sha256: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    target_bytes: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    target_sha256: Option<String>,
     action: String,
 }
 
@@ -3373,11 +3378,20 @@ fn apply_remote_workspace_export_dir(
 
     let mut files = Vec::with_capacity(manifest.files.len());
     let mut conflict_files = 0_usize;
+    let mut unchanged_files = 0_usize;
     for file in &manifest.files {
         let relative_path = safe_bundle_relative_path(&file.path)?;
         let target_path = workspace.join(relative_path);
-        let target_exists = target_path.exists();
-        let action = if target_exists && !force {
+        let target_metadata = remote_workspace_target_metadata(&target_path)?;
+        let target_exists = target_metadata.is_some();
+        let target_matches_export = target_metadata
+            .as_ref()
+            .map(|metadata| metadata.bytes == file.bytes && metadata.sha256 == file.sha256)
+            .unwrap_or(false);
+        let action = if target_matches_export {
+            unchanged_files += 1;
+            "unchanged"
+        } else if target_exists && !force {
             conflict_files += 1;
             "conflict"
         } else if dry_run && target_exists {
@@ -3393,6 +3407,8 @@ fn apply_remote_workspace_export_dir(
             path: file.path.clone(),
             bytes: file.bytes,
             sha256: file.sha256.clone(),
+            target_bytes: target_metadata.as_ref().map(|metadata| metadata.bytes),
+            target_sha256: target_metadata.map(|metadata| metadata.sha256),
             action: action.to_string(),
         });
     }
@@ -3412,6 +3428,13 @@ fn apply_remote_workspace_export_dir(
             let relative_path = safe_bundle_relative_path(&file.path)?;
             let source_path = export_dir.join(&relative_path);
             let target_path = workspace.join(&relative_path);
+            let target_matches_export = remote_workspace_target_metadata(&target_path)?
+                .map(|metadata| metadata.bytes == file.bytes && metadata.sha256 == file.sha256)
+                .unwrap_or(false);
+            if target_matches_export {
+                skipped_files += 1;
+                continue;
+            }
             if target_path.exists() && !force {
                 skipped_files += 1;
                 continue;
@@ -3441,10 +3464,30 @@ fn apply_remote_workspace_export_dir(
         force,
         applied_files,
         skipped_files,
+        unchanged_files,
         conflict_files,
         total_bytes: manifest.total_bytes,
         files,
     })
+}
+
+struct RemoteWorkspaceTargetMetadata {
+    bytes: usize,
+    sha256: String,
+}
+
+fn remote_workspace_target_metadata(
+    target_path: &Path,
+) -> Result<Option<RemoteWorkspaceTargetMetadata>, String> {
+    if !target_path.exists() {
+        return Ok(None);
+    }
+    let bytes = fs::read(target_path)
+        .map_err(|e| format!("failed to read target {}: {e}", target_path.display()))?;
+    Ok(Some(RemoteWorkspaceTargetMetadata {
+        bytes: bytes.len(),
+        sha256: sha256_hex(&bytes),
+    }))
 }
 
 fn read_remote_workspace_export_manifest(
@@ -4472,6 +4515,7 @@ fn cmd_remote_workspace_apply(
     println!("dry run:        {}", report.dry_run);
     println!("force:          {}", report.force);
     println!("applied files:  {}", report.applied_files);
+    println!("unchanged:      {}", report.unchanged_files);
     println!("conflicts:      {}", report.conflict_files);
     println!("bytes:          {}", report.total_bytes);
     if !report.files.is_empty() {
@@ -5589,6 +5633,46 @@ mod tests {
             fs::read_to_string(workspace.join("README.md")).unwrap(),
             "old\n"
         );
+        let _ = fs::remove_dir_all(export_dir);
+        let _ = fs::remove_dir_all(workspace);
+    }
+
+    #[test]
+    fn remote_workspace_apply_skips_identical_existing_files() {
+        let export_dir = std::env::temp_dir().join(format!(
+            "agentbox-remote-workspace-apply-unchanged-export-test-{}",
+            std::process::id()
+        ));
+        let workspace = std::env::temp_dir().join(format!(
+            "agentbox-remote-workspace-apply-unchanged-target-test-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&export_dir);
+        let _ = fs::remove_dir_all(&workspace);
+        let response =
+            remote_workspace_export_response(vec![remote_workspace_file("README.md", "same\n")]);
+        write_remote_workspace_export_dir(&response, &export_dir, false).unwrap();
+        fs::create_dir_all(&workspace).unwrap();
+        fs::write(workspace.join("README.md"), b"same\n").unwrap();
+
+        let dry_run =
+            apply_remote_workspace_export_dir(&export_dir, &workspace, true, false).unwrap();
+        let report =
+            apply_remote_workspace_export_dir(&export_dir, &workspace, false, false).unwrap();
+
+        assert_eq!(dry_run.conflict_files, 0);
+        assert_eq!(dry_run.unchanged_files, 1);
+        assert_eq!(dry_run.files[0].action, "unchanged");
+        assert_eq!(dry_run.files[0].target_bytes, Some(5));
+        assert_eq!(
+            dry_run.files[0].target_sha256.as_deref(),
+            Some(dry_run.files[0].sha256.as_str())
+        );
+        assert_eq!(report.applied_files, 0);
+        assert_eq!(report.skipped_files, 1);
+        assert_eq!(report.unchanged_files, 1);
+        assert_eq!(report.conflict_files, 0);
+        assert_eq!(report.files[0].action, "unchanged");
         let _ = fs::remove_dir_all(export_dir);
         let _ = fs::remove_dir_all(workspace);
     }

@@ -292,18 +292,28 @@ PY
   --export-dir "$TMPDIR/workspace-pullback" \
   --workspace "$TMPDIR/workspace-applied" \
   --json >"$TMPDIR/workspace-apply.json"
+"$ROOT/target/debug/agentbox-cli" remote-workspace-apply \
+  --export-dir "$TMPDIR/workspace-pullback" \
+  --workspace "$TMPDIR/workspace-applied" \
+  --dry-run \
+  --json >"$TMPDIR/workspace-apply-unchanged.json"
 
-python3 - "$TMPDIR/workspace-apply.json" "$TMPDIR/workspace-applied" <<'PY'
+python3 - "$TMPDIR/workspace-apply.json" "$TMPDIR/workspace-apply-unchanged.json" "$TMPDIR/workspace-applied" <<'PY'
 import json
 import pathlib
 import sys
 
 with open(sys.argv[1], "r", encoding="utf-8") as fh:
     data = json.load(fh)
+with open(sys.argv[2], "r", encoding="utf-8") as fh:
+    unchanged = json.load(fh)
 
-applied = pathlib.Path(sys.argv[2])
+applied = pathlib.Path(sys.argv[3])
 assert data["applied_files"] >= 1
 assert data["conflict_files"] == 0
+assert unchanged["conflict_files"] == 0
+assert unchanged["unchanged_files"] >= 1
+assert any(file["action"] == "unchanged" for file in unchanged["files"])
 assert (applied / "export.txt").read_text(encoding="utf-8") == "worker export smoke\n"
 PY
 

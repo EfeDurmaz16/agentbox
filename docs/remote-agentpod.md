@@ -159,7 +159,8 @@ agentbox remote-workspace-export \
 
 To apply a pulled export into a local workspace, use the separate apply command.
 It verifies the manifest and file hashes before writing, supports `--dry-run`,
-and refuses to overwrite existing files unless `--force` is set:
+skips identical existing files as `unchanged`, and refuses to overwrite
+conflicting existing files unless `--force` is set:
 
 ```sh
 agentbox remote-workspace-apply \
