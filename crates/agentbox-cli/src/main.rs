@@ -95,6 +95,23 @@ enum Commands {
         #[arg(long, default_value = "operator approved first-contact domain")]
         reason: String,
     },
+    /// List credential grants for an AgentPod session
+    Credentials {
+        /// AgentPod session id
+        session_id: String,
+
+        /// Emit JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Revoke a credential grant from an AgentPod session
+    CredentialRevoke {
+        /// AgentPod session id
+        session_id: String,
+
+        /// Credential grant name to revoke
+        name: String,
+    },
     /// Run a command inside an isolated Agentbox minipod
     Run {
         /// Command to run (e.g., "openclaw start" or "npm test")
@@ -1658,6 +1675,69 @@ fn cmd_network_grant(session_id: String, domain: String, reason: String) {
     println!("session: {}", session_id);
     println!("grant:   {}", grant.id);
     println!("domain:  {}", domain);
+}
+
+fn cmd_credentials(session_id: String, json: bool) {
+    let (manager, session) = runtime_manager_for_session(&session_id, "credentials");
+    let grants = manager
+        .list_credential_grants(&session_id)
+        .unwrap_or_else(|e| {
+            eprintln!("error: failed to list credential grants: {}", e);
+            std::process::exit(1);
+        });
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&grants).expect("failed to serialize credential grants")
+        );
+        return;
+    }
+
+    println!("AgentPod credential grants");
+    println!("{}", "-".repeat(88));
+    println!("session:  {}", session.id);
+    println!("provider: {}", session.provider);
+    if grants.is_empty() {
+        println!("grants:   none");
+        return;
+    }
+
+    println!("{:<24} {:<16} {:<9} TARGET", "NAME", "KIND", "ONE-TIME");
+    println!("{}", "-".repeat(88));
+    for grant in grants {
+        println!(
+            "{:<24} {:<16} {:<9} {}",
+            grant.name,
+            format!("{:?}", grant.kind),
+            if grant.one_time { "yes" } else { "no" },
+            grant.target
+        );
+    }
+}
+
+fn cmd_credential_revoke(session_id: String, name: String) {
+    let (manager, _session) = runtime_manager_for_session(&session_id, "credential revoke");
+    let revoked = manager
+        .revoke_credential_grant(&session_id, &name)
+        .unwrap_or_else(|e| {
+            eprintln!("error: failed to revoke credential grant: {}", e);
+            std::process::exit(1);
+        });
+
+    let Some(grant) = revoked else {
+        eprintln!(
+            "error: credential grant `{}` not found in session {}",
+            name, session_id
+        );
+        std::process::exit(1);
+    };
+
+    println!("Revoked credential grant.");
+    println!("session: {}", session_id);
+    println!("name:    {}", grant.name);
+    println!("kind:    {:?}", grant.kind);
+    println!("target:  {}", grant.target);
 }
 
 fn normalize_domain_or_exit(raw: &str) -> String {
@@ -3325,6 +3405,8 @@ async fn main() {
             domain,
             reason,
         } => cmd_network_grant(session_id, domain, reason),
+        Commands::Credentials { session_id, json } => cmd_credentials(session_id, json),
+        Commands::CredentialRevoke { session_id, name } => cmd_credential_revoke(session_id, name),
         Commands::Run {
             command,
             runtime,
