@@ -177,6 +177,10 @@ enum Commands {
         #[arg(long = "credential-token")]
         credential_tokens: Vec<String>,
 
+        /// Expire newly added credential grants after this many seconds
+        #[arg(long = "credential-ttl-seconds")]
+        credential_ttl_seconds: Option<i64>,
+
         /// Load a task-scoped policy bundle JSON file
         #[arg(long = "policy-bundle")]
         policy_bundles: Vec<PathBuf>,
@@ -306,6 +310,10 @@ enum Commands {
         /// Add an explicit provider token grant as name=provider:token-id
         #[arg(long = "credential-token")]
         credential_tokens: Vec<String>,
+
+        /// Expire newly added credential grants after this many seconds
+        #[arg(long = "credential-ttl-seconds")]
+        credential_ttl_seconds: Option<i64>,
 
         /// Load a task-scoped policy bundle JSON file
         #[arg(long = "policy-bundle")]
@@ -1038,6 +1046,7 @@ struct RunOptions {
     credential_env: Vec<String>,
     credential_sockets: Vec<String>,
     credential_tokens: Vec<String>,
+    credential_ttl_seconds: Option<i64>,
     policy_bundles: Vec<PathBuf>,
     allow_domains: Vec<String>,
     network_mode: Option<String>,
@@ -1164,6 +1173,7 @@ async fn cmd_run(options: RunOptions) {
             .grants
             .push(parse_simple_credential_grant(&grant, "token"));
     }
+    apply_credential_ttl(&mut spec, options.credential_ttl_seconds);
     if !options.allow_domains.is_empty() {
         spec.network.mode = NetworkMode::AllowListed;
         spec.network.allowed_domains = options.allow_domains;
@@ -2538,6 +2548,7 @@ struct MinipodSpecOptions {
     credential_env: Vec<String>,
     credential_sockets: Vec<String>,
     credential_tokens: Vec<String>,
+    credential_ttl_seconds: Option<i64>,
     policy_bundles: Vec<PathBuf>,
     network_mode: Option<String>,
     deny_domains: Vec<String>,
@@ -2609,6 +2620,7 @@ fn cmd_minipod_spec(options: MinipodSpecOptions) {
             .grants
             .push(parse_simple_credential_grant(&grant, "token"));
     }
+    apply_credential_ttl(&mut spec, options.credential_ttl_seconds);
     apply_workspace_mode(
         &mut spec,
         options.workspace_mode.as_deref(),
@@ -2857,6 +2869,26 @@ fn parse_simple_credential_grant(
         one_time: true,
         requires_approval: true,
         expires_at: None,
+    }
+}
+
+fn apply_credential_ttl(
+    spec: &mut agentbox_daemon::runtime::types::MinipodSpec,
+    ttl_seconds: Option<i64>,
+) {
+    let Some(ttl_seconds) = ttl_seconds else {
+        return;
+    };
+    if ttl_seconds <= 0 {
+        eprintln!("error: --credential-ttl-seconds must be greater than zero");
+        std::process::exit(1);
+    }
+
+    let expires_at = chrono::Utc::now() + chrono::Duration::seconds(ttl_seconds);
+    for grant in &mut spec.credentials.grants {
+        if grant.expires_at.is_none() {
+            grant.expires_at = Some(expires_at);
+        }
     }
 }
 
@@ -3426,6 +3458,7 @@ async fn main() {
             credential_env,
             credential_sockets,
             credential_tokens,
+            credential_ttl_seconds,
             policy_bundles,
             allow_domains,
             network_mode,
@@ -3449,6 +3482,7 @@ async fn main() {
                 credential_env,
                 credential_sockets,
                 credential_tokens,
+                credential_ttl_seconds,
                 policy_bundles,
                 allow_domains,
                 network_mode,
@@ -3482,6 +3516,7 @@ async fn main() {
             credential_env,
             credential_sockets,
             credential_tokens,
+            credential_ttl_seconds,
             policy_bundles,
             workspace_mode,
             workspace_overlay_dir,
@@ -3499,6 +3534,7 @@ async fn main() {
             credential_env,
             credential_sockets,
             credential_tokens,
+            credential_ttl_seconds,
             policy_bundles,
             network_mode,
             deny_domains,
