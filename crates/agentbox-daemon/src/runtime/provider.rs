@@ -2,7 +2,8 @@ use async_trait::async_trait;
 use thiserror::Error;
 
 use crate::runtime::types::{
-    CommandResult, ExecCommand, MinipodSpec, RuntimeCapability, RuntimeSession, RuntimeStatus,
+    CommandResult, ExecCommand, MinipodSpec, NetworkEnforcementCapability, RuntimeCapability,
+    RuntimeSession, RuntimeStatus,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -86,6 +87,10 @@ pub trait RuntimeProvider: Send + Sync {
 
     fn capabilities(&self) -> &[RuntimeCapability];
 
+    fn network_enforcement_capabilities(&self) -> &[NetworkEnforcementCapability] {
+        &[]
+    }
+
     async fn is_available(&self) -> bool;
 
     async fn create(&self, spec: &MinipodSpec) -> Result<RuntimeSession, RuntimeError>;
@@ -109,6 +114,7 @@ mod tests {
 
     struct MockProvider {
         capabilities: Vec<RuntimeCapability>,
+        network_enforcement_capabilities: Vec<NetworkEnforcementCapability>,
     }
 
     #[async_trait]
@@ -123,6 +129,10 @@ mod tests {
 
         fn capabilities(&self) -> &[RuntimeCapability] {
             &self.capabilities
+        }
+
+        fn network_enforcement_capabilities(&self) -> &[NetworkEnforcementCapability] {
+            &self.network_enforcement_capabilities
         }
 
         async fn is_available(&self) -> bool {
@@ -171,18 +181,24 @@ mod tests {
                 RuntimeCapability::ContainerIsolation,
                 RuntimeCapability::FilesystemPolicy,
             ],
+            network_enforcement_capabilities: vec![
+                NetworkEnforcementCapability::ContainerNetworkMode,
+                NetworkEnforcementCapability::DomainDenylist,
+            ],
         };
 
         assert!(provider.is_available().await);
         assert_eq!(provider.name(), "mock");
         assert_eq!(provider.platform(), "test");
         assert_eq!(provider.capabilities().len(), 2);
+        assert_eq!(provider.network_enforcement_capabilities().len(), 2);
     }
 
     #[tokio::test]
     async fn provider_can_create_session_from_spec() {
         let provider = MockProvider {
             capabilities: vec![RuntimeCapability::ContainerIsolation],
+            network_enforcement_capabilities: vec![],
         };
         let spec = MinipodSpec::for_agent_task("hermes", "/tmp/workspace");
 

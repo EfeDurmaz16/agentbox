@@ -22,6 +22,15 @@ pub enum RuntimeCapability {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum NetworkEnforcementCapability {
+    ContainerNetworkMode,
+    DomainAllowlist,
+    DomainDenylist,
+    FirstContactApproval,
+    KernelPacketFilter,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RuntimeStatus {
     Creating,
     Running,
@@ -924,6 +933,22 @@ mod tests {
 
             assert_eq!(decoded, policy);
         }
+    }
+
+    #[test]
+    fn network_enforcement_capabilities_roundtrip_as_explicit_flags() {
+        let capabilities = vec![
+            NetworkEnforcementCapability::ContainerNetworkMode,
+            NetworkEnforcementCapability::DomainAllowlist,
+            NetworkEnforcementCapability::DomainDenylist,
+            NetworkEnforcementCapability::FirstContactApproval,
+            NetworkEnforcementCapability::KernelPacketFilter,
+        ];
+
+        let encoded = serde_json::to_string(&capabilities).unwrap();
+        let decoded: Vec<NetworkEnforcementCapability> = serde_json::from_str(&encoded).unwrap();
+
+        assert_eq!(decoded, capabilities);
     }
 
     #[test]

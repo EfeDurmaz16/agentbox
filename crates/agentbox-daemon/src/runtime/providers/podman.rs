@@ -251,7 +251,9 @@ fn runtime_error(error: PodError) -> RuntimeError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runtime::providers::conformance::assert_provider_metadata;
+    use crate::runtime::providers::conformance::{
+        assert_network_enforcement_metadata, assert_provider_metadata,
+    };
 
     #[test]
     fn podman_provider_matches_runtime_provider_metadata() {
@@ -272,6 +274,11 @@ mod tests {
                 RuntimeCapability::EvidenceExport,
             ],
         );
+        assert!(
+            provider.network_enforcement_capabilities().is_empty(),
+            "podman compatibility adapter must not claim domain or packet enforcement"
+        );
+        assert_network_enforcement_metadata(&provider, &[]);
     }
 
     #[test]

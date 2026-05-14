@@ -188,7 +188,8 @@ impl RuntimeProvider for AgentPodProvider {
 mod tests {
     use super::*;
     use crate::runtime::providers::conformance::{
-        assert_provider_metadata, assert_unavailable_provider_contract,
+        assert_network_enforcement_metadata, assert_provider_metadata,
+        assert_unavailable_provider_contract,
     };
 
     #[test]
@@ -220,6 +221,11 @@ mod tests {
                 RuntimeCapability::EvidenceExport,
             ],
         );
+        assert!(
+            macos.network_enforcement_capabilities().is_empty(),
+            "unavailable AgentPod descriptors must not claim active network enforcement"
+        );
+        assert_network_enforcement_metadata(&macos, &[]);
     }
 
     #[tokio::test]
@@ -237,6 +243,10 @@ mod tests {
             ],
         );
         assert_unavailable_provider_contract(&provider).await;
+        assert!(
+            provider.network_enforcement_capabilities().is_empty(),
+            "unavailable AgentPod descriptors must not claim active network enforcement"
+        );
     }
 
     #[test]

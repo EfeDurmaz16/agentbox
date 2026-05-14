@@ -1,7 +1,9 @@
 use std::collections::BTreeSet;
 
 use crate::runtime::provider::{RuntimeError, RuntimeProvider};
-use crate::runtime::types::{ExecCommand, MinipodSpec, RuntimeCapability};
+use crate::runtime::types::{
+    ExecCommand, MinipodSpec, NetworkEnforcementCapability, RuntimeCapability,
+};
 
 pub(crate) fn assert_provider_metadata(
     provider: &dyn RuntimeProvider,
@@ -29,6 +31,33 @@ pub(crate) fn assert_provider_metadata(
         assert!(
             provider.capabilities().contains(capability),
             "{} must declare {capability:?}",
+            provider.name()
+        );
+    }
+
+    let unique_network: BTreeSet<String> = provider
+        .network_enforcement_capabilities()
+        .iter()
+        .map(|capability| format!("{capability:?}"))
+        .collect();
+    assert_eq!(
+        unique_network.len(),
+        provider.network_enforcement_capabilities().len(),
+        "{} declares duplicate network enforcement capabilities",
+        provider.name()
+    );
+}
+
+pub(crate) fn assert_network_enforcement_metadata(
+    provider: &dyn RuntimeProvider,
+    required_capabilities: &[NetworkEnforcementCapability],
+) {
+    for capability in required_capabilities {
+        assert!(
+            provider
+                .network_enforcement_capabilities()
+                .contains(capability),
+            "{} must declare network enforcement {capability:?}",
             provider.name()
         );
     }

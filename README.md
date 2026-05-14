@@ -199,10 +199,12 @@ agentbox stop-pod 01hxyzagentpod
 
 **Current compatibility backend:** [Podman](https://podman.io)
 (`brew install podman` on macOS). Native AgentPod providers are descriptor-only
-until enforcement lands.
+until enforcement lands. `agentbox providers` separates planned provider
+capability metadata from active network enforcement flags, so Podman
+compatibility is not presented as domain or packet-level policy enforcement.
 
 **How guarded minipods work:**
-- Agent runs inside a container with isolated filesystem and network
+- Agent runs inside a container with governed filesystem and network policy metadata
 - Agentbox daemon socket is bind-mounted into the pod (the ONLY host connection)
 - Shim binaries are injected into the pod's PATH
 - Commands inside the pod still go through shim -> daemon -> policy check

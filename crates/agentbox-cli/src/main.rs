@@ -2139,15 +2139,16 @@ fn cmd_providers() {
     use agentbox_daemon::runtime::registry::RuntimeProviderRegistry;
 
     println!(
-        "{:<18} {:<10} {:<14} CAPABILITIES",
-        "PROVIDER", "PLATFORM", "STATUS"
+        "{:<18} {:<10} {:<14} {:<24} CAPABILITIES",
+        "PROVIDER", "PLATFORM", "STATUS", "NETWORK"
     );
-    println!("{}", "-".repeat(90));
+    println!("{}", "-".repeat(116));
     println!(
-        "{:<18} {:<10} {:<14} shim, policy, approval, audit",
+        "{:<18} {:<10} {:<14} {:<24} shim, policy, approval, audit",
         "direct-host",
         std::env::consts::OS,
-        "shipped"
+        "shipped",
+        "command-mediation"
     );
 
     let registry = RuntimeProviderRegistry::with_local_providers(
@@ -2170,10 +2171,11 @@ fn cmd_providers() {
             .collect::<Vec<_>>()
             .join(", ");
         println!(
-            "{:<18} {:<10} {:<14} {}",
+            "{:<18} {:<10} {:<14} {:<24} {}",
             provider.name(),
             provider.platform(),
             "planned",
+            format_network_enforcement(provider.network_enforcement_capabilities()),
             capabilities
         );
     }
@@ -2189,9 +2191,23 @@ fn cmd_providers() {
         "unavailable"
     };
     println!(
-        "{:<18} {:<10} {:<14} container isolation, shim bridge",
-        "podman", "linux-vm", podman_status
+        "{:<18} {:<10} {:<14} {:<24} container isolation, shim bridge",
+        "podman", "linux-vm", podman_status, "none"
     );
+}
+
+fn format_network_enforcement(
+    capabilities: &[agentbox_daemon::runtime::types::NetworkEnforcementCapability],
+) -> String {
+    if capabilities.is_empty() {
+        return "none".to_string();
+    }
+
+    capabilities
+        .iter()
+        .map(|capability| format!("{capability:?}"))
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 fn cmd_minipod_inspect(session_id: Option<String>, json: bool) {
