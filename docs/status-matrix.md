@@ -24,6 +24,7 @@ implemented yet.
 | Per-agent policy profiles | Shipped | `general`, `coding`, `research`, `deploy`, and custom profile ids can set policy defaults without hardcoding specific agent products. |
 | Runtime session store | Shipped | Runtime sessions persist to a local JSON store. |
 | Runtime manager | Shipped | Provider create, exec, status refresh, destroy, session persistence, and evidence events share one daemon-owned manager. |
+| Sidecar readiness metadata | Shipped | Minipod services can carry command-based readiness probes; the Podman compatibility path starts sidecars and waits for probes before starting the workspace agent container. |
 | Session-scoped approval grants | Shipped | Runtime sessions can carry approval grants that are persisted with the session and removed when the session is destroyed. |
 | Approval scope enforcement | Shipped | Runtime manager exec enforces once, command, path, domain, and session approval grants for approve-bucket commands. Expired grants are ignored and block-bucket commands cannot be grant-bypassed. |
 | Signed approval model | Shipped | Approval grants can be represented as signed approval records with evidence refs and optional FIDES-style signatures; no fake signing provider is shipped. |

@@ -1114,18 +1114,50 @@ fn runtime_image(runtime: &str) -> &'static str {
 }
 
 fn service_spec(service: &str) -> Option<agentbox_daemon::runtime::types::ServiceSpec> {
-    let image = match service {
-        "postgres" => "postgres:16-alpine",
-        "redis" => "redis:7-alpine",
-        "mysql" => "mysql:8",
-        "mongo" => "mongo:7",
+    use agentbox_daemon::runtime::types::{ServiceReadinessProbe, ServiceSpec};
+
+    let (image, readiness) = match service {
+        "postgres" => (
+            "postgres:16-alpine",
+            Some(ServiceReadinessProbe::command(vec![
+                "pg_isready".into(),
+                "-U".into(),
+                "postgres".into(),
+            ])),
+        ),
+        "redis" => (
+            "redis:7-alpine",
+            Some(ServiceReadinessProbe::command(vec![
+                "redis-cli".into(),
+                "ping".into(),
+            ])),
+        ),
+        "mysql" => (
+            "mysql:8",
+            Some(ServiceReadinessProbe::command(vec![
+                "mysqladmin".into(),
+                "ping".into(),
+                "-h".into(),
+                "127.0.0.1".into(),
+            ])),
+        ),
+        "mongo" => (
+            "mongo:7",
+            Some(ServiceReadinessProbe::command(vec![
+                "mongosh".into(),
+                "--quiet".into(),
+                "--eval".into(),
+                "db.runCommand({ ping: 1 }).ok".into(),
+            ])),
+        ),
         _ => return None,
     };
 
-    Some(agentbox_daemon::runtime::types::ServiceSpec {
+    Some(ServiceSpec {
         name: service.to_string(),
         image: image.to_string(),
         env: HashMap::new(),
+        readiness,
     })
 }
 

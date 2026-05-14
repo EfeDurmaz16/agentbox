@@ -208,6 +208,10 @@ agentbox pods
 agentbox stop-pod 01hxyzagentpod
 ```
 
+Service sidecars such as `postgres`, `redis`, `mysql`, and `mongo` carry
+readiness probes. The compatibility backend starts sidecars first and waits for
+their probe command before starting the workspace agent container.
+
 **Current compatibility backend:** [Podman](https://podman.io)
 (`brew install podman` on macOS). Native AgentPod providers are descriptor-only
 until enforcement lands. `agentbox providers` separates planned provider

@@ -1,7 +1,8 @@
 use std::collections::HashMap;
 
 use super::types::{
-    ContainerRole, ContainerSpec, NetworkPolicy, PodSpec, PortMapping, ResourceLimits,
+    ContainerRole, ContainerSpec, NetworkPolicy, PodSpec, PortMapping, ReadinessProbe,
+    ResourceLimits,
 };
 
 // ---------------------------------------------------------------------------
@@ -118,6 +119,7 @@ impl IntentParser {
             env: HashMap::new(),
             ports: vec![],
             role: ContainerRole::Workspace,
+            readiness: None,
         }];
 
         let mut pod_env: HashMap<String, String> = HashMap::new();
@@ -149,6 +151,7 @@ impl IntentParser {
                     protocol: "tcp".to_string(),
                 }],
                 role: ContainerRole::Sidecar,
+                readiness: readiness_probe_for(svc.container_name),
             });
 
             // Environment variable for workspace to connect to the sidecar
@@ -198,6 +201,7 @@ impl IntentParser {
             env: HashMap::new(),
             ports: vec![],
             role: ContainerRole::Workspace,
+            readiness: None,
         }];
 
         let mut pod_env: HashMap<String, String> = HashMap::new();
@@ -229,6 +233,7 @@ impl IntentParser {
                         protocol: "tcp".to_string(),
                     }],
                     role: ContainerRole::Sidecar,
+                    readiness: readiness_probe_for(svc.container_name),
                 });
 
                 pod_env.insert(svc.env_key.to_string(), svc.env_value_template.to_string());
@@ -302,6 +307,27 @@ impl IntentParser {
     }
 }
 
+fn readiness_probe_for(service: &str) -> Option<ReadinessProbe> {
+    let command = match service {
+        "postgres" => vec!["pg_isready", "-U", "postgres"],
+        "redis" => vec!["redis-cli", "ping"],
+        "mysql" => vec!["mysqladmin", "ping", "-h", "127.0.0.1"],
+        "mongo" => vec![
+            "mongosh",
+            "--quiet",
+            "--eval",
+            "db.runCommand({ ping: 1 }).ok",
+        ],
+        _ => return None,
+    };
+
+    Some(ReadinessProbe {
+        command: command.into_iter().map(String::from).collect(),
+        interval_ms: 500,
+        timeout_ms: 30_000,
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -326,6 +352,14 @@ mod tests {
         assert_eq!(pg.image, "postgres:16-alpine");
         assert!(matches!(pg.role, ContainerRole::Sidecar));
         assert_eq!(pg.ports[0].container_port, 5432);
+        assert_eq!(
+            pg.readiness.as_ref().map(|probe| probe.command.clone()),
+            Some(vec![
+                "pg_isready".to_string(),
+                "-U".to_string(),
+                "postgres".to_string()
+            ])
+        );
 
         // Pod env should contain DATABASE_URL
         assert!(spec.env.contains_key("DATABASE_URL"));
@@ -343,6 +377,10 @@ mod tests {
         let redis = &spec.containers[1];
         assert_eq!(redis.image, "redis:7-alpine");
         assert_eq!(redis.ports[0].container_port, 6379);
+        assert_eq!(
+            redis.readiness.as_ref().map(|probe| probe.command.clone()),
+            Some(vec!["redis-cli".to_string(), "ping".to_string()])
+        );
 
         assert!(spec.env.contains_key("REDIS_URL"));
     }
@@ -406,6 +444,7 @@ mod tests {
         // Postgres sidecar
         assert_eq!(spec.containers.len(), 2);
         assert_eq!(spec.containers[1].image, "postgres:16-alpine");
+        assert!(spec.containers[1].readiness.is_some());
         assert!(spec.env.contains_key("DATABASE_URL"));
     }
 }

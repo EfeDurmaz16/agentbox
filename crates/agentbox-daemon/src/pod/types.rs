@@ -23,6 +23,15 @@ pub struct ContainerSpec {
     pub env: HashMap<String, String>,
     pub ports: Vec<PortMapping>,
     pub role: ContainerRole,
+    #[serde(default)]
+    pub readiness: Option<ReadinessProbe>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReadinessProbe {
+    pub command: Vec<String>,
+    pub interval_ms: u64,
+    pub timeout_ms: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

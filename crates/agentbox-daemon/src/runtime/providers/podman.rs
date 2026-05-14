@@ -7,7 +7,7 @@ use crate::pod::provider::{PodError, PodProvider};
 use crate::pod::types::{
     ContainerRole, ContainerSpec, ExecRequest, MountKind as PodMountKind, MountSpec,
     NetworkMode as PodNetworkMode, NetworkPolicy as PodNetworkPolicy, PodSession, PodSpec,
-    PodStatus, ResourceLimits,
+    PodStatus, ReadinessProbe, ResourceLimits,
 };
 use crate::runtime::provider::{RuntimeError, RuntimeProvider};
 use crate::runtime::types::{
@@ -144,6 +144,7 @@ fn minipod_to_pod_spec(spec: &MinipodSpec) -> PodSpec {
         env: HashMap::new(),
         ports: vec![],
         role: ContainerRole::Workspace,
+        readiness: None,
     }];
 
     containers.extend(spec.services.iter().map(|service| ContainerSpec {
@@ -153,6 +154,11 @@ fn minipod_to_pod_spec(spec: &MinipodSpec) -> PodSpec {
         env: service.env.clone(),
         ports: vec![],
         role: ContainerRole::Sidecar,
+        readiness: service.readiness.as_ref().map(|probe| ReadinessProbe {
+            command: probe.command.clone(),
+            interval_ms: probe.interval_ms,
+            timeout_ms: probe.timeout_ms,
+        }),
     }));
 
     PodSpec {
@@ -363,6 +369,36 @@ mod tests {
         assert!(matches!(credential_mount.kind, PodMountKind::Credential));
         assert!(credential_mount.read_only);
         assert!(credential_mount.one_time);
+    }
+
+    #[test]
+    fn converts_sidecar_readiness_to_pod_container_metadata() {
+        let mut spec = MinipodSpec::for_agent_task("node", "/tmp/workspace");
+        spec.services.push(crate::runtime::types::ServiceSpec {
+            name: "postgres".into(),
+            image: "postgres:16-alpine".into(),
+            env: HashMap::new(),
+            readiness: Some(crate::runtime::types::ServiceReadinessProbe {
+                command: vec!["pg_isready".into(), "-U".into(), "postgres".into()],
+                interval_ms: 250,
+                timeout_ms: 10_000,
+            }),
+        });
+
+        let pod_spec = minipod_to_pod_spec(&spec);
+        let sidecar = pod_spec
+            .containers
+            .iter()
+            .find(|container| matches!(container.role, ContainerRole::Sidecar))
+            .expect("sidecar should be present");
+        let readiness = sidecar
+            .readiness
+            .as_ref()
+            .expect("sidecar readiness should be present");
+
+        assert_eq!(readiness.command, vec!["pg_isready", "-U", "postgres"]);
+        assert_eq!(readiness.interval_ms, 250);
+        assert_eq!(readiness.timeout_ms, 10_000);
     }
 
     #[test]

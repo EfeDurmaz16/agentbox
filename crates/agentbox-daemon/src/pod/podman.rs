@@ -1,8 +1,9 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use tokio::process::Command;
+use tokio::time::sleep;
 use tracing::{debug, info};
 
 use crate::pod::provider::{PodError, PodProvider};
@@ -202,6 +203,43 @@ impl PodmanProvider {
         Ok(())
     }
 
+    async fn wait_for_sidecar_readiness(
+        &self,
+        id: &str,
+        container: &ContainerSpec,
+    ) -> Result<(), PodError> {
+        let Some(probe) = &container.readiness else {
+            return Ok(());
+        };
+        if probe.command.is_empty() {
+            return Err(PodError::Internal(format!(
+                "sidecar {} readiness command cannot be empty",
+                container.name
+            )));
+        }
+
+        let container_name = Self::container_name(id, &container.name);
+        let interval = Duration::from_millis(probe.interval_ms.max(100));
+        let timeout = Duration::from_millis(probe.timeout_ms.max(probe.interval_ms.max(100)));
+        let started = Instant::now();
+
+        loop {
+            let mut args = vec!["exec".to_string(), container_name.clone()];
+            args.extend(probe.command.iter().cloned());
+            let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+            if Self::run_podman(&arg_refs).await.is_ok() {
+                return Ok(());
+            }
+            if started.elapsed() >= timeout {
+                return Err(PodError::Internal(format!(
+                    "sidecar {} readiness probe timed out after {}ms",
+                    container.name, probe.timeout_ms
+                )));
+            }
+            sleep(interval).await;
+        }
+    }
+
     /// Create shim symlinks inside the workspace container so that dangerous
     /// commands route through agentbox-shim.
     async fn setup_shims(&self, id: &str) -> Result<(), PodError> {
@@ -302,15 +340,16 @@ impl PodProvider for PodmanProvider {
         // 1. Create the pod
         self.create_pod(id, spec).await?;
 
-        // 2. Start containers
+        // 2. Start sidecars first and wait for readiness before workspace agent startup.
         for container in &spec.containers {
-            match container.role {
-                ContainerRole::Workspace => {
-                    self.start_workspace(id, container, spec).await?;
-                }
-                ContainerRole::Sidecar => {
-                    self.start_sidecar(id, container).await?;
-                }
+            if matches!(container.role, ContainerRole::Sidecar) {
+                self.start_sidecar(id, container).await?;
+                self.wait_for_sidecar_readiness(id, container).await?;
+            }
+        }
+        for container in &spec.containers {
+            if matches!(container.role, ContainerRole::Workspace) {
+                self.start_workspace(id, container, spec).await?;
             }
         }
 
@@ -464,6 +503,7 @@ mod tests {
                     env: HashMap::new(),
                     ports: vec![],
                     role: ContainerRole::Workspace,
+                    readiness: None,
                 },
                 ContainerSpec {
                     name: "postgres".to_string(),
@@ -476,6 +516,11 @@ mod tests {
                         protocol: "tcp".to_string(),
                     }],
                     role: ContainerRole::Sidecar,
+                    readiness: Some(ReadinessProbe {
+                        command: vec!["pg_isready".into(), "-U".into(), "postgres".into()],
+                        interval_ms: 500,
+                        timeout_ms: 30_000,
+                    }),
                 },
             ],
             network: NetworkPolicy::default(),

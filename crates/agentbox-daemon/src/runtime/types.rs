@@ -619,6 +619,25 @@ pub struct ServiceSpec {
     pub name: String,
     pub image: String,
     pub env: HashMap<String, String>,
+    #[serde(default)]
+    pub readiness: Option<ServiceReadinessProbe>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServiceReadinessProbe {
+    pub command: Vec<String>,
+    pub interval_ms: u64,
+    pub timeout_ms: u64,
+}
+
+impl ServiceReadinessProbe {
+    pub fn command(command: Vec<String>) -> Self {
+        Self {
+            command,
+            interval_ms: 500,
+            timeout_ms: 30_000,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1262,6 +1281,11 @@ mod tests {
             name: "postgres".into(),
             image: "postgres:17-alpine".into(),
             env: HashMap::from([("POSTGRES_PASSWORD".into(), "agentbox".into())]),
+            readiness: Some(ServiceReadinessProbe::command(vec![
+                "pg_isready".into(),
+                "-U".into(),
+                "postgres".into(),
+            ])),
         });
         spec.labels
             .insert("agentbox.provider".into(), "agentpod-linux".into());
