@@ -128,6 +128,7 @@ API. It posts:
 - `POST /sessions`
 - `POST /sessions/{worker_session_id}/exec`
 - `POST /sessions/{worker_session_id}/evidence`
+- `GET /sessions/{worker_session_id}/evidence/status?session_id=...`
 - `POST /sessions/{worker_session_id}/evidence/bundle`
 - `POST /sessions/{worker_session_id}/destroy`
 
@@ -205,6 +206,9 @@ storage path so a restarted worker can prove which bundle payloads it accepted.
 Worker routes that mutate session state fail the request if the configured
 state file cannot be serialized, prepared, or written; they do not acknowledge
 state-changing operations as durable when persistence fails.
+The status route returns the matching session status, evidence metadata
+receipts, and stored bundle payload references after binding the caller-provided
+`session_id` to the allocated `worker_session_id`.
 When the daemon-side provider creates a remote session, it persists the worker
 endpoint, worker session id, worker identity, and worker evidence endpoint in
 session labels so later exec/destroy calls can route back to the same worker.

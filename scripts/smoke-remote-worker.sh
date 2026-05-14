@@ -193,6 +193,25 @@ with open(data["storage_path"], "r", encoding="utf-8") as fh:
 assert stored
 PY
 
+curl -fsS "http://127.0.0.1:${PORT}/sessions/${WORKER_SESSION_ID}/evidence/status?session_id=${SESSION_ID}" \
+  >"$TMPDIR/evidence-status.json"
+
+python3 - "$TMPDIR/evidence-status.json" "$TMPDIR/evidence-bundle-upload.expected" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], "r", encoding="utf-8") as fh:
+    data = json.load(fh)
+with open(sys.argv[2], "r", encoding="utf-8") as fh:
+    expected_bundle_hash = fh.read().strip()
+
+assert data["status"] == "Running"
+assert data["evidence_receipts"][0]["bundle_sha256"] == "f" * 64
+assert data["evidence_receipts"][0]["event_count"] == 2
+assert data["stored_evidence_bundles"][0]["bundle_sha256"] == expected_bundle_hash
+assert data["stored_evidence_bundles"][0]["stored_bytes"] > 0
+PY
+
 python3 - "$TMPDIR/worker-state/worker-sessions.json" "$SESSION_ID" "$WORKER_SESSION_ID" "$TMPDIR/evidence-bundle-upload.expected" <<'PY'
 import json
 import sys

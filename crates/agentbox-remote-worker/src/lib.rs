@@ -12,9 +12,9 @@ use agentbox_daemon::runtime::providers::remote::{
     RemoteAgentPodHandshakeAck, RemoteAgentPodHandshakeDescriptor, RemoteAgentPodLifecycleEvent,
 };
 use agentbox_daemon::runtime::types::{CommandResult, RuntimeCapability, RuntimeStatus};
-use axum::extract::State;
+use axum::extract::{Path as AxumPath, Query, State};
 use axum::http::StatusCode;
-use axum::routing::post;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use chrono::{DateTime, Duration, Utc};
 use ed25519_dalek::{Signer, SigningKey};
@@ -145,6 +145,20 @@ struct WorkerEvidenceBundleUploadResponse {
     lifecycle_events: Vec<RemoteAgentPodLifecycleEvent>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+struct WorkerEvidenceStatusQuery {
+    session_id: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct WorkerEvidenceStatusResponse {
+    session_id: String,
+    worker_session_id: String,
+    status: RuntimeStatus,
+    evidence_receipts: Vec<WorkerEvidenceReceiptSnapshot>,
+    stored_evidence_bundles: Vec<WorkerStoredEvidenceBundleSnapshot>,
+}
+
 type WorkerRouteResult<T> = Result<Json<T>, (StatusCode, Json<WorkerError>)>;
 
 fn worker_error(status: StatusCode, message: impl Into<String>) -> (StatusCode, Json<WorkerError>) {
@@ -253,6 +267,10 @@ pub fn router(config: RemoteWorkerConfig) -> Router {
         .route(
             "/sessions/{worker_session_id}/evidence",
             post(upload_evidence),
+        )
+        .route(
+            "/sessions/{worker_session_id}/evidence/status",
+            get(evidence_status),
         )
         .route(
             "/sessions/{worker_session_id}/evidence/bundle",
@@ -616,6 +634,52 @@ async fn upload_evidence_bundle(
         stored_bytes: path.stored_bytes,
         storage_path: path.path.display().to_string(),
         lifecycle_events: vec![RemoteAgentPodLifecycleEvent::EvidenceSealed],
+    }))
+}
+
+async fn evidence_status(
+    State(state): State<Arc<RemoteWorkerState>>,
+    AxumPath(worker_session_id): AxumPath<String>,
+    Query(query): Query<WorkerEvidenceStatusQuery>,
+) -> WorkerRouteResult<WorkerEvidenceStatusResponse> {
+    let sessions = state.sessions.lock().await;
+    let Some(session) = sessions.get(&worker_session_id) else {
+        return Err(worker_error(
+            StatusCode::NOT_FOUND,
+            format!("agentbox remote worker session {worker_session_id} has not been created"),
+        ));
+    };
+    if session.session_id != query.session_id {
+        return Err(worker_error(
+            StatusCode::CONFLICT,
+            "agentbox remote worker session id does not match worker session",
+        ));
+    }
+    Ok(Json(WorkerEvidenceStatusResponse {
+        session_id: session.session_id.clone(),
+        worker_session_id,
+        status: session.status.clone(),
+        evidence_receipts: session
+            .evidence_receipts
+            .iter()
+            .map(|receipt| WorkerEvidenceReceiptSnapshot {
+                bundle_sha256: receipt.bundle_sha256.clone(),
+                derived_from_bundle: receipt.derived_from_bundle,
+                bundle_id: receipt.bundle_id.clone(),
+                bundle_root_sha256: receipt.bundle_root_sha256.clone(),
+                event_count: receipt.event_count,
+                sealed_at: receipt.sealed_at,
+            })
+            .collect(),
+        stored_evidence_bundles: session
+            .stored_evidence_bundles
+            .iter()
+            .map(|bundle| WorkerStoredEvidenceBundleSnapshot {
+                bundle_sha256: bundle.bundle_sha256.clone(),
+                stored_bytes: bundle.stored_bytes,
+                storage_path: bundle.storage_path.clone(),
+            })
+            .collect(),
     }))
 }
 
@@ -1388,6 +1452,87 @@ mod tests {
             bundle_json.len() as u64
         );
         let _ = std::fs::remove_dir_all(state_dir);
+    }
+
+    #[tokio::test]
+    async fn evidence_status_reports_receipts_and_stored_bundles() {
+        let config = RemoteWorkerConfig::new(
+            "worker.local/dev",
+            "https://worker.example.com/agentpod/evidence",
+            SigningKey::from_bytes(&[38_u8; 32]),
+        );
+        let state = test_state(config);
+        let sealed_at = chrono::Utc::now();
+        let mut session = WorkerSession::new("session-1".into(), std::env::temp_dir());
+        session.evidence_receipts.push(WorkerEvidenceReceipt {
+            bundle_sha256: "c".repeat(64),
+            derived_from_bundle: true,
+            bundle_id: Some("bundle-status".into()),
+            bundle_root_sha256: Some("c".repeat(64)),
+            event_count: 3,
+            sealed_at: Some(sealed_at),
+        });
+        session
+            .stored_evidence_bundles
+            .push(WorkerStoredEvidenceBundle {
+                bundle_sha256: "c".repeat(64),
+                stored_bytes: 42,
+                storage_path: PathBuf::from("/tmp/evidence/worker-session-1/bundle.json"),
+            });
+        state
+            .sessions
+            .lock()
+            .await
+            .insert("worker-session-1".into(), session);
+
+        let response = evidence_status(
+            State(state),
+            AxumPath("worker-session-1".into()),
+            Query(WorkerEvidenceStatusQuery {
+                session_id: "session-1".into(),
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+
+        assert_eq!(response.session_id, "session-1");
+        assert_eq!(response.worker_session_id, "worker-session-1");
+        assert_eq!(response.status, RuntimeStatus::Running);
+        assert_eq!(response.evidence_receipts.len(), 1);
+        assert_eq!(response.evidence_receipts[0].event_count, 3);
+        assert_eq!(
+            response.evidence_receipts[0].bundle_id.as_deref(),
+            Some("bundle-status")
+        );
+        assert_eq!(response.stored_evidence_bundles.len(), 1);
+        assert_eq!(response.stored_evidence_bundles[0].stored_bytes, 42);
+    }
+
+    #[tokio::test]
+    async fn evidence_status_rejects_session_id_mismatch() {
+        let config = RemoteWorkerConfig::new(
+            "worker.local/dev",
+            "https://worker.example.com/agentpod/evidence",
+            SigningKey::from_bytes(&[39_u8; 32]),
+        );
+        let state = test_state(config);
+        state.sessions.lock().await.insert(
+            "worker-session-1".into(),
+            WorkerSession::new("session-1".into(), std::env::temp_dir()),
+        );
+
+        let err = evidence_status(
+            State(state),
+            AxumPath("worker-session-1".into()),
+            Query(WorkerEvidenceStatusQuery {
+                session_id: "other-session".into(),
+            }),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(err.0, StatusCode::CONFLICT);
     }
 
     #[tokio::test]
