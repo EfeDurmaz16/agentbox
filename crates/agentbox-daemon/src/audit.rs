@@ -259,7 +259,7 @@ pub fn redact_sensitive_text(input: &str) -> String {
         let redacted = if redact_next {
             redact_next = false;
             REDACTED.to_string()
-        } else if is_sensitive_flag(token) {
+        } else if is_sensitive_flag(token) || is_sensitive_bearer_marker(token) {
             redact_next = true;
             token.to_string()
         } else {
@@ -284,6 +284,7 @@ fn redact_sensitive_token(token: &str) -> String {
     } else {
         redact_url_userinfo(core)
             .or_else(|| redact_sensitive_path(core))
+            .or_else(|| redact_obvious_secret_value(core))
             .unwrap_or_else(|| core.to_string())
     };
 
@@ -305,6 +306,16 @@ fn split_shell_wrapping(token: &str) -> (&str, &str, &str) {
     (&token[..start], &token[start..end], &token[end..])
 }
 
+fn is_sensitive_bearer_marker(token: &str) -> bool {
+    matches!(
+        token
+            .trim_matches(|c: char| c == '"' || c == '\'' || c == ':' || c == ',')
+            .to_ascii_lowercase()
+            .as_str(),
+        "bearer"
+    )
+}
+
 fn is_sensitive_flag(token: &str) -> bool {
     let token = token.trim_start_matches('-').to_ascii_lowercase();
     matches!(
@@ -320,6 +331,34 @@ fn is_sensitive_flag(token: &str) -> bool {
             | "secret"
             | "token"
     )
+}
+
+fn redact_obvious_secret_value(value: &str) -> Option<String> {
+    let lower = value.to_ascii_lowercase();
+    let has_known_prefix = lower.starts_with("sk-")
+        || lower.starts_with("ghp_")
+        || lower.starts_with("github_pat_")
+        || lower.starts_with("xoxb-")
+        || lower.starts_with("xoxp-")
+        || value.starts_with("AKIA")
+        || value.starts_with("ASIA");
+
+    if has_known_prefix || looks_like_jwt(value) {
+        Some(REDACTED.to_string())
+    } else {
+        None
+    }
+}
+
+fn looks_like_jwt(value: &str) -> bool {
+    let parts: Vec<&str> = value.split('.').collect();
+    parts.len() == 3
+        && parts.iter().all(|part| {
+            part.len() >= 8
+                && part
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
+        })
 }
 
 fn is_sensitive_key(key: &str) -> bool {
@@ -654,6 +693,63 @@ mod tests {
             ),
             "cat <redacted>"
         );
+    }
+
+    #[test]
+    fn leak_regression_fixtures_redact_common_secret_values() {
+        let fixtures = [
+            (
+                "curl -H Authorization: Bearer ghp_abcdefghijklmnopqrstuvwxyz123456 https://api.github.com",
+                "ghp_abcdefghijklmnopqrstuvwxyz123456",
+            ),
+            (
+                "openai api call sk-proj-abcdefghijklmnopqrstuvwxyz1234567890",
+                "sk-proj-abcdefghijklmnopqrstuvwxyz1234567890",
+            ),
+            (
+                "aws configure AKIAIOSFODNN7EXAMPLE",
+                "AKIAIOSFODNN7EXAMPLE",
+            ),
+            (
+                "jwt eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJhZ2VudCJ9.c2lnbmF0dXJlMTIz",
+                "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJhZ2VudCJ9.c2lnbmF0dXJlMTIz",
+            ),
+        ];
+
+        for (input, secret) in fixtures {
+            let redacted = redact_sensitive_text(input);
+
+            assert!(
+                !redacted.contains(secret),
+                "redacted output leaked fixture secret: {redacted}"
+            );
+            assert!(redacted.contains(REDACTED));
+        }
+    }
+
+    #[test]
+    fn audit_and_evidence_json_do_not_leak_common_secret_values() {
+        let store = AuditStore::in_memory().unwrap();
+        let secret = "github_pat_11AAABBBBBCCCCCDDDDDEEEEEFFFFF";
+        let event = AuditEvent::new(
+            42,
+            Some("codex".into()),
+            format!("curl -H Authorization: Bearer {secret} https://api.github.com"),
+            "/tmp/agentbox-work".into(),
+            "network".into(),
+            "approval_required".into(),
+            None,
+            Some(format!("agent-runner --token {secret}")),
+        );
+
+        store.log_event(&event).unwrap();
+
+        let got = store.recent(1).unwrap().remove(0);
+        let evidence_json = serde_json::to_string(&got).unwrap();
+        assert!(!got.command.contains(secret));
+        assert!(!got.parent_process.unwrap_or_default().contains(secret));
+        assert!(!evidence_json.contains(secret));
+        assert!(evidence_json.contains(REDACTED));
     }
 
     #[test]
