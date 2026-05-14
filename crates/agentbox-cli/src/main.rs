@@ -391,11 +391,15 @@ enum Commands {
 
         /// SHA-256 hex digest of the sealed evidence bundle
         #[arg(long = "bundle-sha256")]
-        bundle_sha256: String,
+        bundle_sha256: Option<String>,
 
         /// Number of evidence events in the sealed bundle
         #[arg(long = "event-count")]
-        event_count: u64,
+        event_count: Option<u64>,
+
+        /// Read bundle root hash and event count from a verified evidence bundle directory
+        #[arg(long = "bundle-dir")]
+        bundle_dir: Option<PathBuf>,
     },
     /// Generate a native provider execution plan without running it
     NativePlan {
@@ -2992,11 +2996,7 @@ fn cmd_verify_evidence_bundle_dir(bundle_dir: &Path) {
 }
 
 fn verify_evidence_bundle_dir(bundle_dir: &Path) -> Result<usize, String> {
-    let index_path = bundle_dir.join("index.json");
-    let index_bytes = fs::read(&index_path)
-        .map_err(|e| format!("failed to read {}: {e}", index_path.display()))?;
-    let index: EvidenceBundleIndex = serde_json::from_slice(&index_bytes)
-        .map_err(|e| format!("failed to parse {}: {e}", index_path.display()))?;
+    let index = read_evidence_bundle_index(bundle_dir)?;
     if index.schema_version != 1 {
         return Err(format!(
             "unsupported evidence bundle index schema version {}",
@@ -3037,6 +3037,44 @@ fn verify_evidence_bundle_dir(bundle_dir: &Path) -> Result<usize, String> {
     }
 
     Ok(index.files.len())
+}
+
+fn read_evidence_bundle_index(bundle_dir: &Path) -> Result<EvidenceBundleIndex, String> {
+    let index_path = bundle_dir.join("index.json");
+    let index_bytes = fs::read(&index_path)
+        .map_err(|e| format!("failed to read {}: {e}", index_path.display()))?;
+    serde_json::from_slice(&index_bytes)
+        .map_err(|e| format!("failed to parse {}: {e}", index_path.display()))
+}
+
+fn load_remote_evidence_metadata_from_bundle(bundle_dir: &Path) -> Result<(String, u64), String> {
+    verify_evidence_bundle_dir(bundle_dir)?;
+    let index = read_evidence_bundle_index(bundle_dir)?;
+    let bundle_path = bundle_dir.join("bundle.json");
+    let bundle_bytes = fs::read(&bundle_path)
+        .map_err(|e| format!("failed to read {}: {e}", bundle_path.display()))?;
+    let bundle: serde_json::Value = serde_json::from_slice(&bundle_bytes)
+        .map_err(|e| format!("failed to parse {}: {e}", bundle_path.display()))?;
+    let event_count = [
+        "lifecycle_events",
+        "approvals",
+        "commands",
+        "boundary_events",
+        "credential_events",
+    ]
+    .iter()
+    .map(|key| {
+        bundle
+            .get(*key)
+            .and_then(|value| value.as_array())
+            .map(|events| events.len() as u64)
+            .unwrap_or(0)
+    })
+    .sum::<u64>();
+    if event_count == 0 {
+        return Err("evidence bundle does not contain any uploadable evidence events".to_string());
+    }
+    Ok((index.root_sha256, event_count))
 }
 
 fn evidence_bundle_root_sha256(files: &[EvidenceBundleFile]) -> String {
@@ -3684,10 +3722,38 @@ fn cmd_remote_evidence(
     session_id: String,
     worker_session_id: String,
     evidence: String,
-    bundle_sha256: String,
-    event_count: u64,
+    bundle_sha256: Option<String>,
+    event_count: Option<u64>,
+    bundle_dir: Option<PathBuf>,
 ) {
     use agentbox_daemon::runtime::providers::remote::RemoteAgentPodEvidenceUploadRequest;
+
+    let (bundle_sha256, event_count) = if let Some(bundle_dir) = bundle_dir {
+        if bundle_sha256.is_some() || event_count.is_some() {
+            eprintln!(
+                "error: --bundle-dir cannot be combined with --bundle-sha256 or --event-count"
+            );
+            std::process::exit(1);
+        }
+        load_remote_evidence_metadata_from_bundle(&bundle_dir).unwrap_or_else(|e| {
+            eprintln!(
+                "error: failed to derive remote evidence metadata from {}: {}",
+                bundle_dir.display(),
+                e
+            );
+            std::process::exit(1);
+        })
+    } else {
+        let Some(bundle_sha256) = bundle_sha256 else {
+            eprintln!("error: --bundle-sha256 is required unless --bundle-dir is provided");
+            std::process::exit(1);
+        };
+        let Some(event_count) = event_count else {
+            eprintln!("error: --event-count is required unless --bundle-dir is provided");
+            std::process::exit(1);
+        };
+        (bundle_sha256, event_count)
+    };
 
     let request = RemoteAgentPodEvidenceUploadRequest {
         session_id,
@@ -4409,12 +4475,14 @@ async fn main() {
             evidence,
             bundle_sha256,
             event_count,
+            bundle_dir,
         } => cmd_remote_evidence(
             session_id,
             worker_session_id,
             evidence,
             bundle_sha256,
             event_count,
+            bundle_dir,
         ),
         Commands::NativePlan {
             provider,
@@ -4512,6 +4580,52 @@ mod tests {
 
         let err = verify_evidence_bundle_dir(&output_dir).unwrap_err();
         assert!(err.contains("mismatch"), "{err}");
+
+        let _ = fs::remove_dir_all(output_dir);
+    }
+
+    #[test]
+    fn remote_evidence_metadata_can_be_derived_from_bundle_dir() {
+        let output_dir = std::env::temp_dir().join(format!(
+            "agentbox-remote-evidence-bundle-test-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&output_dir);
+        fs::create_dir_all(&output_dir).unwrap();
+
+        let bundle_json = serde_json::json!({
+            "schema_version": 1,
+            "commands": [{"audit_event_id": "evt_1"}],
+            "approvals": [],
+            "lifecycle_events": [],
+            "boundary_events": [],
+            "credential_events": []
+        });
+        let files =
+            vec![
+                write_bundle_json_file(&output_dir, "bundle.json", "test bundle", &bundle_json)
+                    .unwrap(),
+            ];
+        let index = EvidenceBundleIndex {
+            schema_version: 1,
+            bundle_id: "bundle-test".into(),
+            session_id: "session-test".into(),
+            provider: "direct-host".into(),
+            status: "Stopped".into(),
+            root_sha256: evidence_bundle_root_sha256(&files),
+            generated_at: Utc::now(),
+            files,
+        };
+        fs::write(
+            output_dir.join("index.json"),
+            serde_json::to_vec_pretty(&index).unwrap(),
+        )
+        .unwrap();
+
+        let (root_sha256, event_count) =
+            load_remote_evidence_metadata_from_bundle(&output_dir).unwrap();
+        assert_eq!(root_sha256, index.root_sha256);
+        assert_eq!(event_count, 1);
 
         let _ = fs::remove_dir_all(output_dir);
     }

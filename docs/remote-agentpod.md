@@ -77,8 +77,19 @@ agentbox remote-evidence \
   --event-count 12
 ```
 
-This only validates and prints upload metadata. It does not upload evidence or
-claim a live worker connection.
+If the session evidence was exported as a bundle directory, Agentbox can derive
+the upload hash and event count from the verified bundle index instead:
+
+```sh
+agentbox evidence --session agentbox-session-id --bundle ./agentbox-evidence
+agentbox remote-evidence \
+  --session agentbox-session-id \
+  --worker-session worker-session-id \
+  --bundle-dir ./agentbox-evidence
+```
+
+This only validates and prints upload metadata. It does not upload evidence,
+sign the bundle, or claim a live worker connection.
 
 ## Transport Conformance
 

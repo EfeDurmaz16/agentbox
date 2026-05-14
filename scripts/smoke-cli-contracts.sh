@@ -73,6 +73,7 @@ log "checking evidence bundle verification"
 BUNDLE_DIR="$TMPDIR/evidence-bundle"
 mkdir -p "$BUNDLE_DIR"
 printf '{"schema_version":1,"kind":"AgentPod"}\n' >"$BUNDLE_DIR/manifest.json"
+printf '{"schema_version":1,"commands":[{"audit_event_id":"evt_1"}],"approvals":[],"lifecycle_events":[],"boundary_events":[],"credential_events":[]}\n' >"$BUNDLE_DIR/bundle.json"
 python3 - "$BUNDLE_DIR" <<'PY'
 import hashlib
 import json
@@ -80,19 +81,26 @@ import pathlib
 import sys
 
 bundle = pathlib.Path(sys.argv[1])
-manifest = bundle / "manifest.json"
-data = manifest.read_bytes()
-file_entry = {
-    "path": "manifest.json",
-    "media_type": "application/json",
-    "description": "smoke manifest",
-    "sha256": hashlib.sha256(data).hexdigest(),
-    "bytes": len(data),
-}
-root_payload = (
-    "agentbox-evidence-root-v1\n"
-    + f"{file_entry['path']}\0{file_entry['sha256']}\0{file_entry['bytes']}\0{file_entry['media_type']}"
-).encode()
+files = []
+for path, description in [
+    ("bundle.json", "smoke bundle"),
+    ("manifest.json", "smoke manifest"),
+]:
+    data = (bundle / path).read_bytes()
+    files.append(
+        {
+            "path": path,
+            "media_type": "application/json",
+            "description": description,
+            "sha256": hashlib.sha256(data).hexdigest(),
+            "bytes": len(data),
+        }
+    )
+root_entries = [
+    f"{entry['path']}\0{entry['sha256']}\0{entry['bytes']}\0{entry['media_type']}"
+    for entry in sorted(files, key=lambda value: value["path"])
+]
+root_payload = ("agentbox-evidence-root-v1\n" + "\n".join(root_entries)).encode()
 index = {
     "schema_version": 1,
     "bundle_id": "smoke-bundle",
@@ -101,11 +109,17 @@ index = {
     "status": "Stopped",
     "root_sha256": hashlib.sha256(root_payload).hexdigest(),
     "generated_at": "2026-05-14T00:00:00Z",
-    "files": [file_entry],
+    "files": files,
 }
 (bundle / "index.json").write_text(json.dumps(index, indent=2), encoding="utf-8")
 PY
 "${CLI[@]}" evidence --verify --bundle "$BUNDLE_DIR"
+"${CLI[@]}" remote-evidence \
+  --session smoke-session \
+  --worker-session smoke-worker-session \
+  --bundle-dir "$BUNDLE_DIR" >"$TMPDIR/remote-evidence-from-bundle.json"
+validate_json "$TMPDIR/remote-evidence-from-bundle.json" \
+  "data.get('session_id') == 'smoke-session' and data.get('worker_session_id') == 'smoke-worker-session' and data.get('event_count') == 1 and len(data.get('bundle_sha256', '')) == 64"
 printf '{"tampered":true}\n' >"$BUNDLE_DIR/manifest.json"
 if "${CLI[@]}" evidence --verify --bundle "$BUNDLE_DIR" >/tmp/agentbox-invalid-evidence-bundle.out 2>/tmp/agentbox-invalid-evidence-bundle.err; then
   echo "evidence bundle verification accepted tampered bundle" >&2
