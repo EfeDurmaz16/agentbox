@@ -875,7 +875,12 @@ pub struct SessionEvidenceBundle {
     pub provider: String,
     pub platform: String,
     pub status: RuntimeStatus,
+    pub risk: AgentPodRiskLevel,
+    pub workspace_mode: AgentPodWorkspaceMode,
+    #[serde(default)]
+    pub provider_selection_reason: Option<String>,
     pub manifest: MinipodSpec,
+    pub lifecycle_events: Vec<SessionEvidenceEvent>,
     pub approvals: Vec<SessionEvidenceEvent>,
     pub commands: Vec<SessionEvidenceEvent>,
     pub boundary_events: Vec<SessionEvidenceEvent>,
@@ -887,6 +892,7 @@ pub struct SessionEvidenceBundle {
 
 impl SessionEvidenceBundle {
     pub fn from_session_events(session: &RuntimeSession, events: &[AuditEvent]) -> Self {
+        let mut lifecycle_events = Vec::new();
         let mut approvals = Vec::new();
         let mut commands = Vec::new();
         let mut boundary_events = Vec::new();
@@ -894,6 +900,7 @@ impl SessionEvidenceBundle {
         for event in events {
             let evidence_event = SessionEvidenceEvent::from(event);
             match event.bucket.as_str() {
+                "runtime" => lifecycle_events.push(evidence_event),
                 "approve" => approvals.push(evidence_event),
                 "allow" | "block" => commands.push(evidence_event),
                 _ => boundary_events.push(evidence_event),
@@ -910,7 +917,15 @@ impl SessionEvidenceBundle {
             provider: session.provider.clone(),
             platform: session.platform.clone(),
             status: session.status.clone(),
+            risk: session.spec.risk.clone(),
+            workspace_mode: session.spec.workspace_mode.clone(),
+            provider_selection_reason: session
+                .spec
+                .labels
+                .get("agentbox.provider.selection_reason")
+                .cloned(),
             manifest: session.spec.clone(),
+            lifecycle_events,
             approvals,
             commands,
             boundary_events,
@@ -1439,7 +1454,11 @@ mod tests {
 
     #[test]
     fn session_evidence_bundle_groups_audit_events() {
-        let spec = MinipodSpec::for_agent_task("openclaw", "/tmp/agentbox-work");
+        let mut spec = MinipodSpec::for_agent_task("openclaw", "/tmp/agentbox-work");
+        spec.labels.insert(
+            "agentbox.provider.selection_reason".into(),
+            "explicit provider requested".into(),
+        );
         let mut session = RuntimeSession::new(
             spec.name.clone(),
             "agentpod-linux".into(),
@@ -1501,9 +1520,16 @@ mod tests {
         assert_eq!(bundle.schema_version, 1);
         assert_eq!(bundle.session_id, session.id);
         assert_eq!(bundle.provider, "agentpod-linux");
+        assert_eq!(bundle.risk, AgentPodRiskLevel::Medium);
+        assert_eq!(bundle.workspace_mode, AgentPodWorkspaceMode::Direct);
+        assert_eq!(
+            bundle.provider_selection_reason.as_deref(),
+            Some("explicit provider requested")
+        );
+        assert_eq!(bundle.lifecycle_events.len(), 1);
         assert_eq!(bundle.approvals.len(), 1);
         assert_eq!(bundle.commands.len(), 1);
-        assert_eq!(bundle.boundary_events.len(), 1);
+        assert_eq!(bundle.boundary_events.len(), 0);
         assert_eq!(bundle.transcripts.len(), 1);
         assert_eq!(bundle.transcripts[0].stdout.text, "hello");
         assert_eq!(bundle.replay.session_id, session.id);
