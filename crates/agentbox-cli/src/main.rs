@@ -700,6 +700,7 @@ fn print_audit_events(
         } else {
             timestamp.as_str()
         };
+        let command = agentbox_daemon::audit::redact_sensitive_text(command);
         println!(
             "{:<14} {:<9} {:<10} {}",
             time_display, bucket, decision, command
@@ -1212,6 +1213,8 @@ fn cmd_why() {
     match result {
         Ok((timestamp, command, bucket, decision, response_ms, cwd)) => {
             let ago = format_time_ago(&timestamp);
+            let command = agentbox_daemon::audit::redact_sensitive_text(&command);
+            let cwd = agentbox_daemon::audit::redact_sensitive_text(&cwd);
 
             println!();
             println!("Last intercepted action ({}):", ago);
@@ -1630,7 +1633,9 @@ fn cmd_history(show_all: bool, bucket_filter: Option<String>, json_output: bool)
                 event.timestamp,
                 event.bucket,
                 event.decision,
-                event.command.replace('\\', "\\\\").replace('"', "\\\""),
+                agentbox_daemon::audit::redact_sensitive_text(&event.command)
+                    .replace('\\', "\\\\")
+                    .replace('"', "\\\""),
                 response_ms,
                 comma
             );
@@ -1690,10 +1695,11 @@ fn cmd_history(show_all: bool, bucket_filter: Option<String>, json_output: bool)
             _ => "       ",
         };
 
-        let cmd_display = if event.command.len() > 40 {
-            format!("{}...", &event.command[..37])
+        let command = agentbox_daemon::audit::redact_sensitive_text(&event.command);
+        let cmd_display = if command.len() > 40 {
+            format!("{}...", &command[..37])
         } else {
-            event.command.clone()
+            command
         };
 
         let suffix = match event.bucket.as_str() {
@@ -1809,12 +1815,12 @@ fn cmd_evidence(limit: usize, verify: bool) {
                 "timestamp": row.get::<_, String>(2)?,
                 "agent_pid": row.get::<_, i64>(3)?,
                 "agent_name": row.get::<_, Option<String>>(4)?,
-                "command": row.get::<_, String>(5)?,
-                "cwd": row.get::<_, String>(6)?,
+                "command": agentbox_daemon::audit::redact_sensitive_text(&row.get::<_, String>(5)?),
+                "cwd": agentbox_daemon::audit::redact_sensitive_text(&row.get::<_, String>(6)?),
                 "bucket": row.get::<_, String>(7)?,
                 "decision": row.get::<_, String>(8)?,
                 "user_response_ms": row.get::<_, Option<i64>>(9)?,
-                "parent_process": row.get::<_, Option<String>>(10)?,
+                "parent_process": row.get::<_, Option<String>>(10)?.map(|value| agentbox_daemon::audit::redact_sensitive_text(&value)),
                 "prev_hash": row.get::<_, Option<String>>(11)?,
                 "event_hash": row.get::<_, Option<String>>(12)?,
             }))

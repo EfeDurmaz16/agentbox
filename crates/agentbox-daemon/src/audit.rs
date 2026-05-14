@@ -48,6 +48,8 @@ pub struct AuditViolation {
     pub reason: String,
 }
 
+const REDACTED: &str = "<redacted>";
+
 impl AuditEvent {
     /// Create a new AuditEvent with auto-generated ULID and timestamp.
     #[allow(clippy::too_many_arguments)]
@@ -147,6 +149,9 @@ impl AuditStore {
         let conn = self.pool.get()?;
         let mut event = event.clone();
         event.schema_version = 2;
+        event.command = redact_sensitive_text(&event.command);
+        event.cwd = redact_sensitive_text(&event.cwd);
+        event.parent_process = event.parent_process.as_deref().map(redact_sensitive_text);
         event.prev_hash = latest_event_hash(&conn)?;
         event.event_hash = Some(compute_event_hash(&event));
 
@@ -243,6 +248,131 @@ impl AuditStore {
             valid: violations.is_empty(),
             violations,
         })
+    }
+}
+
+pub fn redact_sensitive_text(input: &str) -> String {
+    let mut tokens = Vec::new();
+    let mut redact_next = false;
+
+    for token in input.split_whitespace() {
+        let redacted = if redact_next {
+            redact_next = false;
+            REDACTED.to_string()
+        } else if is_sensitive_flag(token) {
+            redact_next = true;
+            token.to_string()
+        } else {
+            redact_sensitive_token(token)
+        };
+        tokens.push(redacted);
+    }
+
+    tokens.join(" ")
+}
+
+fn redact_sensitive_token(token: &str) -> String {
+    let (prefix, core, suffix) = split_shell_wrapping(token);
+    let redacted = if let Some((key, value)) = core.split_once('=') {
+        if is_sensitive_key(key) || is_sensitive_flag(key) {
+            format!("{key}={REDACTED}")
+        } else {
+            redact_url_userinfo(value)
+                .map(|value| format!("{key}={value}"))
+                .unwrap_or_else(|| redact_sensitive_path(core).unwrap_or_else(|| core.to_string()))
+        }
+    } else {
+        redact_url_userinfo(core)
+            .or_else(|| redact_sensitive_path(core))
+            .unwrap_or_else(|| core.to_string())
+    };
+
+    format!("{prefix}{redacted}{suffix}")
+}
+
+fn split_shell_wrapping(token: &str) -> (&str, &str, &str) {
+    let mut start = 0;
+    let mut end = token.len();
+    let bytes = token.as_bytes();
+
+    while start < end && matches!(bytes[start], b'\'' | b'"') {
+        start += 1;
+    }
+    while end > start && matches!(bytes[end - 1], b'\'' | b'"' | b',' | b';') {
+        end -= 1;
+    }
+
+    (&token[..start], &token[start..end], &token[end..])
+}
+
+fn is_sensitive_flag(token: &str) -> bool {
+    let token = token.trim_start_matches('-').to_ascii_lowercase();
+    matches!(
+        token.as_str(),
+        "api-key"
+            | "apikey"
+            | "auth-token"
+            | "client-secret"
+            | "credential"
+            | "key"
+            | "password"
+            | "private-key"
+            | "secret"
+            | "token"
+    )
+}
+
+fn is_sensitive_key(key: &str) -> bool {
+    let key = key.to_ascii_lowercase();
+    key.contains("token")
+        || key.contains("secret")
+        || key.contains("password")
+        || key.contains("passwd")
+        || key.contains("api_key")
+        || key.contains("apikey")
+        || key.contains("access_key")
+        || key.contains("private_key")
+        || key == "key"
+}
+
+fn redact_url_userinfo(value: &str) -> Option<String> {
+    let scheme_pos = value.find("://")?;
+    let authority_start = scheme_pos + 3;
+    let authority = &value[authority_start..];
+    let authority_end = authority.find(['/', '?', '#']).unwrap_or(authority.len());
+    let authority = &authority[..authority_end];
+    let at_pos = authority.rfind('@')?;
+    let host = &authority[at_pos + 1..];
+
+    Some(format!(
+        "{}{}@{}{}",
+        &value[..authority_start],
+        REDACTED,
+        host,
+        &value[authority_start + authority_end..]
+    ))
+}
+
+fn redact_sensitive_path(value: &str) -> Option<String> {
+    let normalized = value.replace('\\', "/");
+    let sensitive = [
+        "/.aws/",
+        "/.azure/",
+        "/.config/gcloud/",
+        "/.docker/config.json",
+        "/.gnupg/",
+        "/.kube/",
+        "/.npmrc",
+        "/.ssh/",
+        ".env",
+        "id_rsa",
+        "id_ed25519",
+    ];
+
+    if sensitive.iter().any(|needle| normalized.contains(needle)) {
+        Some(REDACTED.to_string())
+    } else {
+        None
     }
 }
 
@@ -476,6 +606,54 @@ mod tests {
         assert!(got.agent_name.is_none());
         assert!(got.user_response_ms.is_none());
         assert!(got.parent_process.is_none());
+    }
+
+    #[test]
+    fn redacts_sensitive_command_material_before_storage() {
+        let store = AuditStore::in_memory().unwrap();
+        let event = AuditEvent::new(
+            42,
+            Some("codex".into()),
+            "OPENAI_API_KEY=sk-live curl --token abc123 https://user:pass@example.com ~/.ssh/id_ed25519".into(),
+            "/home/user/.aws/credentials".into(),
+            "approve".into(),
+            "approved".into(),
+            None,
+            Some("/usr/bin/env AWS_SECRET_ACCESS_KEY=secret-value".into()),
+        );
+
+        store.log_event(&event).unwrap();
+
+        let got = store.recent(1).unwrap().remove(0);
+        assert_eq!(
+            got.command,
+            "OPENAI_API_KEY=<redacted> curl --token <redacted> https://<redacted>@example.com <redacted>"
+        );
+        assert_eq!(got.cwd, "<redacted>");
+        assert_eq!(
+            got.parent_process.as_deref(),
+            Some("/usr/bin/env AWS_SECRET_ACCESS_KEY=<redacted>")
+        );
+        assert!(got.event_hash.is_some());
+        assert!(store.verify_hash_chain().unwrap().valid);
+    }
+
+    #[test]
+    fn redacts_sensitive_tokens_for_cli_output() {
+        assert_eq!(
+            redact_sensitive_text("vercel --token=abc deploy"),
+            "vercel --token=<redacted> deploy"
+        );
+        assert_eq!(
+            redact_sensitive_text("git clone https://user:pass@example.com/repo.git"),
+            "git clone https://<redacted>@example.com/repo.git"
+        );
+        assert_eq!(
+            redact_sensitive_text(
+                "cat /Users/efe/.config/gcloud/application_default_credentials.json"
+            ),
+            "cat <redacted>"
+        );
     }
 
     #[test]
