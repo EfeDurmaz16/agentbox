@@ -228,6 +228,8 @@ loader wiring are verified.
 See [docs/product-direction.md](docs/product-direction.md) and
 [docs/status-matrix.md](docs/status-matrix.md) for current shipped status, and
 [docs/roadmap-100-issues.md](docs/roadmap-100-issues.md) for the current sprint direction.
+See [docs/glossary.md](docs/glossary.md) for the Agentbox vocabulary:
+AgentPod, minipod, boundary, provider, authority, evidence, and host bridge.
 Evidence records can now be mapped into FIDES-style signed action drafts and
 AGIT-style lineage drafts, but both intentionally require external authority or
 adapter code before claiming live integration.
