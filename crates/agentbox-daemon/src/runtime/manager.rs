@@ -135,6 +135,7 @@ impl RuntimeManager {
         session.status = RuntimeStatus::Stopped;
         session.stopped_at = Some(Utc::now());
 
+        self.audit_credential_revocations(&session)?;
         self.audit_runtime_event(
             "runtime.destroy",
             &session,
@@ -373,6 +374,37 @@ impl RuntimeManager {
             .log_event(&event)
             .map_err(|e| RuntimeError::Internal(e.to_string()))
     }
+
+    fn audit_credential_revocations(&self, session: &RuntimeSession) -> Result<(), RuntimeError> {
+        for grant in session
+            .spec
+            .credentials
+            .grants
+            .iter()
+            .filter(|grant| grant.one_time)
+        {
+            let event = AuditEvent::new(
+                0,
+                Some(session.spec.agent.name.clone()),
+                format!("credential.revoke {} {}", grant.name, session.id),
+                session
+                    .spec
+                    .filesystem
+                    .workspace_host_path
+                    .display()
+                    .to_string(),
+                "credential".to_string(),
+                format!("revoked:one_time:{:?}", grant.kind),
+                None,
+                Some(self.provider.name().to_string()),
+            );
+            self.audit
+                .log_event(&event)
+                .map_err(|e| RuntimeError::Internal(e.to_string()))?;
+        }
+
+        Ok(())
+    }
 }
 
 fn is_network_http_command(command: &ExecCommand) -> bool {
@@ -391,7 +423,9 @@ mod tests {
     use async_trait::async_trait;
     use std::fs;
 
-    use crate::runtime::types::{ApprovalScope, RuntimeCapability};
+    use crate::runtime::types::{
+        ApprovalScope, CredentialGrant, CredentialGrantKind, RuntimeCapability,
+    };
 
     struct MockProvider;
 
@@ -779,6 +813,30 @@ mod tests {
         let audit = manager.audit.recent(1).unwrap();
         assert_eq!(audit[0].decision, "destroyed");
         assert!(audit[0].command.contains("runtime.destroy"));
+    }
+
+    #[tokio::test]
+    async fn destroy_records_one_time_credential_revocation_events() {
+        let manager = manager("destroy-credential-revoke");
+        let mut spec = MinipodSpec::for_agent_task("aspendos", "/tmp/agentbox-work");
+        spec.credentials.grants.push(CredentialGrant {
+            name: "openai".into(),
+            kind: CredentialGrantKind::FileMount,
+            target: "/tmp/agentbox-openai-key".into(),
+            one_time: true,
+            requires_approval: true,
+        });
+        let session = manager.create(&spec).await.unwrap();
+
+        manager.destroy(&session.id).await.unwrap();
+
+        let audit = manager.audit.recent(3).unwrap();
+        assert_eq!(audit[0].bucket, "runtime");
+        assert_eq!(audit[0].decision, "destroyed");
+        assert_eq!(audit[1].bucket, "credential");
+        assert!(audit[1].command.contains("credential.revoke openai"));
+        assert!(audit[1].decision.contains("revoked:one_time:FileMount"));
+        assert_eq!(audit[0].prev_hash, audit[1].event_hash);
     }
 
     #[tokio::test]

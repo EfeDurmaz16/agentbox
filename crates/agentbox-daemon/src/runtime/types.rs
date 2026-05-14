@@ -167,6 +167,37 @@ impl Default for CredentialPolicy {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CredentialRevocationEvent {
+    pub schema_version: i64,
+    pub session_id: String,
+    pub grant_name: String,
+    pub kind: CredentialGrantKind,
+    pub target: String,
+    pub one_time: bool,
+    pub reason: String,
+    pub revoked_at: DateTime<Utc>,
+}
+
+impl CredentialRevocationEvent {
+    pub fn from_grant(
+        session_id: impl Into<String>,
+        grant: &CredentialGrant,
+        reason: impl Into<String>,
+    ) -> Self {
+        Self {
+            schema_version: 1,
+            session_id: session_id.into(),
+            grant_name: grant.name.clone(),
+            kind: grant.kind.clone(),
+            target: grant.target.clone(),
+            one_time: grant.one_time,
+            reason: reason.into(),
+            revoked_at: Utc::now(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResourcePolicy {
     pub memory_bytes: u64,
     pub cpu_shares: u32,
@@ -849,6 +880,26 @@ mod tests {
         assert!(encoded.contains("\"credentials\""));
         assert!(encoded.contains("\"policy_bundles\""));
         assert!(encoded.contains("\"agentbox.provider\""));
+    }
+
+    #[test]
+    fn credential_revocation_event_models_one_time_file_grants() {
+        let grant = CredentialGrant {
+            name: "openai".into(),
+            kind: CredentialGrantKind::FileMount,
+            target: "/tmp/agentbox-openai-key".into(),
+            one_time: true,
+            requires_approval: true,
+        };
+
+        let event =
+            CredentialRevocationEvent::from_grant("01agentboxsession", &grant, "session destroyed");
+
+        assert_eq!(event.schema_version, 1);
+        assert_eq!(event.session_id, "01agentboxsession");
+        assert_eq!(event.grant_name, "openai");
+        assert!(event.one_time);
+        assert_eq!(event.reason, "session destroyed");
     }
 
     #[test]
