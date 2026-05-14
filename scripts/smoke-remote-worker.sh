@@ -144,6 +144,55 @@ assert data["accepted_event_count"] == 2
 assert "EvidenceSealed" in data["lifecycle_events"]
 PY
 
+python3 - "$TMPDIR" "$SESSION_ID" "$WORKER_SESSION_ID" <<'PY'
+import hashlib
+import json
+import sys
+
+tmpdir, session_id, worker_session_id = sys.argv[1:4]
+bundle_json = json.dumps(
+    {"session_id": session_id, "worker_session_id": worker_session_id, "events": []},
+    separators=(",", ":"),
+)
+bundle_sha256 = hashlib.sha256(bundle_json.encode()).hexdigest()
+with open(f"{tmpdir}/evidence-bundle-upload.json", "w", encoding="utf-8") as fh:
+    json.dump(
+        {
+            "session_id": session_id,
+            "worker_session_id": worker_session_id,
+            "bundle_sha256": bundle_sha256,
+            "bundle_json": bundle_json,
+            "secret_material_included": False,
+        },
+        fh,
+    )
+with open(f"{tmpdir}/evidence-bundle-upload.expected", "w", encoding="utf-8") as fh:
+    fh.write(bundle_sha256)
+PY
+
+curl -fsS "http://127.0.0.1:${PORT}/sessions/${WORKER_SESSION_ID}/evidence/bundle" \
+  -H 'content-type: application/json' \
+  --data @"$TMPDIR/evidence-bundle-upload.json" \
+  >"$TMPDIR/evidence-bundle-upload-response.json"
+
+python3 - "$TMPDIR/evidence-bundle-upload-response.json" "$TMPDIR/evidence-bundle-upload.expected" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], "r", encoding="utf-8") as fh:
+    data = json.load(fh)
+with open(sys.argv[2], "r", encoding="utf-8") as fh:
+    expected_hash = fh.read().strip()
+
+assert data["stored_bundle_sha256"] == expected_hash
+assert data["stored_bytes"] > 0
+assert data["storage_path"].endswith(f"{expected_hash}.json")
+assert "EvidenceSealed" in data["lifecycle_events"]
+with open(data["storage_path"], "r", encoding="utf-8") as fh:
+    stored = fh.read()
+assert stored
+PY
+
 python3 - "$TMPDIR/worker-state/worker-sessions.json" "$SESSION_ID" "$WORKER_SESSION_ID" <<'PY'
 import json
 import sys

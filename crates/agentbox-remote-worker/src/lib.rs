@@ -19,6 +19,7 @@ use axum::{Json, Router};
 use chrono::{DateTime, Duration, Utc};
 use ed25519_dalek::{Signer, SigningKey};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use tokio::process::Command;
 use tokio::sync::{watch, Mutex};
 use tokio::time;
@@ -106,6 +107,25 @@ struct WorkerEvidenceReceiptSnapshot {
 #[derive(Debug, Clone, Serialize)]
 struct WorkerError {
     error: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct WorkerEvidenceBundleUploadRequest {
+    session_id: String,
+    worker_session_id: String,
+    bundle_sha256: String,
+    bundle_json: String,
+    secret_material_included: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct WorkerEvidenceBundleUploadResponse {
+    session_id: String,
+    worker_session_id: String,
+    stored_bundle_sha256: String,
+    stored_bytes: u64,
+    storage_path: String,
+    lifecycle_events: Vec<RemoteAgentPodLifecycleEvent>,
 }
 
 type WorkerRouteResult<T> = Result<Json<T>, (StatusCode, Json<WorkerError>)>;
@@ -197,6 +217,10 @@ pub fn router(config: RemoteWorkerConfig) -> Router {
         .route(
             "/sessions/{worker_session_id}/evidence",
             post(upload_evidence),
+        )
+        .route(
+            "/sessions/{worker_session_id}/evidence/bundle",
+            post(upload_evidence_bundle),
         )
         .route(
             "/sessions/{worker_session_id}/destroy",
@@ -541,6 +565,94 @@ async fn upload_evidence(
     }))
 }
 
+async fn upload_evidence_bundle(
+    State(state): State<Arc<RemoteWorkerState>>,
+    Json(request): Json<WorkerEvidenceBundleUploadRequest>,
+) -> WorkerRouteResult<WorkerEvidenceBundleUploadResponse> {
+    validate_evidence_bundle_upload(&request)?;
+    require_matching_session(&state, &request.worker_session_id, &request.session_id).await?;
+    let path = persist_evidence_bundle(&state.config, &request).await?;
+    Ok(Json(WorkerEvidenceBundleUploadResponse {
+        session_id: request.session_id,
+        worker_session_id: request.worker_session_id,
+        stored_bundle_sha256: request.bundle_sha256,
+        stored_bytes: path.stored_bytes,
+        storage_path: path.path.display().to_string(),
+        lifecycle_events: vec![RemoteAgentPodLifecycleEvent::EvidenceSealed],
+    }))
+}
+
+struct StoredEvidenceBundlePath {
+    path: PathBuf,
+    stored_bytes: u64,
+}
+
+fn validate_evidence_bundle_upload(
+    request: &WorkerEvidenceBundleUploadRequest,
+) -> Result<(), (StatusCode, Json<WorkerError>)> {
+    if request.secret_material_included {
+        return Err(worker_error(
+            StatusCode::BAD_REQUEST,
+            "agentbox remote worker refuses evidence bundle payloads that include secret material",
+        ));
+    }
+    if !is_sha256_hex(&request.bundle_sha256) {
+        return Err(worker_error(
+            StatusCode::BAD_REQUEST,
+            "agentbox remote worker evidence bundle hash must be 64 lowercase hex characters",
+        ));
+    }
+    let computed = sha256_hex(request.bundle_json.as_bytes());
+    if computed != request.bundle_sha256 {
+        return Err(worker_error(
+            StatusCode::BAD_REQUEST,
+            "agentbox remote worker evidence bundle hash does not match payload",
+        ));
+    }
+    Ok(())
+}
+
+async fn persist_evidence_bundle(
+    config: &RemoteWorkerConfig,
+    request: &WorkerEvidenceBundleUploadRequest,
+) -> Result<StoredEvidenceBundlePath, (StatusCode, Json<WorkerError>)> {
+    let Some(state_dir) = config.state_dir.as_ref() else {
+        return Err(worker_error(
+            StatusCode::PRECONDITION_REQUIRED,
+            "agentbox remote worker requires --state-dir before storing evidence bundle payloads",
+        ));
+    };
+    let safe_worker_session_id = safe_path_segment(&request.worker_session_id)?;
+    let dir = worker_state_root(state_dir)
+        .join("evidence")
+        .join(safe_worker_session_id);
+    tokio::fs::create_dir_all(&dir).await.map_err(|err| {
+        worker_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!(
+                "agentbox remote worker failed to prepare evidence bundle directory {}: {err}",
+                dir.display()
+            ),
+        )
+    })?;
+    let path = dir.join(format!("{}.json", request.bundle_sha256));
+    tokio::fs::write(&path, request.bundle_json.as_bytes())
+        .await
+        .map_err(|err| {
+            worker_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!(
+                    "agentbox remote worker failed to store evidence bundle {}: {err}",
+                    path.display()
+                ),
+            )
+        })?;
+    Ok(StoredEvidenceBundlePath {
+        path,
+        stored_bytes: request.bundle_json.len().try_into().unwrap_or(u64::MAX),
+    })
+}
+
 async fn accept_evidence(
     state: &Arc<RemoteWorkerState>,
     request: &RemoteAgentPodEvidenceUploadRequest,
@@ -549,21 +661,11 @@ async fn accept_evidence(
         .validate()
         .map_err(|err| worker_error(StatusCode::BAD_REQUEST, err.to_string()))?;
     let mut sessions = state.sessions.lock().await;
-    let Some(session) = sessions.get_mut(&request.worker_session_id) else {
-        return Err(worker_error(
-            StatusCode::NOT_FOUND,
-            format!(
-                "agentbox remote worker session {} has not been created",
-                request.worker_session_id
-            ),
-        ));
-    };
-    if session.session_id != request.session_id {
-        return Err(worker_error(
-            StatusCode::CONFLICT,
-            "agentbox remote worker session id does not match worker session",
-        ));
-    }
+    let session = get_matching_session_mut(
+        &mut sessions,
+        &request.worker_session_id,
+        &request.session_id,
+    )?;
     let receipt = WorkerEvidenceReceipt {
         bundle_sha256: request.bundle_sha256.clone(),
         derived_from_bundle: request.derived_from_bundle,
@@ -576,6 +678,36 @@ async fn accept_evidence(
     drop(sessions);
     persist_sessions(state).await;
     Ok(receipt)
+}
+
+async fn require_matching_session(
+    state: &Arc<RemoteWorkerState>,
+    worker_session_id: &str,
+    session_id: &str,
+) -> Result<(), (StatusCode, Json<WorkerError>)> {
+    let mut sessions = state.sessions.lock().await;
+    get_matching_session_mut(&mut sessions, worker_session_id, session_id)?;
+    Ok(())
+}
+
+fn get_matching_session_mut<'a>(
+    sessions: &'a mut HashMap<String, WorkerSession>,
+    worker_session_id: &str,
+    session_id: &str,
+) -> Result<&'a mut WorkerSession, (StatusCode, Json<WorkerError>)> {
+    let Some(session) = sessions.get_mut(worker_session_id) else {
+        return Err(worker_error(
+            StatusCode::NOT_FOUND,
+            format!("agentbox remote worker session {worker_session_id} has not been created"),
+        ));
+    };
+    if session.session_id != session_id {
+        return Err(worker_error(
+            StatusCode::CONFLICT,
+            "agentbox remote worker session id does not match worker session",
+        ));
+    }
+    Ok(session)
 }
 
 async fn destroy_session(
@@ -669,8 +801,47 @@ fn worker_state_path(config: &RemoteWorkerConfig) -> Option<PathBuf> {
     })
 }
 
+fn worker_state_root(state_dir: &Path) -> PathBuf {
+    if state_dir.extension().is_some() {
+        state_dir
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from("."))
+    } else {
+        state_dir.to_path_buf()
+    }
+}
+
 fn hex_encode(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    hex_encode(&hasher.finalize())
+}
+
+fn is_sha256_hex(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+fn safe_path_segment(value: &str) -> Result<&str, (StatusCode, Json<WorkerError>)> {
+    if !value.is_empty()
+        && value
+            .bytes()
+            .all(|byte| matches!(byte, b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'-' | b'_'))
+    {
+        Ok(value)
+    } else {
+        Err(worker_error(
+            StatusCode::BAD_REQUEST,
+            "agentbox remote worker received an unsafe path segment",
+        ))
+    }
 }
 
 pub fn signing_key_from_hex_seed(seed_hex: &str) -> Result<SigningKey, String> {
@@ -1079,6 +1250,77 @@ mod tests {
         );
         assert_eq!(session.evidence_receipts[0].event_count, 7);
         assert_eq!(session.evidence_receipts[0].sealed_at, Some(sealed_at));
+    }
+
+    #[tokio::test]
+    async fn upload_evidence_bundle_stores_hash_verified_payload() {
+        let state_dir = std::env::temp_dir().join(format!(
+            "agentbox-remote-worker-bundle-state-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&state_dir);
+        let config = RemoteWorkerConfig::new(
+            "worker.local/dev",
+            "https://worker.example.com/agentpod/evidence",
+            SigningKey::from_bytes(&[34_u8; 32]),
+        )
+        .with_state_dir(&state_dir);
+        let state = test_state(config);
+        state.sessions.lock().await.insert(
+            "worker-session-1".into(),
+            WorkerSession::new("session-1".into(), std::env::temp_dir()),
+        );
+        let bundle_json = r#"{"session_id":"session-1","events":[]}"#.to_string();
+        let bundle_sha256 = sha256_hex(bundle_json.as_bytes());
+        let request = WorkerEvidenceBundleUploadRequest {
+            session_id: "session-1".into(),
+            worker_session_id: "worker-session-1".into(),
+            bundle_sha256: bundle_sha256.clone(),
+            bundle_json: bundle_json.clone(),
+            secret_material_included: false,
+        };
+
+        let response = upload_evidence_bundle(State(state), Json(request))
+            .await
+            .unwrap()
+            .0;
+
+        assert_eq!(response.stored_bundle_sha256, bundle_sha256);
+        assert_eq!(response.stored_bytes, bundle_json.len() as u64);
+        assert_eq!(
+            std::fs::read_to_string(response.storage_path).unwrap(),
+            bundle_json
+        );
+        let _ = std::fs::remove_dir_all(state_dir);
+    }
+
+    #[tokio::test]
+    async fn upload_evidence_bundle_rejects_hash_mismatch() {
+        let config = RemoteWorkerConfig::new(
+            "worker.local/dev",
+            "https://worker.example.com/agentpod/evidence",
+            SigningKey::from_bytes(&[35_u8; 32]),
+        )
+        .with_state_dir(std::env::temp_dir());
+        let state = test_state(config);
+        state.sessions.lock().await.insert(
+            "worker-session-1".into(),
+            WorkerSession::new("session-1".into(), std::env::temp_dir()),
+        );
+        let request = WorkerEvidenceBundleUploadRequest {
+            session_id: "session-1".into(),
+            worker_session_id: "worker-session-1".into(),
+            bundle_sha256: "0".repeat(64),
+            bundle_json: "{}".into(),
+            secret_material_included: false,
+        };
+
+        let err = upload_evidence_bundle(State(state), Json(request))
+            .await
+            .unwrap_err();
+
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+        assert!(err.1 .0.error.contains("hash does not match"));
     }
 
     #[tokio::test]

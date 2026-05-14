@@ -128,6 +128,7 @@ API. It posts:
 - `POST /sessions`
 - `POST /sessions/{worker_session_id}/exec`
 - `POST /sessions/{worker_session_id}/evidence`
+- `POST /sessions/{worker_session_id}/evidence/bundle`
 - `POST /sessions/{worker_session_id}/destroy`
 
 The adapter validates the same handshake, create, exec, and lifecycle evidence
@@ -137,11 +138,14 @@ verification and falls back to the legacy canonical digest verifier for older
 fixtures. It is not wired into `RemoteAgentPodProvider` yet because there is no
 shipped remote worker server.
 
-Evidence upload is currently metadata-only: the worker must identify the session,
-worker session, evidence mode, SHA-256 bundle hash, event count, and sealed time.
-Agentbox rejects evidence upload metadata that embeds secret material, carries an
-invalid bundle hash, or accepts a different bundle than the one submitted. The
-actual evidence stream/storage backend is still future work.
+Evidence metadata upload identifies the session, worker session, evidence mode,
+SHA-256 bundle hash, event count, and sealed time. Agentbox rejects metadata that
+embeds secret material, carries an invalid bundle hash, or accepts a different
+bundle than the one submitted. The worker also exposes an experimental
+`/evidence/bundle` payload route that requires `--state-dir`, verifies the
+SHA-256 hash against the submitted JSON payload, rejects secret-bearing payloads,
+and stores the bundle under the worker state directory. Streaming evidence is
+still future work.
 
 ## Contract Worker Binary
 
@@ -160,7 +164,8 @@ cargo run -p agentbox-remote-worker -- \
 The worker requires an explicit 32-byte hex Ed25519 seed. It signs handshake
 acknowledgements using the Ed25519 format described above and exposes the same
 `/handshake`, `/sessions`, `/sessions/{worker_session_id}/exec`,
-`/sessions/{worker_session_id}/evidence`, and
+`/sessions/{worker_session_id}/evidence`,
+`/sessions/{worker_session_id}/evidence/bundle`, and
 `/sessions/{worker_session_id}/destroy` routes expected by the HTTPS adapter.
 When `--state-dir` is set, created sessions, stopped status, and evidence
 receipt metadata are written to `worker-sessions.json` and loaded again when the
@@ -191,19 +196,22 @@ on the matching worker session before acknowledging the bundle hash and event
 count. With `--state-dir`, those receipts are also persisted in the worker state
 snapshot, including bundle provenance fields such as `bundle_id`,
 `bundle_root_sha256`, `derived_from_bundle`, and `sealed_at` when provided.
+The separate evidence bundle payload route verifies the submitted bundle JSON
+against its SHA-256 and stores it under `evidence/<worker_session_id>/` inside
+the worker state directory.
 When the daemon-side provider creates a remote session, it persists the worker
 endpoint, worker session id, worker identity, and worker evidence endpoint in
 session labels so later exec/destroy calls can route back to the same worker.
 Workspace materialization, policy enforcement, credential handoff, full evidence
-bundle storage, and supervised worker restarts remain future work.
+streaming, and supervised worker restarts remain future work.
 
 `scripts/smoke-remote-worker.sh` starts this worker on a random loopback port,
 posts a handshake descriptor, checks the Ed25519 acknowledgement shape, creates
 worker sessions from generated AgentPod specs, runs a direct `printf` exec
 request, uploads a bundle metadata receipt, verifies the returned lifecycle
-evidence, restarts the worker to prove persisted session reload, then starts a
-long-running command and proves destroy sends a kill signal that returns exit
-code `130` plus `KillSwitchAck`.
+evidence, uploads and verifies a hash-bound bundle payload, restarts the worker
+to prove persisted session reload, then starts a long-running command and proves
+destroy sends a kill signal that returns exit code `130` plus `KillSwitchAck`.
 
 ## Lifecycle Contract
 
@@ -245,5 +253,5 @@ implementation.
 
 `remote-agentpod` is now an experimental gated provider. The missing pieces are
 sandboxed remote execution, workspace materialization, policy enforcement inside
-the worker, credential handoff, evidence streaming/storage, and live HTTPS
-worker conformance tests.
+the worker, credential handoff, evidence streaming, and live HTTPS worker
+conformance tests.
