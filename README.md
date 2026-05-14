@@ -289,6 +289,12 @@ Session evidence bundles include redacted command transcripts so operators can
 inspect what ran without storing raw credential-like output.
 They also include metadata-only replay steps linked to audit hashes; Agentbox
 does not automatically rerun side-effecting commands from evidence bundles.
+
+```sh
+# Export a portable evidence bundle directory for a persisted AgentPod session
+agentbox evidence --session <session-id> --bundle ./agentbox-evidence
+```
+
 For macOS specifically, see
 [docs/macos-minipod-limitations.md](docs/macos-minipod-limitations.md).
 For file boundaries, see

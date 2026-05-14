@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::fs;
 use std::io::{self, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::thread;
 use std::time::Duration;
@@ -262,6 +262,10 @@ enum Commands {
         /// Export only network boundary audit events as JSONL
         #[arg(long)]
         network: bool,
+
+        /// Write a session evidence bundle directory instead of printing JSON
+        #[arg(long = "bundle")]
+        bundle_dir: Option<PathBuf>,
     },
     /// Generate a governed minipod manifest for an agent task
     MinipodSpec {
@@ -2671,12 +2675,30 @@ fn cmd_evidence(
     session: Option<String>,
     credentials: bool,
     network: bool,
+    bundle_dir: Option<PathBuf>,
 ) {
     let db_path = audit_db_path();
     if !db_path.exists() {
         eprintln!("no audit log found at {}", db_path.display());
         eprintln!("hint: start the daemon first with `agentbox start`");
         std::process::exit(1);
+    }
+
+    if bundle_dir.is_some() && verify {
+        eprintln!("error: --bundle cannot be combined with --verify");
+        std::process::exit(1);
+    }
+    if bundle_dir.is_some() && (credentials || network) {
+        eprintln!("error: --bundle cannot be combined with --credentials or --network");
+        std::process::exit(1);
+    }
+    if let Some(bundle_dir) = bundle_dir {
+        let Some(session_id) = session else {
+            eprintln!("error: --bundle requires --session <id>");
+            std::process::exit(1);
+        };
+        cmd_session_evidence_bundle_dir(&db_path, &session_id, limit, &bundle_dir);
+        return;
     }
 
     if verify {
@@ -2834,6 +2856,105 @@ fn cmd_session_evidence_bundle(db_path: &PathBuf, session_id: &str, limit: usize
         "{}",
         serde_json::to_string(&bundle).expect("failed to serialize session bundle")
     );
+}
+
+fn cmd_session_evidence_bundle_dir(
+    db_path: &PathBuf,
+    session_id: &str,
+    limit: usize,
+    output_dir: &Path,
+) {
+    let bundle = load_session_evidence_bundle(db_path, session_id, limit);
+    write_session_evidence_bundle_dir(&bundle, output_dir).unwrap_or_else(|e| {
+        eprintln!(
+            "error: failed to write evidence bundle to {}: {}",
+            output_dir.display(),
+            e
+        );
+        std::process::exit(1);
+    });
+    println!(
+        "wrote evidence bundle {} to {}",
+        bundle.bundle_id,
+        output_dir.display()
+    );
+}
+
+#[derive(Serialize)]
+struct EvidenceBundleIndex {
+    schema_version: i64,
+    bundle_id: String,
+    session_id: String,
+    provider: String,
+    status: String,
+    generated_at: chrono::DateTime<Utc>,
+    files: Vec<EvidenceBundleFile>,
+}
+
+#[derive(Serialize)]
+struct EvidenceBundleFile {
+    path: String,
+    media_type: String,
+    description: String,
+}
+
+fn write_session_evidence_bundle_dir(
+    bundle: &agentbox_daemon::runtime::types::SessionEvidenceBundle,
+    output_dir: &Path,
+) -> io::Result<()> {
+    fs::create_dir_all(output_dir)?;
+    fs::write(
+        output_dir.join("bundle.json"),
+        serde_json::to_vec_pretty(bundle).expect("failed to serialize evidence bundle"),
+    )?;
+    fs::write(
+        output_dir.join("manifest.json"),
+        serde_json::to_vec_pretty(&bundle.manifest).expect("failed to serialize manifest"),
+    )?;
+    fs::write(
+        output_dir.join("replay.json"),
+        serde_json::to_vec_pretty(&bundle.replay).expect("failed to serialize replay metadata"),
+    )?;
+    fs::write(
+        output_dir.join("transcripts.json"),
+        serde_json::to_vec_pretty(&bundle.transcripts).expect("failed to serialize transcripts"),
+    )?;
+
+    let index = EvidenceBundleIndex {
+        schema_version: 1,
+        bundle_id: bundle.bundle_id.clone(),
+        session_id: bundle.session_id.clone(),
+        provider: bundle.provider.clone(),
+        status: format!("{:?}", bundle.status),
+        generated_at: bundle.generated_at,
+        files: vec![
+            EvidenceBundleFile {
+                path: "bundle.json".to_string(),
+                media_type: "application/json".to_string(),
+                description: "Full redacted AgentPod session evidence bundle".to_string(),
+            },
+            EvidenceBundleFile {
+                path: "manifest.json".to_string(),
+                media_type: "application/json".to_string(),
+                description: "AgentPod manifest captured for this session".to_string(),
+            },
+            EvidenceBundleFile {
+                path: "replay.json".to_string(),
+                media_type: "application/json".to_string(),
+                description: "Metadata-only replay plan and limitations".to_string(),
+            },
+            EvidenceBundleFile {
+                path: "transcripts.json".to_string(),
+                media_type: "application/json".to_string(),
+                description: "Redacted command transcripts captured by RuntimeManager".to_string(),
+            },
+        ],
+    };
+    fs::write(
+        output_dir.join("index.json"),
+        serde_json::to_vec_pretty(&index).expect("failed to serialize evidence bundle index"),
+    )?;
+    Ok(())
 }
 
 fn cmd_session_credentials_evidence(db_path: &PathBuf, session_id: &str, limit: usize) {
@@ -4111,7 +4232,8 @@ async fn main() {
             session,
             credentials,
             network,
-        } => cmd_evidence(limit, verify, session, credentials, network),
+            bundle_dir,
+        } => cmd_evidence(limit, verify, session, credentials, network, bundle_dir),
         Commands::MinipodSpec {
             agent,
             workspace,
@@ -4199,5 +4321,48 @@ async fn main() {
             follow,
             tail,
         } => cmd_minipod_logs(session_id, follow, tail),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use agentbox_daemon::runtime::types::{MinipodSpec, RuntimeSession, SessionEvidenceBundle};
+
+    #[test]
+    fn evidence_bundle_dir_writes_expected_files() {
+        let spec = MinipodSpec::for_agent_task("codex", "/tmp/agentbox-work");
+        let session = RuntimeSession::new(
+            spec.name.clone(),
+            "direct-host".into(),
+            "macos".into(),
+            spec,
+        );
+        let bundle = SessionEvidenceBundle::from_session_events(&session, &[]);
+        let output_dir = std::env::temp_dir().join(format!(
+            "agentbox-evidence-bundle-test-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&output_dir);
+
+        write_session_evidence_bundle_dir(&bundle, &output_dir).unwrap();
+
+        for file in [
+            "index.json",
+            "bundle.json",
+            "manifest.json",
+            "replay.json",
+            "transcripts.json",
+        ] {
+            assert!(output_dir.join(file).exists(), "{file} was not written");
+        }
+
+        let index: serde_json::Value =
+            serde_json::from_slice(&fs::read(output_dir.join("index.json")).unwrap()).unwrap();
+        assert_eq!(index["schema_version"], 1);
+        assert_eq!(index["session_id"], bundle.session_id);
+        assert_eq!(index["files"].as_array().unwrap().len(), 4);
+
+        let _ = fs::remove_dir_all(output_dir);
     }
 }
