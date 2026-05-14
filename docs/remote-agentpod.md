@@ -181,6 +181,9 @@ Each worker session also carries the AgentPod workspace host path from the creat
 request. The worker prepares that directory during create-session and refuses to
 record a running session if it cannot be created or is not a directory. Exec
 defaults to that workspace and refuses an explicit working directory outside it.
+The contract worker also refuses command environment material until an explicit
+remote credential handoff protocol exists; remote env injection must not become
+an accidental secret channel.
 Evidence upload validates the evidence metadata and records an in-memory receipt
 on the matching worker session before acknowledging the bundle hash and event
 count. With `--state-dir`, those receipts are also persisted in the worker state
@@ -239,5 +242,5 @@ implementation.
 
 `remote-agentpod` is now an experimental gated provider. The missing pieces are
 sandboxed remote execution, workspace materialization, policy enforcement inside
-the worker, credential handoff, evidence streaming/storage, kill-switch process
-control, and live HTTPS worker conformance tests.
+the worker, credential handoff, evidence streaming/storage, and live HTTPS
+worker conformance tests.

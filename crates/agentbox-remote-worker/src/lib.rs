@@ -290,6 +290,7 @@ async fn exec_command(
     Json(request): Json<RemoteAgentPodExecRequest>,
 ) -> WorkerRouteResult<RemoteAgentPodExecResponse> {
     let started = Instant::now();
+    validate_exec_material(&request)?;
     let context = session_exec_context(&state, &request).await?;
     let result = execute_command(request, started, context).await;
     Ok(Json(RemoteAgentPodExecResponse {
@@ -300,6 +301,18 @@ async fn exec_command(
             RemoteAgentPodLifecycleEvent::EvidenceSealed,
         ],
     }))
+}
+
+fn validate_exec_material(
+    request: &RemoteAgentPodExecRequest,
+) -> Result<(), (StatusCode, Json<WorkerError>)> {
+    if !request.command.env.is_empty() {
+        return Err(worker_error(
+            StatusCode::BAD_REQUEST,
+            "agentbox remote worker refuses command environment material until credential handoff is implemented",
+        ));
+    }
+    Ok(())
 }
 
 struct WorkerExecContext {
@@ -849,6 +862,35 @@ mod tests {
 
         assert_eq!(response.result.exit_code, 126);
         assert!(response.result.stderr.contains("outside workspace"));
+    }
+
+    #[tokio::test]
+    async fn exec_command_rejects_environment_material() {
+        let config = RemoteWorkerConfig::new(
+            "worker.local/dev",
+            "https://worker.example.com/agentpod/evidence",
+            SigningKey::from_bytes(&[32_u8; 32]),
+        );
+        let state = test_state(config);
+        state.sessions.lock().await.insert(
+            "worker-session-1".into(),
+            WorkerSession::new("session-1".into(), std::env::temp_dir()),
+        );
+        let request = RemoteAgentPodExecRequest {
+            session_id: "session-1".into(),
+            worker_session_id: "worker-session-1".into(),
+            command: ExecCommand {
+                argv: vec!["printf".into(), "hello".into()],
+                working_dir: None,
+                env: HashMap::from([("OPENAI_API_KEY".into(), "secret".into())]),
+                timeout_seconds: Some(5),
+            },
+        };
+
+        let err = exec_command(State(state), Json(request)).await.unwrap_err();
+
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+        assert!(err.1 .0.error.contains("credential handoff"));
     }
 
     #[tokio::test]
