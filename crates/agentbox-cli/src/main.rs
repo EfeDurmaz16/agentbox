@@ -83,6 +83,18 @@ enum Commands {
         #[arg(long = "deny-localhost")]
         deny_localhost: bool,
     },
+    /// Add a session-scoped first-contact network domain grant
+    NetworkGrant {
+        /// AgentPod session id
+        session_id: String,
+
+        /// Domain to grant for this session
+        domain: String,
+
+        /// Optional grant reason
+        #[arg(long, default_value = "operator approved first-contact domain")]
+        reason: String,
+    },
     /// Run a command inside an isolated Agentbox minipod
     Run {
         /// Command to run (e.g., "openclaw start" or "npm test")
@@ -1617,6 +1629,55 @@ fn cmd_network_explain(
     if let Some(summary) = classification.notification_summary {
         println!("prompt:   {}", summary);
     }
+}
+
+fn cmd_network_grant(session_id: String, domain: String, reason: String) {
+    use agentbox_daemon::runtime::types::{ApprovalGrant, ApprovalScope};
+
+    let (manager, _session) = runtime_manager_for_session(&session_id, "network grant");
+    let domain = normalize_domain_or_exit(&domain);
+    let grant = ApprovalGrant {
+        id: format!(
+            "grant-domain-{}",
+            ulid::Ulid::new().to_string().to_lowercase()
+        ),
+        scope: ApprovalScope::Domain {
+            domain: domain.clone(),
+        },
+        reason,
+        expires_at: None,
+    };
+    let grant = manager
+        .add_session_approval_grant(&session_id, grant)
+        .unwrap_or_else(|e| {
+            eprintln!("error: failed to add network domain grant: {}", e);
+            std::process::exit(1);
+        });
+
+    println!("Added session network grant.");
+    println!("session: {}", session_id);
+    println!("grant:   {}", grant.id);
+    println!("domain:  {}", domain);
+}
+
+fn normalize_domain_or_exit(raw: &str) -> String {
+    let domain = raw
+        .trim()
+        .trim_end_matches('.')
+        .trim_start_matches("https://")
+        .trim_start_matches("http://")
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or("")
+        .split(':')
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if domain.is_empty() || domain.chars().any(char::is_whitespace) || domain.contains("://") {
+        eprintln!("error: invalid domain `{}`", raw);
+        std::process::exit(2);
+    }
+    domain
 }
 
 fn parse_policy_network_mode(raw: &str) -> PolicyNetworkMode {
@@ -3259,6 +3320,11 @@ async fn main() {
             deny_domains,
             deny_localhost,
         } => cmd_network_explain(url, mode, allow_domains, deny_domains, deny_localhost),
+        Commands::NetworkGrant {
+            session_id,
+            domain,
+            reason,
+        } => cmd_network_grant(session_id, domain, reason),
         Commands::Run {
             command,
             runtime,
