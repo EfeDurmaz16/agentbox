@@ -215,6 +215,59 @@ impl Default for ResourcePolicy {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SeccompAction {
+    Allow,
+    Errno(i32),
+    KillProcess,
+    Log,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SeccompRule {
+    pub syscall: String,
+    pub action: SeccompAction,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SeccompProfile {
+    pub enabled: bool,
+    pub default_action: SeccompAction,
+    pub rules: Vec<SeccompRule>,
+    pub requires_linux: bool,
+}
+
+impl Default for SeccompProfile {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            default_action: SeccompAction::Allow,
+            rules: vec![],
+            requires_linux: true,
+        }
+    }
+}
+
+impl SeccompProfile {
+    pub fn deny_syscalls(syscalls: &[&str], reason: impl Into<String>) -> Self {
+        let reason = reason.into();
+        Self {
+            enabled: true,
+            default_action: SeccompAction::Allow,
+            rules: syscalls
+                .iter()
+                .map(|syscall| SeccompRule {
+                    syscall: (*syscall).to_string(),
+                    action: SeccompAction::Errno(libc::EPERM),
+                    reason: reason.clone(),
+                })
+                .collect(),
+            requires_linux: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FileAccessMode {
     Read,
     Write,
@@ -500,6 +553,8 @@ pub struct MinipodSpec {
     pub credentials: CredentialPolicy,
     pub resources: ResourcePolicy,
     #[serde(default)]
+    pub seccomp: SeccompProfile,
+    #[serde(default)]
     pub approvals: Vec<ApprovalGrant>,
     #[serde(default)]
     pub policy_bundles: Vec<TaskPolicyBundle>,
@@ -544,6 +599,7 @@ impl MinipodSpec {
             network: policy_profile.network.clone(),
             credentials: CredentialPolicy::default(),
             resources: ResourcePolicy::default(),
+            seccomp: SeccompProfile::default(),
             approvals: vec![],
             policy_bundles: vec![],
             services: vec![],
@@ -1321,6 +1377,31 @@ mod tests {
 
             assert_eq!(decoded, policy);
         }
+    }
+
+    #[test]
+    fn default_seccomp_profile_is_explicitly_disabled() {
+        let spec = MinipodSpec::for_agent_task("hermes", "/tmp/agentbox-work");
+
+        assert!(!spec.seccomp.enabled);
+        assert_eq!(spec.seccomp.default_action, SeccompAction::Allow);
+        assert!(spec.seccomp.rules.is_empty());
+        assert!(spec.seccomp.requires_linux);
+    }
+
+    #[test]
+    fn seccomp_profile_models_targeted_syscall_denial() {
+        let profile = SeccompProfile::deny_syscalls(
+            &["ptrace", "bpf"],
+            "debugging and kernel instrumentation require explicit product support",
+        );
+
+        assert!(profile.enabled);
+        assert_eq!(profile.default_action, SeccompAction::Allow);
+        assert_eq!(profile.rules.len(), 2);
+        assert_eq!(profile.rules[0].syscall, "ptrace");
+        assert_eq!(profile.rules[0].action, SeccompAction::Errno(libc::EPERM));
+        assert!(profile.rules[1].reason.contains("kernel instrumentation"));
     }
 
     #[test]

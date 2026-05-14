@@ -64,6 +64,18 @@ pub fn validate_minipod_spec(spec: &MinipodSpec) -> Result<(), RuntimeError> {
         return reject("memory limit must be greater than zero");
     }
 
+    if spec.seccomp.enabled && spec.seccomp.rules.is_empty() {
+        return reject("enabled seccomp profile must contain at least one syscall rule");
+    }
+    if spec
+        .seccomp
+        .rules
+        .iter()
+        .any(|rule| rule.syscall.trim().is_empty())
+    {
+        return reject("seccomp syscall names cannot be empty");
+    }
+
     for bundle in &spec.policy_bundles {
         validate_task_policy_bundle(bundle)?;
     }
@@ -166,8 +178,8 @@ fn reject<T>(reason: impl Into<String>) -> Result<T, RuntimeError> {
 mod tests {
     use super::*;
     use crate::runtime::types::{
-        CredentialGrant, FilesystemPolicy, MountRule, ProtectedPath, SensitivePathClass,
-        TaskPolicyBundle,
+        CredentialGrant, FilesystemPolicy, MountRule, ProtectedPath, SeccompProfile,
+        SensitivePathClass, TaskPolicyBundle,
     };
 
     fn spec() -> MinipodSpec {
@@ -224,6 +236,26 @@ mod tests {
         let reason = rejection_reason(validate_minipod_spec(&spec));
 
         assert!(reason.contains("domains"));
+    }
+
+    #[test]
+    fn rejects_enabled_empty_seccomp_profile() {
+        let mut spec = spec();
+        spec.seccomp.enabled = true;
+
+        let reason = rejection_reason(validate_minipod_spec(&spec));
+
+        assert!(reason.contains("seccomp"));
+    }
+
+    #[test]
+    fn rejects_empty_seccomp_syscall_names() {
+        let mut spec = spec();
+        spec.seccomp = SeccompProfile::deny_syscalls(&[" "], "invalid syscall");
+
+        let reason = rejection_reason(validate_minipod_spec(&spec));
+
+        assert!(reason.contains("syscall"));
     }
 
     #[test]

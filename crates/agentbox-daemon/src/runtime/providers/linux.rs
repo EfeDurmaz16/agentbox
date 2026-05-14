@@ -1,7 +1,9 @@
 use serde::{Deserialize, Serialize};
 
 use crate::runtime::provider::RuntimeError;
-use crate::runtime::types::{ExecCommand, MinipodSpec, MountMode, ResourcePolicy};
+use crate::runtime::types::{
+    ExecCommand, MinipodSpec, MountMode, ResourcePolicy, SeccompAction, SeccompProfile,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LinuxUserNamespacePlan {
@@ -338,6 +340,68 @@ impl LinuxCgroupV2Limiter {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LinuxSeccompPlan {
+    pub schema_version: i64,
+    pub enabled: bool,
+    pub default_action: SeccompAction,
+    pub syscall_rules: Vec<LinuxSeccompRule>,
+    pub requires_loader: bool,
+    pub requires_linux: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LinuxSeccompRule {
+    pub syscall: String,
+    pub action: SeccompAction,
+    pub reason: String,
+}
+
+impl LinuxSeccompPlan {
+    pub fn from_profile(profile: &SeccompProfile) -> Self {
+        Self {
+            schema_version: 1,
+            enabled: profile.enabled,
+            default_action: profile.default_action.clone(),
+            syscall_rules: profile
+                .rules
+                .iter()
+                .map(|rule| LinuxSeccompRule {
+                    syscall: rule.syscall.clone(),
+                    action: rule.action.clone(),
+                    reason: rule.reason.clone(),
+                })
+                .collect(),
+            requires_loader: profile.enabled,
+            requires_linux: true,
+        }
+    }
+}
+
+pub struct LinuxSeccompProfileLoader;
+
+impl LinuxSeccompProfileLoader {
+    pub fn plan(profile: &SeccompProfile) -> Result<LinuxSeccompPlan, RuntimeError> {
+        if profile.enabled && profile.rules.is_empty() {
+            return Err(RuntimeError::ManifestRejected(
+                "enabled seccomp profile must contain at least one syscall rule".into(),
+            ));
+        }
+
+        Ok(LinuxSeccompPlan::from_profile(profile))
+    }
+
+    #[cfg(target_os = "linux")]
+    pub fn apply(_plan: &LinuxSeccompPlan) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        Err("seccomp profile loading is modeled but not wired to a Linux loader yet".into())
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    pub fn apply(_plan: &LinuxSeccompPlan) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        Err("Linux seccomp profiles are only available on Linux".into())
+    }
+}
+
 fn cpu_shares_to_cgroup_weight(cpu_shares: u32) -> u32 {
     let weight = ((cpu_shares.max(2) as u64 * 10_000) / 262_144).max(1);
     weight.min(10_000) as u32
@@ -524,6 +588,60 @@ mod tests {
             LinuxCgroupV2Limiter::plan("01agentboxsession", &ResourcePolicy::default()).unwrap();
         let err = LinuxCgroupV2Limiter::apply(std::path::Path::new("/sys/fs/cgroup"), &plan, 1)
             .unwrap_err();
+
+        assert!(err.to_string().contains("only available on Linux"));
+    }
+
+    #[test]
+    fn seccomp_plan_preserves_disabled_default_without_claiming_loader() {
+        let profile = SeccompProfile::default();
+
+        let plan = LinuxSeccompProfileLoader::plan(&profile).unwrap();
+
+        assert_eq!(plan.schema_version, 1);
+        assert!(!plan.enabled);
+        assert_eq!(plan.default_action, SeccompAction::Allow);
+        assert!(plan.syscall_rules.is_empty());
+        assert!(!plan.requires_loader);
+        assert!(plan.requires_linux);
+    }
+
+    #[test]
+    fn seccomp_plan_maps_targeted_syscall_rules() {
+        let profile = SeccompProfile::deny_syscalls(
+            &["ptrace", "bpf"],
+            "debugging and kernel instrumentation require explicit support",
+        );
+
+        let plan = LinuxSeccompProfileLoader::plan(&profile).unwrap();
+
+        assert!(plan.enabled);
+        assert!(plan.requires_loader);
+        assert_eq!(plan.syscall_rules.len(), 2);
+        assert_eq!(plan.syscall_rules[0].syscall, "ptrace");
+        assert_eq!(
+            plan.syscall_rules[0].action,
+            SeccompAction::Errno(libc::EPERM)
+        );
+    }
+
+    #[test]
+    fn seccomp_plan_rejects_enabled_empty_profiles() {
+        let profile = SeccompProfile {
+            enabled: true,
+            ..SeccompProfile::default()
+        };
+
+        let err = LinuxSeccompProfileLoader::plan(&profile).unwrap_err();
+
+        assert!(matches!(err, RuntimeError::ManifestRejected(_)));
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn seccomp_apply_is_explicitly_linux_only() {
+        let plan = LinuxSeccompProfileLoader::plan(&SeccompProfile::default()).unwrap();
+        let err = LinuxSeccompProfileLoader::apply(&plan).unwrap_err();
 
         assert!(err.to_string().contains("only available on Linux"));
     }
