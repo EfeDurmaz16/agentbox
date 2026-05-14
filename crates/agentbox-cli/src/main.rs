@@ -2754,15 +2754,17 @@ fn cmd_minipod_inspect(session_id: Option<String>, json: bool) {
 }
 
 fn cmd_review(session_id: String, json: bool) {
+    use agentbox_daemon::audit::AuditStore;
     use agentbox_daemon::config;
+    use agentbox_daemon::runtime::manager::RuntimeManager;
+    use agentbox_daemon::runtime::registry::RuntimeProviderRegistry;
     use agentbox_daemon::runtime::session::RuntimeSessionStore;
-    use agentbox_daemon::runtime::workspace::WorkspaceDiffSnapshotter;
 
     let config = config::load().unwrap_or_else(|e| {
         eprintln!("error: failed to load Agentbox config: {}", e);
         std::process::exit(1);
     });
-    let store = RuntimeSessionStore::new(config.session_store_path);
+    let store = RuntimeSessionStore::new(config.session_store_path.clone());
     let session = store.get(&session_id).unwrap_or_else(|e| {
         eprintln!("error: failed to read runtime session store: {}", e);
         std::process::exit(1);
@@ -2771,7 +2773,33 @@ fn cmd_review(session_id: String, json: bool) {
         eprintln!("error: AgentPod session not found: {}", session_id);
         std::process::exit(1);
     };
-    let snapshot = WorkspaceDiffSnapshotter::capture(&session);
+    let registry = RuntimeProviderRegistry::with_local_providers(
+        socket_path().to_string_lossy().into_owned(),
+        find_shim_binary()
+            .map(|path| path.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+    );
+    let provider = registry.get(&session.provider).unwrap_or_else(|e| {
+        eprintln!(
+            "error: failed to resolve session provider `{}` for review: {}",
+            session.provider, e
+        );
+        std::process::exit(1);
+    });
+    let manager = RuntimeManager::new(
+        provider,
+        RuntimeSessionStore::new(config.session_store_path),
+        AuditStore::new(&config.db_path).unwrap_or_else(|e| {
+            eprintln!("error: failed to open audit store: {}", e);
+            std::process::exit(1);
+        }),
+    );
+    let snapshot = manager
+        .capture_workspace_diff(&session_id)
+        .unwrap_or_else(|e| {
+            eprintln!("error: failed to capture workspace review: {}", e);
+            std::process::exit(1);
+        });
 
     if json {
         println!(
