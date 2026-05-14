@@ -26,6 +26,88 @@ pub enum RemoteAgentPodEvidenceMode {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RemoteAgentPodLifecycleEvent {
+    WorkerAllocated,
+    SessionCreated,
+    CommandStarted,
+    CommandFinished,
+    EvidenceSealed,
+    KillSwitchAck,
+    WorkerDestroyed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteAgentPodLifecycleDescriptor {
+    pub schema_version: i64,
+    pub create_timeout_seconds: u64,
+    pub command_timeout_seconds: u64,
+    pub idle_timeout_seconds: u64,
+    pub destroy_timeout_seconds: u64,
+    pub required_events: Vec<RemoteAgentPodLifecycleEvent>,
+    pub kill_switch_required: bool,
+}
+
+impl Default for RemoteAgentPodLifecycleDescriptor {
+    fn default() -> Self {
+        Self {
+            schema_version: 1,
+            create_timeout_seconds: 120,
+            command_timeout_seconds: 3600,
+            idle_timeout_seconds: 300,
+            destroy_timeout_seconds: 60,
+            required_events: vec![
+                RemoteAgentPodLifecycleEvent::WorkerAllocated,
+                RemoteAgentPodLifecycleEvent::SessionCreated,
+                RemoteAgentPodLifecycleEvent::CommandStarted,
+                RemoteAgentPodLifecycleEvent::CommandFinished,
+                RemoteAgentPodLifecycleEvent::EvidenceSealed,
+                RemoteAgentPodLifecycleEvent::KillSwitchAck,
+                RemoteAgentPodLifecycleEvent::WorkerDestroyed,
+            ],
+            kill_switch_required: true,
+        }
+    }
+}
+
+impl RemoteAgentPodLifecycleDescriptor {
+    pub fn validate(&self) -> Result<(), RuntimeError> {
+        if self.schema_version <= 0 {
+            return Err(RuntimeError::ManifestRejected(
+                "remote lifecycle schema version must be greater than zero".into(),
+            ));
+        }
+        if self.create_timeout_seconds == 0
+            || self.command_timeout_seconds == 0
+            || self.idle_timeout_seconds == 0
+            || self.destroy_timeout_seconds == 0
+        {
+            return Err(RuntimeError::ManifestRejected(
+                "remote lifecycle timeouts must be greater than zero".into(),
+            ));
+        }
+        if !self
+            .required_events
+            .contains(&RemoteAgentPodLifecycleEvent::EvidenceSealed)
+        {
+            return Err(RuntimeError::ManifestRejected(
+                "remote lifecycle descriptor must require sealed evidence".into(),
+            ));
+        }
+        if self.kill_switch_required
+            && !self
+                .required_events
+                .contains(&RemoteAgentPodLifecycleEvent::KillSwitchAck)
+        {
+            return Err(RuntimeError::ManifestRejected(
+                "remote lifecycle descriptor must require kill-switch acknowledgement".into(),
+            ));
+        }
+
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RemoteAgentPodTransportDescriptor {
     pub schema_version: i64,
     pub provider: String,
@@ -34,6 +116,7 @@ pub struct RemoteAgentPodTransportDescriptor {
     pub evidence_mode: RemoteAgentPodEvidenceMode,
     pub kill_switch_required: bool,
     pub secret_material_included: bool,
+    pub lifecycle: RemoteAgentPodLifecycleDescriptor,
     pub created_at: DateTime<Utc>,
 }
 
@@ -45,6 +128,8 @@ impl RemoteAgentPodTransportDescriptor {
     ) -> Result<Self, RuntimeError> {
         let endpoint = endpoint.into();
         validate_remote_endpoint(&endpoint)?;
+        let lifecycle = RemoteAgentPodLifecycleDescriptor::default();
+        lifecycle.validate()?;
         Ok(Self {
             schema_version: 1,
             provider: "remote-agentpod".to_string(),
@@ -53,6 +138,7 @@ impl RemoteAgentPodTransportDescriptor {
             evidence_mode,
             kill_switch_required: true,
             secret_material_included: false,
+            lifecycle,
             created_at: Utc::now(),
         })
     }
@@ -199,6 +285,15 @@ mod tests {
         assert!(descriptor.kill_switch_required);
         assert!(!descriptor.secret_material_included);
         assert_eq!(descriptor.endpoint, "https://worker.example.com/agentpod");
+        assert!(descriptor
+            .lifecycle
+            .required_events
+            .contains(&RemoteAgentPodLifecycleEvent::EvidenceSealed));
+        assert!(descriptor
+            .lifecycle
+            .required_events
+            .contains(&RemoteAgentPodLifecycleEvent::KillSwitchAck));
+        assert!(descriptor.lifecycle.kill_switch_required);
     }
 
     #[test]
@@ -218,5 +313,47 @@ mod tests {
         )
         .unwrap_err();
         assert!(secret.to_string().contains("must not embed credentials"));
+    }
+
+    #[test]
+    fn remote_lifecycle_descriptor_requires_kill_switch_ack() {
+        let descriptor = RemoteAgentPodLifecycleDescriptor {
+            required_events: vec![
+                RemoteAgentPodLifecycleEvent::WorkerAllocated,
+                RemoteAgentPodLifecycleEvent::EvidenceSealed,
+            ],
+            ..RemoteAgentPodLifecycleDescriptor::default()
+        };
+
+        let err = descriptor.validate().unwrap_err();
+
+        assert!(err.to_string().contains("kill-switch acknowledgement"));
+    }
+
+    #[test]
+    fn remote_lifecycle_descriptor_requires_sealed_evidence() {
+        let descriptor = RemoteAgentPodLifecycleDescriptor {
+            required_events: vec![
+                RemoteAgentPodLifecycleEvent::WorkerAllocated,
+                RemoteAgentPodLifecycleEvent::KillSwitchAck,
+            ],
+            ..RemoteAgentPodLifecycleDescriptor::default()
+        };
+
+        let err = descriptor.validate().unwrap_err();
+
+        assert!(err.to_string().contains("sealed evidence"));
+    }
+
+    #[test]
+    fn remote_lifecycle_descriptor_rejects_zero_timeouts() {
+        let descriptor = RemoteAgentPodLifecycleDescriptor {
+            command_timeout_seconds: 0,
+            ..RemoteAgentPodLifecycleDescriptor::default()
+        };
+
+        let err = descriptor.validate().unwrap_err();
+
+        assert!(err.to_string().contains("timeouts"));
     }
 }

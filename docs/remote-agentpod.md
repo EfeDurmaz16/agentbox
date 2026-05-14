@@ -19,11 +19,31 @@ The descriptor records:
 - the auth model
 - the evidence delivery mode
 - whether a kill switch is required
+- lifecycle timeouts and required worker/session events
 - whether secret material is embedded
 
 Agentbox rejects remote endpoints that are empty, use insecure `http://`, or
 embed credentials in a non-SSH URL. The descriptor is intentionally not a worker
 credential, tunnel config, or deployment artifact.
+
+## Lifecycle Contract
+
+Remote workers must eventually prove lifecycle events rather than only returning
+a command result. The current descriptor requires:
+
+- `WorkerAllocated`
+- `SessionCreated`
+- `CommandStarted`
+- `CommandFinished`
+- `EvidenceSealed`
+- `KillSwitchAck`
+- `WorkerDestroyed`
+
+The default lifecycle also carries create, command, idle, and destroy timeouts.
+All timeouts must be non-zero. `EvidenceSealed` is mandatory, and
+`KillSwitchAck` is mandatory whenever the kill switch is required, so remote
+execution cannot silently ignore operator stop requests in a future
+implementation.
 
 ## Auth Modes
 
