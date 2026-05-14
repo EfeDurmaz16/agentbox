@@ -500,6 +500,144 @@ impl LinuxLandlockRuleset {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LinuxIsolationBenchmarkPlan {
+    pub schema_version: i64,
+    pub iterations: u32,
+    pub command_argv: Vec<String>,
+    pub layers: Vec<LinuxIsolationBenchmarkLayer>,
+    pub live_env_var: String,
+    pub requires_linux: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LinuxIsolationBenchmarkLayer {
+    pub name: String,
+    pub argv: Vec<String>,
+    pub expected_boundary: String,
+}
+
+impl LinuxIsolationBenchmarkPlan {
+    pub fn from_minipod_spec(
+        spec: &MinipodSpec,
+        command: &ExecCommand,
+        iterations: u32,
+    ) -> Result<Self, RuntimeError> {
+        if iterations == 0 {
+            return Err(RuntimeError::ManifestRejected(
+                "Linux isolation benchmark iterations cannot be zero".into(),
+            ));
+        }
+        if command.argv.is_empty() {
+            return Err(RuntimeError::ManifestRejected(
+                "Linux isolation benchmark command cannot be empty".into(),
+            ));
+        }
+
+        let user = LinuxUserNamespaceLauncher::plan(command)?;
+        let mount = LinuxMountNamespaceLauncher::plan(spec)?;
+        let pid = LinuxPidNamespaceLauncher::plan(command)?;
+        let cgroup = LinuxCgroupV2Limiter::plan(&spec.id, &spec.resources)?;
+        let seccomp = LinuxSeccompProfileLoader::plan(&spec.seccomp)?;
+        let landlock = LinuxLandlockRuleset::plan(spec)?;
+
+        let mut user_mount_pid = vec![
+            "unshare".to_string(),
+            "--user".to_string(),
+            "--map-root-user".to_string(),
+            "--setgroups=deny".to_string(),
+            "--mount".to_string(),
+            "--propagation".to_string(),
+            mount.propagation.clone(),
+        ];
+        user_mount_pid.extend(LinuxPidNamespaceLauncher::command_args(&pid));
+
+        Ok(Self {
+            schema_version: 1,
+            iterations,
+            command_argv: command.argv.clone(),
+            layers: vec![
+                LinuxIsolationBenchmarkLayer {
+                    name: "direct".into(),
+                    argv: command.argv.clone(),
+                    expected_boundary: "baseline host process startup".into(),
+                },
+                LinuxIsolationBenchmarkLayer {
+                    name: "userns".into(),
+                    argv: prefixed_unshare_args(
+                        &["--user", "--map-root-user", "--setgroups=deny", "--"],
+                        &user.command_argv,
+                    ),
+                    expected_boundary: "rootless user namespace".into(),
+                },
+                LinuxIsolationBenchmarkLayer {
+                    name: "mntns".into(),
+                    argv: prefixed_command(
+                        "unshare",
+                        LinuxMountNamespaceLauncher::command_args(&mount, command),
+                    ),
+                    expected_boundary: "private mount namespace metadata boundary".into(),
+                },
+                LinuxIsolationBenchmarkLayer {
+                    name: "pidns".into(),
+                    argv: prefixed_command(
+                        "unshare",
+                        LinuxPidNamespaceLauncher::command_args(&pid),
+                    ),
+                    expected_boundary: "forked PID namespace with proc mount".into(),
+                },
+                LinuxIsolationBenchmarkLayer {
+                    name: "user-mount-pid".into(),
+                    argv: user_mount_pid,
+                    expected_boundary: "combined rootless namespace startup path".into(),
+                },
+                LinuxIsolationBenchmarkLayer {
+                    name: "cgroup-plan".into(),
+                    argv: cgroup
+                        .writes()
+                        .into_iter()
+                        .map(|write| format!("{}={}", write.file, write.value))
+                        .collect(),
+                    expected_boundary: "cgroups v2 resource write plan only".into(),
+                },
+                LinuxIsolationBenchmarkLayer {
+                    name: "seccomp-plan".into(),
+                    argv: seccomp
+                        .syscall_rules
+                        .iter()
+                        .map(|rule| rule.syscall.clone())
+                        .collect(),
+                    expected_boundary: "seccomp loader plan only".into(),
+                },
+                LinuxIsolationBenchmarkLayer {
+                    name: "landlock-plan".into(),
+                    argv: landlock
+                        .rules
+                        .iter()
+                        .map(|rule| rule.path.clone())
+                        .collect(),
+                    expected_boundary: "Landlock ruleset plan only".into(),
+                },
+            ],
+            live_env_var: "AGENTBOX_LINUX_BENCHMARK".into(),
+            requires_linux: true,
+        })
+    }
+}
+
+fn prefixed_unshare_args(prefix: &[&str], command_argv: &[String]) -> Vec<String> {
+    let mut argv = vec!["unshare".to_string()];
+    argv.extend(prefix.iter().map(|value| (*value).to_string()));
+    argv.extend(command_argv.iter().cloned());
+    argv
+}
+
+fn prefixed_command(binary: &str, args: Vec<String>) -> Vec<String> {
+    let mut argv = vec![binary.to_string()];
+    argv.extend(args);
+    argv
+}
+
 fn cpu_shares_to_cgroup_weight(cpu_shares: u32) -> u32 {
     let weight = ((cpu_shares.max(2) as u64 * 10_000) / 262_144).max(1);
     weight.min(10_000) as u32
@@ -839,5 +977,75 @@ mod tests {
 
     fn linux_live_tests_can_run_here() -> bool {
         cfg!(target_os = "linux")
+    }
+
+    #[test]
+    fn isolation_benchmark_plan_lists_measured_and_planned_boundaries() {
+        let mut spec = MinipodSpec::for_agent_task("hermes", "/tmp/agentbox-work");
+        spec.filesystem.mounts.push(MountRule {
+            host_path: PathBuf::from("/tmp/agentbox-fixtures"),
+            guest_path: "/fixtures".into(),
+            mode: MountMode::ReadOnly,
+            kind: MountKind::ReadOnlyHost,
+        });
+        spec.seccomp = SeccompProfile::deny_syscalls(
+            &["ptrace", "bpf"],
+            "debugging and kernel instrumentation require explicit support",
+        );
+
+        let plan =
+            LinuxIsolationBenchmarkPlan::from_minipod_spec(&spec, &command(&["/bin/true"]), 25)
+                .unwrap();
+
+        assert_eq!(plan.schema_version, 1);
+        assert_eq!(plan.iterations, 25);
+        assert_eq!(plan.live_env_var, "AGENTBOX_LINUX_BENCHMARK");
+        assert!(plan.requires_linux);
+        assert_eq!(
+            plan.layers
+                .iter()
+                .map(|layer| layer.name.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "direct",
+                "userns",
+                "mntns",
+                "pidns",
+                "user-mount-pid",
+                "cgroup-plan",
+                "seccomp-plan",
+                "landlock-plan",
+            ]
+        );
+        assert_eq!(
+            plan.layers[1].argv,
+            vec![
+                "unshare",
+                "--user",
+                "--map-root-user",
+                "--setgroups=deny",
+                "--",
+                "/bin/true"
+            ]
+        );
+        assert!(plan.layers[4].argv.contains(&"--pid".to_string()));
+        assert!(plan.layers[5]
+            .expected_boundary
+            .contains("resource write plan only"));
+        assert_eq!(plan.layers[6].argv, vec!["ptrace", "bpf"]);
+    }
+
+    #[test]
+    fn isolation_benchmark_plan_rejects_empty_inputs() {
+        let spec = MinipodSpec::for_agent_task("hermes", "/tmp/agentbox-work");
+
+        let zero_iters =
+            LinuxIsolationBenchmarkPlan::from_minipod_spec(&spec, &command(&["/bin/true"]), 0)
+                .unwrap_err();
+        let empty_command =
+            LinuxIsolationBenchmarkPlan::from_minipod_spec(&spec, &command(&[]), 1).unwrap_err();
+
+        assert!(matches!(zero_iters, RuntimeError::ManifestRejected(_)));
+        assert!(matches!(empty_command, RuntimeError::ManifestRejected(_)));
     }
 }

@@ -91,6 +91,12 @@ The near-term goal is not to recreate Docker. The goal is a narrow agent-task
 runtime with explicit filesystem, network, credential, process, approval, and
 evidence semantics.
 
+Linux startup overhead should be measured before provider availability is
+claimed. `scripts/linux-isolation-benchmark.sh` records CSV timing for direct
+process startup and the current `unshare` namespace combinations. On non-Linux
+hosts it exits with a skip message; on Linux it reports failed namespace layers
+as `status=fail` instead of converting missing kernel support into a fake pass.
+
 ## Windows AgentPod
 
 Status: descriptor only.
