@@ -26,6 +26,32 @@ Agentbox rejects remote endpoints that are empty, use insecure `http://`, or
 embed credentials in a non-SSH URL. The descriptor is intentionally not a worker
 credential, tunnel config, or deployment artifact.
 
+## Handshake Challenge
+
+Remote workers must prove identity before Agentbox can treat the worker as a
+governed execution target. The current CLI can emit a secret-free challenge
+descriptor:
+
+```sh
+agentbox remote-handshake \
+  --endpoint https://worker.example.com/agentpod \
+  --auth signed-challenge \
+  --ttl-seconds 300
+```
+
+The descriptor includes a challenge id, a SHA-256 digest of the nonce, an expiry
+time, and the response fields a future worker must return:
+
+- `WorkerIdentity`
+- `WorkerPublicKey`
+- `SignedChallenge`
+- `Capabilities`
+- `EvidenceEndpoint`
+- `LifecycleAck`
+
+It does not include the nonce itself or any credential material. The transport
+and signed response verifier are still future work.
+
 ## Lifecycle Contract
 
 Remote workers must eventually prove lifecycle events rather than only returning

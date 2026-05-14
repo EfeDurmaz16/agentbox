@@ -351,6 +351,20 @@ enum Commands {
         #[arg(long = "evidence", default_value = "append-only-stream")]
         evidence: String,
     },
+    /// Generate a secret-free remote AgentPod handshake challenge descriptor
+    RemoteHandshake {
+        /// Remote worker endpoint, e.g. https://worker.example.com/agentpod or ssh://agentpod@host
+        #[arg(long)]
+        endpoint: String,
+
+        /// Auth model: signed-challenge, workload-identity, mtls, operator-ssh
+        #[arg(long = "auth", default_value = "signed-challenge")]
+        auth: String,
+
+        /// Challenge expiry in seconds
+        #[arg(long = "ttl-seconds", default_value_t = 300)]
+        ttl_seconds: i64,
+    },
     /// Inspect persisted minipod session metadata
     MinipodInspect {
         /// Session id to inspect; omit to list all persisted sessions
@@ -3161,6 +3175,29 @@ fn cmd_remote_descriptor(endpoint: String, auth: String, evidence: String) {
     );
 }
 
+fn cmd_remote_handshake(endpoint: String, auth: String, ttl_seconds: i64) {
+    use agentbox_daemon::runtime::providers::remote::RemoteAgentPodHandshakeDescriptor;
+
+    let descriptor = RemoteAgentPodHandshakeDescriptor::new(
+        endpoint,
+        parse_remote_auth_kind(&auth),
+        ttl_seconds,
+    )
+    .unwrap_or_else(|e| {
+        eprintln!(
+            "error: failed to build remote AgentPod handshake descriptor: {}",
+            e
+        );
+        std::process::exit(1);
+    });
+
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&descriptor)
+            .expect("failed to serialize remote AgentPod handshake descriptor")
+    );
+}
+
 fn parse_remote_auth_kind(
     raw: &str,
 ) -> agentbox_daemon::runtime::providers::remote::RemoteAgentPodAuthKind {
@@ -3791,6 +3828,11 @@ async fn main() {
             auth,
             evidence,
         } => cmd_remote_descriptor(endpoint, auth, evidence),
+        Commands::RemoteHandshake {
+            endpoint,
+            auth,
+            ttl_seconds,
+        } => cmd_remote_handshake(endpoint, auth, ttl_seconds),
         Commands::MinipodInspect { session_id, json } => cmd_minipod_inspect(session_id, json),
         Commands::Review {
             session_id,

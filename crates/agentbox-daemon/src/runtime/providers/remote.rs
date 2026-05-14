@@ -1,6 +1,8 @@
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
+use rand::RngCore;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::runtime::bridge::HostBridgeTransportKind;
 use crate::runtime::provider::{
@@ -23,6 +25,76 @@ pub enum RemoteAgentPodEvidenceMode {
     AppendOnlyStream,
     BundleUpload,
     LocalPull,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RemoteAgentPodHandshakeResponseField {
+    WorkerIdentity,
+    WorkerPublicKey,
+    SignedChallenge,
+    Capabilities,
+    EvidenceEndpoint,
+    LifecycleAck,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteAgentPodHandshakeDescriptor {
+    pub schema_version: i64,
+    pub provider: String,
+    pub endpoint: String,
+    pub auth_kind: RemoteAgentPodAuthKind,
+    pub challenge_id: String,
+    pub challenge_nonce_sha256: String,
+    pub expires_at: DateTime<Utc>,
+    pub required_response_fields: Vec<RemoteAgentPodHandshakeResponseField>,
+    pub secret_material_included: bool,
+    pub created_at: DateTime<Utc>,
+}
+
+impl RemoteAgentPodHandshakeDescriptor {
+    pub fn new(
+        endpoint: impl Into<String>,
+        auth_kind: RemoteAgentPodAuthKind,
+        ttl_seconds: i64,
+    ) -> Result<Self, RuntimeError> {
+        let endpoint = endpoint.into();
+        validate_remote_endpoint(&endpoint)?;
+        if ttl_seconds <= 0 {
+            return Err(RuntimeError::ManifestRejected(
+                "remote AgentPod handshake ttl must be greater than zero".into(),
+            ));
+        }
+
+        let created_at = Utc::now();
+        let mut nonce = [0_u8; 32];
+        rand::thread_rng().fill_bytes(&mut nonce);
+        let challenge_nonce_sha256 = sha256_hex(&nonce);
+        let challenge_id = format!(
+            "agentpod-challenge-{}-{}",
+            created_at.timestamp(),
+            &challenge_nonce_sha256[..12]
+        );
+
+        Ok(Self {
+            schema_version: 1,
+            provider: "remote-agentpod".to_string(),
+            endpoint,
+            auth_kind,
+            challenge_id,
+            challenge_nonce_sha256,
+            expires_at: created_at + Duration::seconds(ttl_seconds),
+            required_response_fields: vec![
+                RemoteAgentPodHandshakeResponseField::WorkerIdentity,
+                RemoteAgentPodHandshakeResponseField::WorkerPublicKey,
+                RemoteAgentPodHandshakeResponseField::SignedChallenge,
+                RemoteAgentPodHandshakeResponseField::Capabilities,
+                RemoteAgentPodHandshakeResponseField::EvidenceEndpoint,
+                RemoteAgentPodHandshakeResponseField::LifecycleAck,
+            ],
+            secret_material_included: false,
+            created_at,
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -162,6 +234,11 @@ fn validate_remote_endpoint(endpoint: &str) -> Result<(), RuntimeError> {
         ));
     }
     Ok(())
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 pub struct RemoteAgentPodProvider;
@@ -313,6 +390,40 @@ mod tests {
         )
         .unwrap_err();
         assert!(secret.to_string().contains("must not embed credentials"));
+    }
+
+    #[test]
+    fn remote_handshake_descriptor_is_secret_free_and_expiring() {
+        let descriptor = RemoteAgentPodHandshakeDescriptor::new(
+            "https://worker.example.com/agentpod",
+            RemoteAgentPodAuthKind::SignedChallenge,
+            300,
+        )
+        .unwrap();
+
+        assert_eq!(descriptor.schema_version, 1);
+        assert_eq!(descriptor.provider, "remote-agentpod");
+        assert!(!descriptor.secret_material_included);
+        assert_eq!(descriptor.challenge_nonce_sha256.len(), 64);
+        assert!(descriptor.expires_at > descriptor.created_at);
+        assert!(descriptor
+            .required_response_fields
+            .contains(&RemoteAgentPodHandshakeResponseField::SignedChallenge));
+        assert!(descriptor
+            .required_response_fields
+            .contains(&RemoteAgentPodHandshakeResponseField::LifecycleAck));
+    }
+
+    #[test]
+    fn remote_handshake_descriptor_rejects_invalid_ttl() {
+        let err = RemoteAgentPodHandshakeDescriptor::new(
+            "https://worker.example.com/agentpod",
+            RemoteAgentPodAuthKind::SignedChallenge,
+            0,
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("ttl"));
     }
 
     #[test]
