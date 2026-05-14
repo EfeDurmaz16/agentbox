@@ -182,6 +182,7 @@ fn minipod_to_pod_spec(spec: &MinipodSpec) -> PodSpec {
 fn pod_mount_kind(kind: &MountKind) -> PodMountKind {
     match kind {
         MountKind::Workspace => PodMountKind::Workspace,
+        MountKind::WorkspaceOverlay => PodMountKind::WorkspaceOverlay,
         MountKind::ReadOnlyHost => PodMountKind::ReadOnlyHost,
         MountKind::Credential => PodMountKind::Credential,
         MountKind::SystemBridge => PodMountKind::SystemBridge,

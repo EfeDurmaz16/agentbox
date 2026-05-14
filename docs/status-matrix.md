@@ -18,6 +18,7 @@ implemented yet.
 | Doctor command | Shipped | `agentbox doctor` reports daemon, shim, audit, PATH, and provider readiness. |
 | Minipod manifest model | Shipped | `MinipodSpec` models filesystem, network, credentials, resources, services, labels, agent profile, approvals, and task policy bundles. |
 | Manifest policy validation | Shipped | Unsafe host env inheritance, host network mode, and protected mounts are rejected before provider create. |
+| Writable workspace overlay policy | Shipped model | `MinipodSpec` can model direct writes or a review-required workspace overlay, and validation rejects missing, protected, or workspace-internal overlay paths. Provider execution wiring is not claimed. |
 | One-time credential file grants | Shipped | `--credential-file` creates read-only credential mounts and one-time file grants; provider mount metadata distinguishes them from ordinary read-only host mounts. |
 | Credential revocation evidence | Shipped | Destroying a runtime session records hash-chained credential revocation audit events for one-time grants. |
 | Per-agent policy profiles | Shipped | `general`, `coding`, `research`, `deploy`, and custom profile ids can set policy defaults without hardcoding specific agent products. |
@@ -48,7 +49,7 @@ implemented yet.
 | AgentPod macOS | Descriptor only | Candidate surfaces include Apple Virtualization for local cells, Endpoint Security for host-event enforcement, and Network Extension for egress governance. Execution intentionally returns unavailable. See [Endpoint Security design](macos-endpoint-security.md) and [system extension scaffold](macos-system-extension-scaffold.md). |
 | AgentPod Linux | Prototype primitives | Candidate surfaces include namespaces, cgroups, Landlock, seccomp, eBPF, nftables, and overlayfs. Linux-only user, mount, PID namespace, cgroups v2, seccomp, Landlock, isolation benchmark, and eBPF observability design primitives exist, but provider execution intentionally remains unavailable until the full boundary is wired and verified. |
 | AgentPod Windows | Prototype primitives | Candidate surfaces include Job Objects, AppContainer, WFP, ETW, and Windows sandbox primitives. A Windows Job Object plan/controller exists with Windows-only apply behavior, but provider execution intentionally remains unavailable. See [Windows native provider](windows-native-provider.md). |
-| Podman compatibility minipods | Experimental | `agentbox run` uses the daemon-owned runtime manager path. `agentbox pods` and `agentbox stop-pod` still use the older Podman CLI path, and live socket/shim smoke proof remains open. |
+| Podman compatibility minipods | Experimental | `agentbox run` uses the daemon-owned runtime manager path. `agentbox pods` and `agentbox stop-pod` still use the older Podman CLI path, workspace overlay policy is only manifest metadata, and live socket/shim smoke proof remains open. |
 
 ## Ecosystem Integrations
 

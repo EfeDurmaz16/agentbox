@@ -52,6 +52,7 @@ pub struct MountSpec {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MountKind {
     Workspace,
+    WorkspaceOverlay,
     #[default]
     ReadOnlyHost,
     Credential,

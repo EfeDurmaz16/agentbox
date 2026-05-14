@@ -175,6 +175,11 @@ agentbox run "openclaw start"
 # Generate the governed minipod manifest without starting a backend
 agentbox minipod-spec hermes --workspace . --allow-domain api.openai.com
 
+# Generate a manifest where writes go to a reviewable overlay instead of being
+# modeled as direct host workspace writes. Provider execution support is still
+# separate from this manifest contract.
+agentbox minipod-spec hermes --workspace . --workspace-overlay-dir /tmp/agentbox-overlay-demo
+
 # Run a safe OpenClaw/Hermes-style manifest demo
 scripts/demo-autonomous-agent.sh
 

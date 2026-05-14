@@ -200,6 +200,10 @@ enum Commands {
         /// Load a task-scoped policy bundle JSON file
         #[arg(long = "policy-bundle")]
         policy_bundles: Vec<PathBuf>,
+
+        /// Enable a review-required writable workspace overlay rooted at this host directory
+        #[arg(long = "workspace-overlay-dir")]
+        workspace_overlay_dir: Option<PathBuf>,
     },
     /// List runtime providers and their current implementation status
     Providers,
@@ -2002,11 +2006,14 @@ struct MinipodSpecOptions {
     network_mode: Option<String>,
     deny_domains: Vec<String>,
     deny_localhost: bool,
+    workspace_overlay_dir: Option<PathBuf>,
 }
 
 fn cmd_minipod_spec(options: MinipodSpecOptions) {
     use agentbox_daemon::runtime::policy::validate_minipod_spec;
-    use agentbox_daemon::runtime::types::{MinipodSpec, NetworkMode};
+    use agentbox_daemon::runtime::types::{
+        MinipodSpec, NetworkMode, WorkspaceOverlayPolicy, WorkspaceWritePolicy,
+    };
 
     let workspace = options.workspace.unwrap_or_else(|| {
         std::env::current_dir().unwrap_or_else(|_| {
@@ -2028,6 +2035,11 @@ fn cmd_minipod_spec(options: MinipodSpecOptions) {
         let (mount, credential_grant) = parse_credential_file_grant(&grant);
         spec.filesystem.mounts.push(mount);
         spec.credentials.grants.push(credential_grant);
+    }
+    if let Some(overlay_dir) = options.workspace_overlay_dir {
+        spec.filesystem.workspace_write_policy = WorkspaceWritePolicy::WritableOverlay;
+        spec.filesystem.workspace_overlay =
+            WorkspaceOverlayPolicy::review_required(Some(overlay_dir));
     }
     if !options.allow_domains.is_empty() {
         spec.network.mode = NetworkMode::AllowListed;
@@ -2438,6 +2450,7 @@ async fn main() {
             read_only_mounts,
             credential_files,
             policy_bundles,
+            workspace_overlay_dir,
             deny_domains,
             deny_localhost,
         } => cmd_minipod_spec(MinipodSpecOptions {
@@ -2451,6 +2464,7 @@ async fn main() {
             network_mode,
             deny_domains,
             deny_localhost,
+            workspace_overlay_dir,
         }),
         Commands::Providers => cmd_providers(),
         Commands::MinipodInspect { session_id, json } => cmd_minipod_inspect(session_id, json),

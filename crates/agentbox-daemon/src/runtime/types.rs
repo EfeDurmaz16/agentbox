@@ -46,8 +46,16 @@ pub enum MountMode {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WorkspaceWritePolicy {
+    #[default]
+    Direct,
+    WritableOverlay,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MountKind {
     Workspace,
+    WorkspaceOverlay,
     #[default]
     ReadOnlyHost,
     Credential,
@@ -76,6 +84,60 @@ pub struct MountRule {
     pub kind: MountKind,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WorkspaceOverlayMode {
+    #[default]
+    Disabled,
+    ReviewRequired,
+    DiscardOnDestroy,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceOverlayPolicy {
+    #[serde(default)]
+    pub mode: WorkspaceOverlayMode,
+    #[serde(default)]
+    pub upper_host_path: Option<PathBuf>,
+    #[serde(default)]
+    pub work_host_path: Option<PathBuf>,
+    #[serde(default = "default_workspace_overlay_guest_path")]
+    pub guest_path: String,
+}
+
+impl Default for WorkspaceOverlayPolicy {
+    fn default() -> Self {
+        Self {
+            mode: WorkspaceOverlayMode::Disabled,
+            upper_host_path: None,
+            work_host_path: None,
+            guest_path: default_workspace_overlay_guest_path(),
+        }
+    }
+}
+
+impl WorkspaceOverlayPolicy {
+    pub fn review_required(base_host_path: Option<PathBuf>) -> Self {
+        let (upper_host_path, work_host_path) = base_host_path
+            .map(|base| (Some(base.join("upper")), Some(base.join("work"))))
+            .unwrap_or((None, None));
+
+        Self {
+            mode: WorkspaceOverlayMode::ReviewRequired,
+            upper_host_path,
+            work_host_path,
+            guest_path: default_workspace_overlay_guest_path(),
+        }
+    }
+
+    pub fn is_enabled(&self) -> bool {
+        !matches!(self.mode, WorkspaceOverlayMode::Disabled)
+    }
+}
+
+fn default_workspace_overlay_guest_path() -> String {
+    "/workspace".to_string()
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProtectedPath {
     pub path: PathBuf,
@@ -87,6 +149,10 @@ pub struct ProtectedPath {
 pub struct FilesystemPolicy {
     pub workspace_host_path: PathBuf,
     pub workspace_guest_path: String,
+    #[serde(default)]
+    pub workspace_write_policy: WorkspaceWritePolicy,
+    #[serde(default)]
+    pub workspace_overlay: WorkspaceOverlayPolicy,
     pub mounts: Vec<MountRule>,
     pub protected_paths: Vec<ProtectedPath>,
     pub deny_home_by_default: bool,
@@ -97,6 +163,8 @@ impl FilesystemPolicy {
         Self {
             workspace_host_path: path.into(),
             workspace_guest_path: "/workspace".to_string(),
+            workspace_write_policy: WorkspaceWritePolicy::Direct,
+            workspace_overlay: WorkspaceOverlayPolicy::default(),
             mounts: vec![],
             protected_paths: default_protected_paths(),
             deny_home_by_default: true,
@@ -384,6 +452,10 @@ pub struct TaskPolicyBundle {
     #[serde(default)]
     pub read_only_mounts: Vec<MountRule>,
     #[serde(default)]
+    pub workspace_write_policy: Option<WorkspaceWritePolicy>,
+    #[serde(default)]
+    pub workspace_overlay: Option<WorkspaceOverlayPolicy>,
+    #[serde(default)]
     pub credential_grants: Vec<CredentialGrant>,
     #[serde(default)]
     pub approval_grants: Vec<ApprovalGrant>,
@@ -406,6 +478,8 @@ impl Default for TaskPolicyBundle {
             allowed_domains: vec![],
             denied_domains: vec![],
             read_only_mounts: vec![],
+            workspace_write_policy: None,
+            workspace_overlay: None,
             credential_grants: vec![],
             approval_grants: vec![],
             protected_paths: vec![],
@@ -430,6 +504,12 @@ impl TaskPolicyBundle {
         spec.filesystem
             .mounts
             .extend(self.read_only_mounts.iter().cloned());
+        if let Some(policy) = &self.workspace_write_policy {
+            spec.filesystem.workspace_write_policy = policy.clone();
+        }
+        if let Some(overlay) = &self.workspace_overlay {
+            spec.filesystem.workspace_overlay = overlay.clone();
+        }
         spec.filesystem
             .protected_paths
             .extend(self.protected_paths.iter().cloned());
@@ -982,6 +1062,11 @@ mod tests {
         assert_eq!(spec.agent.name, "openclaw");
         assert_eq!(spec.filesystem.workspace_guest_path, "/workspace");
         assert!(spec.filesystem.deny_home_by_default);
+        assert!(matches!(
+            spec.filesystem.workspace_write_policy,
+            WorkspaceWritePolicy::Direct
+        ));
+        assert!(!spec.filesystem.workspace_overlay.is_enabled());
         assert!(matches!(spec.network.mode, NetworkMode::DenyByDefault));
         assert!(!spec.credentials.inherit_host_env);
         assert!(spec.credentials.redact_in_audit);
@@ -1100,6 +1185,29 @@ mod tests {
         };
 
         assert!(matches!(mount.kind, MountKind::Credential));
+    }
+
+    #[test]
+    fn workspace_overlay_policy_models_reviewable_writes() {
+        let overlay = WorkspaceOverlayPolicy::review_required(Some(
+            "/tmp/agentbox-overlays/session-1".into(),
+        ));
+
+        assert!(overlay.is_enabled());
+        assert!(matches!(overlay.mode, WorkspaceOverlayMode::ReviewRequired));
+        assert_eq!(
+            overlay.upper_host_path.as_deref(),
+            Some(std::path::Path::new(
+                "/tmp/agentbox-overlays/session-1/upper"
+            ))
+        );
+        assert_eq!(
+            overlay.work_host_path.as_deref(),
+            Some(std::path::Path::new(
+                "/tmp/agentbox-overlays/session-1/work"
+            ))
+        );
+        assert_eq!(overlay.guest_path, "/workspace");
     }
 
     #[test]
@@ -1471,6 +1579,11 @@ mod tests {
         assert_eq!(spec.policy_profile.id, "general");
         assert!(spec.approvals.is_empty());
         assert!(spec.policy_bundles.is_empty());
+        assert!(matches!(
+            spec.filesystem.workspace_write_policy,
+            WorkspaceWritePolicy::Direct
+        ));
+        assert!(!spec.filesystem.workspace_overlay.is_enabled());
     }
 
     #[test]
@@ -1490,6 +1603,8 @@ mod tests {
                 mode: MountMode::ReadOnly,
                 kind: MountKind::ReadOnlyHost,
             }],
+            workspace_write_policy: Some(WorkspaceWritePolicy::WritableOverlay),
+            workspace_overlay: Some(WorkspaceOverlayPolicy::review_required(None)),
             credential_grants: vec![CredentialGrant {
                 name: "github-token".into(),
                 kind: CredentialGrantKind::EnvVar,
@@ -1521,6 +1636,15 @@ mod tests {
             vec!["metadata.google.internal"]
         );
         assert_eq!(spec.filesystem.mounts.len(), 1);
+        assert!(matches!(
+            spec.filesystem.workspace_write_policy,
+            WorkspaceWritePolicy::WritableOverlay
+        ));
+        assert!(spec.filesystem.workspace_overlay.is_enabled());
+        assert!(matches!(
+            spec.filesystem.workspace_overlay.mode,
+            WorkspaceOverlayMode::ReviewRequired
+        ));
         assert_eq!(spec.credentials.grants.len(), 1);
         assert_eq!(spec.approvals.len(), 1);
         assert_eq!(spec.policy_bundles.len(), 1);

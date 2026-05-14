@@ -3,6 +3,7 @@ use std::path::{Component, Path, PathBuf};
 use crate::runtime::provider::RuntimeError;
 use crate::runtime::types::{
     CredentialGrantKind, MinipodSpec, MountMode, NetworkMode, TaskPolicyBundle,
+    WorkspaceWritePolicy,
 };
 
 pub fn load_task_policy_bundle(path: impl AsRef<Path>) -> Result<TaskPolicyBundle, RuntimeError> {
@@ -38,6 +39,7 @@ pub fn validate_minipod_spec(spec: &MinipodSpec) -> Result<(), RuntimeError> {
     if spec.filesystem.workspace_host_path.as_os_str().is_empty() {
         return reject("workspace host path cannot be empty");
     }
+    validate_workspace_overlay(spec)?;
 
     if !spec.filesystem.deny_home_by_default {
         return reject("home directory must be denied by default");
@@ -100,6 +102,65 @@ pub fn validate_minipod_spec(spec: &MinipodSpec) -> Result<(), RuntimeError> {
     Ok(())
 }
 
+fn validate_workspace_overlay(spec: &MinipodSpec) -> Result<(), RuntimeError> {
+    let overlay = &spec.filesystem.workspace_overlay;
+    match spec.filesystem.workspace_write_policy {
+        WorkspaceWritePolicy::Direct if overlay.is_enabled() => {
+            return reject("direct workspace writes cannot carry a workspace overlay");
+        }
+        WorkspaceWritePolicy::Direct => return Ok(()),
+        WorkspaceWritePolicy::WritableOverlay if !overlay.is_enabled() => {
+            return reject("writable overlay policy requires a workspace overlay");
+        }
+        WorkspaceWritePolicy::WritableOverlay => {}
+    }
+
+    if overlay.guest_path != spec.filesystem.workspace_guest_path {
+        return reject("workspace overlay guest path must match workspace guest path");
+    }
+    if overlay.upper_host_path.is_none() || overlay.work_host_path.is_none() {
+        return reject("writable overlay requires upper and work host paths");
+    }
+    if overlay.upper_host_path == overlay.work_host_path {
+        return reject("workspace overlay upper and work paths must be different");
+    }
+    if !overlay.is_enabled() {
+        return Ok(());
+    }
+    if overlay.guest_path.trim().is_empty() {
+        return reject("workspace overlay guest path cannot be empty");
+    }
+    if let Some(upper) = &overlay.upper_host_path {
+        if upper.as_os_str().is_empty() {
+            return reject("workspace overlay upper path cannot be empty");
+        }
+        if is_inside_workspace(spec, upper) {
+            return reject("workspace overlay upper path cannot sit inside the workspace");
+        }
+        if escapes_workspace_via_symlink(spec, upper) {
+            return reject("workspace overlay upper path escapes workspace through symlink");
+        }
+        if is_protected_path(spec, upper) {
+            return reject("workspace overlay upper path cannot be protected");
+        }
+    }
+    if let Some(work) = &overlay.work_host_path {
+        if work.as_os_str().is_empty() {
+            return reject("workspace overlay work path cannot be empty");
+        }
+        if is_inside_workspace(spec, work) {
+            return reject("workspace overlay work path cannot sit inside the workspace");
+        }
+        if escapes_workspace_via_symlink(spec, work) {
+            return reject("workspace overlay work path escapes workspace through symlink");
+        }
+        if is_protected_path(spec, work) {
+            return reject("workspace overlay work path cannot be protected");
+        }
+    }
+    Ok(())
+}
+
 fn validate_task_policy_bundle(bundle: &TaskPolicyBundle) -> Result<(), RuntimeError> {
     if bundle.schema_version != 1 {
         return reject(format!(
@@ -115,6 +176,14 @@ fn validate_task_policy_bundle(bundle: &TaskPolicyBundle) -> Result<(), RuntimeE
             return reject("task policy bundle mounts must be read-only");
         }
     }
+    if let Some(overlay) = &bundle.workspace_overlay {
+        if bundle.workspace_write_policy.is_none() {
+            return reject("task policy bundle workspace overlay requires a write policy");
+        }
+        if overlay.is_enabled() && overlay.guest_path.trim().is_empty() {
+            return reject("task policy bundle workspace overlay guest path cannot be empty");
+        }
+    }
     Ok(())
 }
 
@@ -124,6 +193,11 @@ fn is_protected_path(spec: &MinipodSpec, path: &Path) -> bool {
         .protected_paths
         .iter()
         .any(|protected| path.starts_with(normalize_path(&protected.path)))
+}
+
+fn is_inside_workspace(spec: &MinipodSpec, path: &Path) -> bool {
+    let workspace = normalize_path(&spec.filesystem.workspace_host_path);
+    !workspace.as_os_str().is_empty() && normalize_path(path).starts_with(workspace)
 }
 
 fn has_matching_file_grant(spec: &MinipodSpec, path: &Path) -> bool {
@@ -138,6 +212,9 @@ fn has_matching_file_grant(spec: &MinipodSpec, path: &Path) -> bool {
 fn escapes_workspace_via_symlink(spec: &MinipodSpec, path: &Path) -> bool {
     let workspace = normalize_path(&spec.filesystem.workspace_host_path);
     let path = normalize_path(path);
+    if workspace.as_os_str().is_empty() {
+        return false;
+    }
     if !path.starts_with(&workspace) {
         return false;
     }
@@ -179,7 +256,7 @@ mod tests {
     use super::*;
     use crate::runtime::types::{
         CredentialGrant, FilesystemPolicy, MountRule, ProtectedPath, SeccompProfile,
-        SensitivePathClass, TaskPolicyBundle,
+        SensitivePathClass, TaskPolicyBundle, WorkspaceOverlayMode, WorkspaceOverlayPolicy,
     };
 
     fn spec() -> MinipodSpec {
@@ -356,6 +433,83 @@ mod tests {
     }
 
     #[test]
+    fn accepts_review_required_workspace_overlay() {
+        let mut spec = spec();
+        spec.filesystem.workspace_write_policy = WorkspaceWritePolicy::WritableOverlay;
+        spec.filesystem.workspace_overlay =
+            WorkspaceOverlayPolicy::review_required(Some("/tmp/agentbox-overlay/session-1".into()));
+
+        validate_minipod_spec(&spec).unwrap();
+    }
+
+    #[test]
+    fn rejects_direct_workspace_policy_with_overlay() {
+        let mut spec = spec();
+        spec.filesystem.workspace_overlay =
+            WorkspaceOverlayPolicy::review_required(Some("/tmp/agentbox-overlay/session-1".into()));
+
+        let reason = rejection_reason(validate_minipod_spec(&spec));
+
+        assert!(reason.contains("direct workspace"));
+    }
+
+    #[test]
+    fn rejects_writable_overlay_policy_without_overlay() {
+        let mut spec = spec();
+        spec.filesystem.workspace_write_policy = WorkspaceWritePolicy::WritableOverlay;
+
+        let reason = rejection_reason(validate_minipod_spec(&spec));
+
+        assert!(reason.contains("requires a workspace overlay"));
+    }
+
+    #[test]
+    fn rejects_workspace_overlay_with_empty_guest_path() {
+        let mut spec = spec();
+        spec.filesystem.workspace_write_policy = WorkspaceWritePolicy::WritableOverlay;
+        spec.filesystem.workspace_overlay = WorkspaceOverlayPolicy {
+            mode: WorkspaceOverlayMode::ReviewRequired,
+            upper_host_path: Some("/tmp/agentbox-overlay/upper".into()),
+            work_host_path: Some("/tmp/agentbox-overlay/work".into()),
+            guest_path: " ".into(),
+        };
+
+        let reason = rejection_reason(validate_minipod_spec(&spec));
+
+        assert!(reason.contains("guest path"));
+    }
+
+    #[test]
+    fn rejects_workspace_overlay_inside_workspace() {
+        let mut spec = spec();
+        spec.filesystem.workspace_write_policy = WorkspaceWritePolicy::WritableOverlay;
+        spec.filesystem.workspace_overlay = WorkspaceOverlayPolicy::review_required(Some(
+            "/tmp/agentbox-work/.agentbox-overlay".into(),
+        ));
+
+        let reason = rejection_reason(validate_minipod_spec(&spec));
+
+        assert!(reason.contains("inside the workspace"));
+    }
+
+    #[test]
+    fn rejects_workspace_overlay_stored_in_protected_path() {
+        let mut spec = spec();
+        spec.filesystem.workspace_write_policy = WorkspaceWritePolicy::WritableOverlay;
+        spec.filesystem.protected_paths.push(ProtectedPath {
+            path: "/tmp/agentbox-secret".into(),
+            class: SensitivePathClass::Custom("secret".into()),
+            reason: "test secret".into(),
+        });
+        spec.filesystem.workspace_overlay =
+            WorkspaceOverlayPolicy::review_required(Some("/tmp/agentbox-secret/overlay".into()));
+
+        let reason = rejection_reason(validate_minipod_spec(&spec));
+
+        assert!(reason.contains("overlay upper path"));
+    }
+
+    #[test]
     fn protected_file_grants_must_require_approval() {
         let mut spec = spec();
         spec.filesystem = FilesystemPolicy {
@@ -475,6 +629,8 @@ mod tests {
             allowed_domains: vec![],
             denied_domains: vec![],
             read_only_mounts: vec![],
+            workspace_write_policy: None,
+            workspace_overlay: None,
             credential_grants: vec![],
             approval_grants: vec![],
             protected_paths: vec![],
@@ -502,6 +658,8 @@ mod tests {
                 mode: MountMode::ReadWrite,
                 kind: Default::default(),
             }],
+            workspace_write_policy: None,
+            workspace_overlay: None,
             credential_grants: vec![],
             approval_grants: vec![],
             protected_paths: vec![],
