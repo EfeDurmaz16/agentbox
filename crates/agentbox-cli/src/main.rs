@@ -113,6 +113,18 @@ enum Commands {
         #[arg(long = "credential-file")]
         credential_files: Vec<String>,
 
+        /// Add an explicit environment credential grant as name=ENV_VAR
+        #[arg(long = "credential-env")]
+        credential_env: Vec<String>,
+
+        /// Add an explicit socket credential grant as name=/path/to/socket
+        #[arg(long = "credential-socket")]
+        credential_sockets: Vec<String>,
+
+        /// Add an explicit provider token grant as name=provider:token-id
+        #[arg(long = "credential-token")]
+        credential_tokens: Vec<String>,
+
         /// Load a task-scoped policy bundle JSON file
         #[arg(long = "policy-bundle")]
         policy_bundles: Vec<PathBuf>,
@@ -230,6 +242,18 @@ enum Commands {
         /// Add an explicit credential file grant as name=host_path:guest_path
         #[arg(long = "credential-file")]
         credential_files: Vec<String>,
+
+        /// Add an explicit environment credential grant as name=ENV_VAR
+        #[arg(long = "credential-env")]
+        credential_env: Vec<String>,
+
+        /// Add an explicit socket credential grant as name=/path/to/socket
+        #[arg(long = "credential-socket")]
+        credential_sockets: Vec<String>,
+
+        /// Add an explicit provider token grant as name=provider:token-id
+        #[arg(long = "credential-token")]
+        credential_tokens: Vec<String>,
 
         /// Load a task-scoped policy bundle JSON file
         #[arg(long = "policy-bundle")]
@@ -936,6 +960,9 @@ struct RunOptions {
     memory: u64,
     read_only_mounts: Vec<String>,
     credential_files: Vec<String>,
+    credential_env: Vec<String>,
+    credential_sockets: Vec<String>,
+    credential_tokens: Vec<String>,
     policy_bundles: Vec<PathBuf>,
     allow_domains: Vec<String>,
     network_mode: Option<String>,
@@ -1045,6 +1072,21 @@ async fn cmd_run(options: RunOptions) {
         let (mount, credential_grant) = parse_credential_file_grant(&grant);
         spec.filesystem.mounts.push(mount);
         spec.credentials.grants.push(credential_grant);
+    }
+    for grant in options.credential_env {
+        spec.credentials
+            .grants
+            .push(parse_simple_credential_grant(&grant, "env"));
+    }
+    for grant in options.credential_sockets {
+        spec.credentials
+            .grants
+            .push(parse_simple_credential_grant(&grant, "socket"));
+    }
+    for grant in options.credential_tokens {
+        spec.credentials
+            .grants
+            .push(parse_simple_credential_grant(&grant, "token"));
     }
     if !options.allow_domains.is_empty() {
         spec.network.mode = NetworkMode::AllowListed;
@@ -2179,6 +2221,9 @@ struct MinipodSpecOptions {
     allow_domains: Vec<String>,
     read_only_mounts: Vec<String>,
     credential_files: Vec<String>,
+    credential_env: Vec<String>,
+    credential_sockets: Vec<String>,
+    credential_tokens: Vec<String>,
     policy_bundles: Vec<PathBuf>,
     network_mode: Option<String>,
     deny_domains: Vec<String>,
@@ -2234,6 +2279,21 @@ fn cmd_minipod_spec(options: MinipodSpecOptions) {
         let (mount, credential_grant) = parse_credential_file_grant(&grant);
         spec.filesystem.mounts.push(mount);
         spec.credentials.grants.push(credential_grant);
+    }
+    for grant in options.credential_env {
+        spec.credentials
+            .grants
+            .push(parse_simple_credential_grant(&grant, "env"));
+    }
+    for grant in options.credential_sockets {
+        spec.credentials
+            .grants
+            .push(parse_simple_credential_grant(&grant, "socket"));
+    }
+    for grant in options.credential_tokens {
+        spec.credentials
+            .grants
+            .push(parse_simple_credential_grant(&grant, "token"));
     }
     apply_workspace_mode(
         &mut spec,
@@ -2449,6 +2509,39 @@ fn parse_credential_file_grant(
             requires_approval: true,
         },
     )
+}
+
+fn parse_simple_credential_grant(
+    raw: &str,
+    kind: &str,
+) -> agentbox_daemon::runtime::types::CredentialGrant {
+    use agentbox_daemon::runtime::types::{CredentialGrant, CredentialGrantKind};
+
+    let Some((name, target)) = raw.split_once('=') else {
+        eprintln!("error: invalid --credential-{kind} value `{}`", raw);
+        eprintln!("hint: expected name=target");
+        std::process::exit(1);
+    };
+    if name.trim().is_empty() || target.trim().is_empty() {
+        eprintln!("error: invalid --credential-{kind} value `{}`", raw);
+        eprintln!("hint: name and target must be non-empty");
+        std::process::exit(1);
+    }
+
+    let grant_kind = match kind {
+        "env" => CredentialGrantKind::EnvVar,
+        "socket" => CredentialGrantKind::Socket,
+        "token" => CredentialGrantKind::ProviderToken,
+        _ => unreachable!("unsupported credential grant kind"),
+    };
+
+    CredentialGrant {
+        name: name.to_string(),
+        kind: grant_kind,
+        target: target.to_string(),
+        one_time: true,
+        requires_approval: true,
+    }
 }
 
 fn cmd_providers() {
@@ -2796,6 +2889,9 @@ async fn main() {
             memory,
             read_only_mounts,
             credential_files,
+            credential_env,
+            credential_sockets,
+            credential_tokens,
             policy_bundles,
             allow_domains,
             network_mode,
@@ -2816,6 +2912,9 @@ async fn main() {
                 memory,
                 read_only_mounts,
                 credential_files,
+                credential_env,
+                credential_sockets,
+                credential_tokens,
                 policy_bundles,
                 allow_domains,
                 network_mode,
@@ -2846,6 +2945,9 @@ async fn main() {
             network_mode,
             read_only_mounts,
             credential_files,
+            credential_env,
+            credential_sockets,
+            credential_tokens,
             policy_bundles,
             workspace_mode,
             workspace_overlay_dir,
@@ -2860,6 +2962,9 @@ async fn main() {
             allow_domains,
             read_only_mounts,
             credential_files,
+            credential_env,
+            credential_sockets,
+            credential_tokens,
             policy_bundles,
             network_mode,
             deny_domains,
