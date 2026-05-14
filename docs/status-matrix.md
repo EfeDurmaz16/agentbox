@@ -81,5 +81,8 @@ See [safe file sharing](safe-file-sharing.md) for current workspace, read-only
 mount, credential, and system bridge guidance.
 See [Linux eBPF observability](linux-ebpf-observability.md) for kernel event
 evidence design that is not yet enforcement.
+See [network enforcement limits](network-enforcement-limits.md) for the
+platform-specific line between classification, observation, provider network
+mode, and packet/domain enforcement.
 See [threat model](threat-model.md), [platform isolation strategy](platform-isolation.md),
 and [public limitations](limitations.md) for the current public boundary.

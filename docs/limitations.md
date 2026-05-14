@@ -81,3 +81,7 @@ host dependency is absent, for example:
 
 If the dependency is present and behavior is wrong, the test must fail. Do not
 replace live proof with mocked success for provider support claims.
+
+See [network enforcement limits](network-enforcement-limits.md) for the current
+platform-by-platform boundary between classified, observed, provider-mode, and
+packet/domain-enforced network behavior.
