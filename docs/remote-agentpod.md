@@ -101,6 +101,20 @@ sign the bundle, or claim a live worker connection.
 When `--bundle-dir` is used, the printed request includes `derived_from_bundle`,
 `bundle_id`, and `bundle_root_sha256` so a future worker can distinguish manual
 hash entry from metadata derived from a verified local bundle.
+To upload both the evidence receipt and the verified bundle envelope to an HTTPS
+worker:
+
+```sh
+agentbox remote-evidence-upload \
+  --endpoint https://worker.example.com/agentpod \
+  --session agentbox-session-id \
+  --worker-session worker-session-id \
+  --bundle-dir ./agentbox-evidence
+```
+
+The command verifies the local bundle directory, builds an
+`AgentboxEvidenceBundleUpload` envelope, posts the receipt metadata, uploads the
+bundle payload, and prints both validated worker acknowledgements.
 After a worker accepts evidence, the CLI can query its evidence status route:
 
 ```sh

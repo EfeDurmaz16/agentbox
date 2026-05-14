@@ -415,6 +415,24 @@ enum Commands {
         #[arg(long = "worker-session")]
         worker_session_id: String,
     },
+    /// Upload a verified evidence bundle directory to a remote AgentPod worker
+    RemoteEvidenceUpload {
+        /// Remote worker endpoint, e.g. https://worker.example.com/agentpod
+        #[arg(long)]
+        endpoint: String,
+
+        /// Agentbox session id
+        #[arg(long = "session")]
+        session_id: String,
+
+        /// Worker-side session id
+        #[arg(long = "worker-session")]
+        worker_session_id: String,
+
+        /// Verified evidence bundle directory produced by `agentbox evidence --bundle`
+        #[arg(long = "bundle-dir")]
+        bundle_dir: PathBuf,
+    },
     /// Generate a native provider execution plan without running it
     NativePlan {
         /// Native provider: agentpod-linux
@@ -3067,6 +3085,15 @@ struct RemoteEvidenceBundleMetadata {
     event_count: u64,
 }
 
+#[derive(Debug)]
+struct RemoteEvidenceBundleUploadPayload {
+    bundle_id: String,
+    root_sha256: String,
+    event_count: u64,
+    envelope_json: String,
+    envelope_sha256: String,
+}
+
 fn load_remote_evidence_metadata_from_bundle(
     bundle_dir: &Path,
 ) -> Result<RemoteEvidenceBundleMetadata, String> {
@@ -3100,6 +3127,48 @@ fn load_remote_evidence_metadata_from_bundle(
         bundle_id: index.bundle_id,
         root_sha256: index.root_sha256,
         event_count,
+    })
+}
+
+fn build_remote_evidence_bundle_upload_payload(
+    bundle_dir: &Path,
+    session_id: &str,
+    worker_session_id: &str,
+) -> Result<RemoteEvidenceBundleUploadPayload, String> {
+    let metadata = load_remote_evidence_metadata_from_bundle(bundle_dir)?;
+    let index = read_evidence_bundle_index(bundle_dir)?;
+    if index.session_id != session_id {
+        return Err(format!(
+            "bundle session id {} does not match requested session {}",
+            index.session_id, session_id
+        ));
+    }
+    let mut files = serde_json::Map::new();
+    for file in &index.files {
+        let path = safe_bundle_relative_path(&file.path)?;
+        let bytes = fs::read(bundle_dir.join(path))
+            .map_err(|e| format!("failed to read bundle file {}: {e}", file.path))?;
+        let contents = String::from_utf8(bytes)
+            .map_err(|_| format!("bundle file {} is not valid UTF-8 JSON text", file.path))?;
+        files.insert(file.path.clone(), serde_json::Value::String(contents));
+    }
+    let envelope = serde_json::json!({
+        "schema_version": 1,
+        "kind": "AgentboxEvidenceBundleUpload",
+        "session_id": session_id,
+        "worker_session_id": worker_session_id,
+        "index": index,
+        "files": files,
+    });
+    let envelope_json = serde_json::to_string(&envelope)
+        .map_err(|e| format!("failed to serialize evidence upload envelope: {e}"))?;
+    let envelope_sha256 = sha256_hex(envelope_json.as_bytes());
+    Ok(RemoteEvidenceBundleUploadPayload {
+        bundle_id: metadata.bundle_id,
+        root_sha256: metadata.root_sha256,
+        event_count: metadata.event_count,
+        envelope_json,
+        envelope_sha256,
     })
 }
 
@@ -3862,6 +3931,101 @@ async fn cmd_remote_evidence_status(
     );
 }
 
+async fn cmd_remote_evidence_upload(
+    endpoint: String,
+    session_id: String,
+    worker_session_id: String,
+    bundle_dir: PathBuf,
+) {
+    use agentbox_daemon::runtime::providers::remote::{
+        HttpRemoteAgentPodTransport, RemoteAgentPodEvidenceBundleUploadRequest,
+        RemoteAgentPodEvidenceMode, RemoteAgentPodEvidenceUploadRequest, RemoteAgentPodTransport,
+    };
+
+    let payload =
+        build_remote_evidence_bundle_upload_payload(&bundle_dir, &session_id, &worker_session_id)
+            .unwrap_or_else(|e| {
+                eprintln!(
+                    "error: failed to build remote AgentPod evidence upload envelope from {}: {}",
+                    bundle_dir.display(),
+                    e
+                );
+                std::process::exit(1);
+            });
+    let transport = HttpRemoteAgentPodTransport::new(endpoint).unwrap_or_else(|e| {
+        eprintln!(
+            "error: failed to build remote AgentPod evidence upload transport: {}",
+            e
+        );
+        std::process::exit(1);
+    });
+    let evidence_request = RemoteAgentPodEvidenceUploadRequest {
+        session_id: session_id.clone(),
+        worker_session_id: worker_session_id.clone(),
+        evidence_mode: RemoteAgentPodEvidenceMode::BundleUpload,
+        bundle_sha256: payload.root_sha256.clone(),
+        derived_from_bundle: true,
+        bundle_id: Some(payload.bundle_id.clone()),
+        bundle_root_sha256: Some(payload.root_sha256.clone()),
+        event_count: payload.event_count,
+        sealed_at: Utc::now(),
+        secret_material_included: false,
+    };
+    evidence_request.validate().unwrap_or_else(|e| {
+        eprintln!(
+            "error: failed to build remote AgentPod evidence receipt request: {}",
+            e
+        );
+        std::process::exit(1);
+    });
+    let evidence_response = transport
+        .upload_evidence(evidence_request)
+        .await
+        .unwrap_or_else(|e| {
+            eprintln!(
+                "error: failed to upload remote AgentPod evidence receipt: {}",
+                e
+            );
+            std::process::exit(1);
+        });
+    let bundle_request = RemoteAgentPodEvidenceBundleUploadRequest {
+        session_id,
+        worker_session_id,
+        bundle_sha256: payload.envelope_sha256.clone(),
+        bundle_json: payload.envelope_json,
+        secret_material_included: false,
+    };
+    bundle_request.validate().unwrap_or_else(|e| {
+        eprintln!(
+            "error: failed to build remote AgentPod evidence bundle payload request: {}",
+            e
+        );
+        std::process::exit(1);
+    });
+    let bundle_response = transport
+        .upload_evidence_bundle(bundle_request)
+        .await
+        .unwrap_or_else(|e| {
+            eprintln!(
+                "error: failed to upload remote AgentPod evidence bundle payload: {}",
+                e
+            );
+            std::process::exit(1);
+        });
+
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&serde_json::json!({
+            "evidence_receipt": evidence_response,
+            "bundle_payload": bundle_response,
+            "bundle_id": payload.bundle_id,
+            "bundle_root_sha256": payload.root_sha256,
+            "bundle_payload_sha256": payload.envelope_sha256,
+        }))
+        .expect("failed to serialize remote AgentPod evidence upload result")
+    );
+}
+
 fn cmd_native_plan(
     provider: String,
     workspace: Option<PathBuf>,
@@ -4572,6 +4736,12 @@ async fn main() {
             session_id,
             worker_session_id,
         } => cmd_remote_evidence_status(endpoint, session_id, worker_session_id).await,
+        Commands::RemoteEvidenceUpload {
+            endpoint,
+            session_id,
+            worker_session_id,
+            bundle_dir,
+        } => cmd_remote_evidence_upload(endpoint, session_id, worker_session_id, bundle_dir).await,
         Commands::NativePlan {
             provider,
             workspace,
@@ -4715,6 +4885,112 @@ mod tests {
         assert_eq!(metadata.root_sha256, index.root_sha256);
         assert_eq!(metadata.event_count, 1);
 
+        let _ = fs::remove_dir_all(output_dir);
+    }
+
+    #[test]
+    fn remote_evidence_upload_payload_wraps_verified_bundle_dir() {
+        let output_dir = std::env::temp_dir().join(format!(
+            "agentbox-remote-evidence-upload-test-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&output_dir);
+        fs::create_dir_all(&output_dir).unwrap();
+
+        let bundle_json = serde_json::json!({
+            "schema_version": 1,
+            "commands": [{"audit_event_id": "evt_1"}],
+            "approvals": [],
+            "lifecycle_events": [],
+            "boundary_events": [],
+            "credential_events": []
+        });
+        let files =
+            vec![
+                write_bundle_json_file(&output_dir, "bundle.json", "test bundle", &bundle_json)
+                    .unwrap(),
+            ];
+        let index = EvidenceBundleIndex {
+            schema_version: 1,
+            bundle_id: "bundle-test".into(),
+            session_id: "session-test".into(),
+            provider: "direct-host".into(),
+            status: "Stopped".into(),
+            root_sha256: evidence_bundle_root_sha256(&files),
+            generated_at: Utc::now(),
+            files,
+        };
+        fs::write(
+            output_dir.join("index.json"),
+            serde_json::to_vec_pretty(&index).unwrap(),
+        )
+        .unwrap();
+
+        let payload = build_remote_evidence_bundle_upload_payload(
+            &output_dir,
+            "session-test",
+            "worker-session-test",
+        )
+        .unwrap();
+        let envelope: serde_json::Value = serde_json::from_str(&payload.envelope_json).unwrap();
+
+        assert_eq!(payload.bundle_id, "bundle-test");
+        assert_eq!(payload.root_sha256, index.root_sha256);
+        assert_eq!(payload.event_count, 1);
+        assert_eq!(
+            payload.envelope_sha256,
+            sha256_hex(payload.envelope_json.as_bytes())
+        );
+        assert_eq!(envelope["kind"], "AgentboxEvidenceBundleUpload");
+        assert_eq!(envelope["session_id"], "session-test");
+        assert_eq!(envelope["worker_session_id"], "worker-session-test");
+        assert!(envelope["files"]["bundle.json"].is_string());
+
+        let _ = fs::remove_dir_all(output_dir);
+    }
+
+    #[test]
+    fn remote_evidence_upload_payload_rejects_session_mismatch() {
+        let output_dir = std::env::temp_dir().join(format!(
+            "agentbox-remote-evidence-upload-mismatch-test-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&output_dir);
+        fs::create_dir_all(&output_dir).unwrap();
+
+        let bundle_json = serde_json::json!({
+            "schema_version": 1,
+            "commands": [{"audit_event_id": "evt_1"}],
+        });
+        let files =
+            vec![
+                write_bundle_json_file(&output_dir, "bundle.json", "test bundle", &bundle_json)
+                    .unwrap(),
+            ];
+        let index = EvidenceBundleIndex {
+            schema_version: 1,
+            bundle_id: "bundle-test".into(),
+            session_id: "session-test".into(),
+            provider: "direct-host".into(),
+            status: "Stopped".into(),
+            root_sha256: evidence_bundle_root_sha256(&files),
+            generated_at: Utc::now(),
+            files,
+        };
+        fs::write(
+            output_dir.join("index.json"),
+            serde_json::to_vec_pretty(&index).unwrap(),
+        )
+        .unwrap();
+
+        let err = build_remote_evidence_bundle_upload_payload(
+            &output_dir,
+            "other-session",
+            "worker-session-test",
+        )
+        .unwrap_err();
+
+        assert!(err.contains("does not match requested session"));
         let _ = fs::remove_dir_all(output_dir);
     }
 }

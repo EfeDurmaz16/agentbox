@@ -74,6 +74,9 @@ log "checking remote evidence status command surface"
 "${CLI[@]}" remote-evidence-status --help >"$TMPDIR/remote-evidence-status-help.txt"
 grep -F "Query a remote AgentPod worker for accepted evidence state" \
   "$TMPDIR/remote-evidence-status-help.txt" >/dev/null
+"${CLI[@]}" remote-evidence-upload --help >"$TMPDIR/remote-evidence-upload-help.txt"
+grep -F "Upload a verified evidence bundle directory to a remote AgentPod worker" \
+  "$TMPDIR/remote-evidence-upload-help.txt" >/dev/null
 
 log "checking evidence bundle verification"
 BUNDLE_DIR="$TMPDIR/evidence-bundle"
