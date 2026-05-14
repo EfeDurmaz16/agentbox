@@ -271,6 +271,49 @@ impl WorkspaceProjectionApplier {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceProjectionCommit {
+    pub apply: WorkspaceProjectionApply,
+    pub commit_hash: String,
+    pub message: String,
+}
+
+pub struct WorkspaceProjectionCommitter;
+
+impl WorkspaceProjectionCommitter {
+    pub fn commit(
+        session: &RuntimeSession,
+        message: &str,
+    ) -> Result<Option<WorkspaceProjectionCommit>, WorkspaceOverlayError> {
+        let message = message.trim();
+        if message.is_empty() {
+            return Err(WorkspaceOverlayError::Io(
+                "workspace projection commit message cannot be empty".into(),
+            ));
+        }
+
+        let Some(apply) = WorkspaceProjectionApplier::apply(session)? else {
+            return Ok(None);
+        };
+        git_commit_all(&apply.lower_host_path, message)?;
+        let commit_hash = git_output(&apply.lower_host_path, &["rev-parse", "HEAD"])
+            .ok_or_else(|| {
+                WorkspaceOverlayError::Io(format!(
+                    "failed to resolve commit hash in {}",
+                    apply.lower_host_path.display()
+                ))
+            })?
+            .trim()
+            .to_string();
+
+        Ok(Some(WorkspaceProjectionCommit {
+            apply,
+            commit_hash,
+            message: message.to_string(),
+        }))
+    }
+}
+
 fn canonicalize_existing(path: &Path) -> Result<PathBuf, WorkspaceOverlayError> {
     path.canonicalize().map_err(|err| {
         WorkspaceOverlayError::Io(format!(
@@ -383,6 +426,48 @@ fn apply_patch_to_workspace(workspace: &Path, patch: &str) -> Result<(), Workspa
             "git apply failed in {}: {}",
             workspace.display(),
             String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+
+    Ok(())
+}
+
+fn git_commit_all(workspace: &Path, message: &str) -> Result<(), WorkspaceOverlayError> {
+    let add = Command::new("git")
+        .arg("-C")
+        .arg(workspace)
+        .args(["add", "-A"])
+        .output()
+        .map_err(|err| {
+            WorkspaceOverlayError::Io(format!(
+                "failed to start git add in {}: {err}",
+                workspace.display()
+            ))
+        })?;
+    if !add.status.success() {
+        return Err(WorkspaceOverlayError::Io(format!(
+            "git add failed in {}: {}",
+            workspace.display(),
+            String::from_utf8_lossy(&add.stderr).trim()
+        )));
+    }
+
+    let commit = Command::new("git")
+        .arg("-C")
+        .arg(workspace)
+        .args(["commit", "-m", message])
+        .output()
+        .map_err(|err| {
+            WorkspaceOverlayError::Io(format!(
+                "failed to start git commit in {}: {err}",
+                workspace.display()
+            ))
+        })?;
+    if !commit.status.success() {
+        return Err(WorkspaceOverlayError::Io(format!(
+            "git commit failed in {}: {}",
+            workspace.display(),
+            String::from_utf8_lossy(&commit.stderr).trim()
         )));
     }
 
@@ -935,6 +1020,62 @@ mod tests {
             "lower\napplied\n"
         );
         assert!(applied.projected_host_path.exists());
+        let _ = fs::remove_dir_all(&workspace);
+        let _ = fs::remove_dir_all(&overlay);
+    }
+
+    #[test]
+    fn projection_committer_applies_patch_and_creates_commit() {
+        let workspace = unique_dir("commit-workspace");
+        let overlay = unique_dir("commit-overlay");
+        let _ = fs::remove_dir_all(&workspace);
+        let _ = fs::remove_dir_all(&overlay);
+        fs::create_dir_all(&workspace).unwrap();
+        run_git(&workspace, &["init"]);
+        run_git(
+            &workspace,
+            &["config", "user.email", "agentbox@example.test"],
+        );
+        run_git(&workspace, &["config", "user.name", "Agentbox Test"]);
+        fs::write(workspace.join("README.md"), "lower\n").unwrap();
+        run_git(&workspace, &["add", "README.md"]);
+        run_git(&workspace, &["commit", "-m", "initial"]);
+        let initial = git_output(&workspace, &["rev-parse", "HEAD"]).unwrap();
+        let mut spec = MinipodSpec::for_agent_task("hermes", &workspace);
+        spec.workspace_mode = AgentPodWorkspaceMode::CommitGated;
+        spec.filesystem.workspace_overlay =
+            WorkspaceOverlayPolicy::review_required(Some(overlay.clone()));
+        let projection = WorkspaceProjectionMaterializer::materialize(&mut spec)
+            .unwrap()
+            .expect("workspace should be projected");
+        fs::write(
+            projection.projected_host_path.join("README.md"),
+            "lower\ncommitted\n",
+        )
+        .unwrap();
+        let session = RuntimeSession {
+            id: "01agentboxsession".into(),
+            name: spec.name.clone(),
+            provider: "podman".into(),
+            platform: "linux-vm".into(),
+            status: RuntimeStatus::Stopped,
+            spec,
+            approval_grants: vec![],
+            transcripts: vec![],
+            started_at: Utc::now(),
+            stopped_at: Some(Utc::now()),
+        };
+
+        let commit = WorkspaceProjectionCommitter::commit(&session, "agentbox review output")
+            .unwrap()
+            .expect("commit should be created");
+
+        assert_ne!(commit.commit_hash, initial.trim());
+        assert_eq!(commit.message, "agentbox review output");
+        assert_eq!(
+            fs::read_to_string(workspace.join("README.md")).unwrap(),
+            "lower\ncommitted\n"
+        );
         let _ = fs::remove_dir_all(&workspace);
         let _ = fs::remove_dir_all(&overlay);
     }

@@ -320,6 +320,15 @@ enum Commands {
         /// Session id whose projected review workspace should be applied
         session_id: String,
     },
+    /// Apply projected workspace output and commit it in the lower workspace
+    ReviewCommit {
+        /// Session id whose projected review workspace should be committed
+        session_id: String,
+
+        /// Commit message for the lower workspace
+        #[arg(short = 'm', long = "message")]
+        message: String,
+    },
     /// Show logs for a minipod session backed by the compatibility backend
     MinipodLogs {
         /// Minipod session id; legacy sb-* backend ids are still accepted
@@ -3074,6 +3083,31 @@ fn cmd_review_apply(session_id: String) {
     println!("note:      projected workspace was kept; run review-discard to remove it");
 }
 
+fn cmd_review_commit(session_id: String, message: String) {
+    let (manager, _session) = runtime_manager_for_session(&session_id, "commit");
+    let commit = manager
+        .commit_workspace_projection(&session_id, &message)
+        .unwrap_or_else(|e| {
+            eprintln!("error: failed to commit workspace projection: {}", e);
+            std::process::exit(1);
+        });
+
+    let Some(commit) = commit else {
+        println!(
+            "No projected workspace patch recorded for session {}.",
+            session_id
+        );
+        return;
+    };
+
+    println!("Committed projected workspace output.");
+    println!("session:   {}", session_id);
+    println!("lower:     {}", commit.apply.lower_host_path.display());
+    println!("commit:    {}", commit.commit_hash);
+    println!("message:   {}", commit.message);
+    println!("note:      projected workspace was kept; run review-discard to remove it");
+}
+
 fn runtime_manager_for_session(
     session_id: &str,
     action: &str,
@@ -3331,6 +3365,10 @@ async fn main() {
         } => cmd_review(session_id, json, patch),
         Commands::ReviewDiscard { session_id } => cmd_review_discard(session_id),
         Commands::ReviewApply { session_id } => cmd_review_apply(session_id),
+        Commands::ReviewCommit {
+            session_id,
+            message,
+        } => cmd_review_commit(session_id, message),
         Commands::MinipodLogs {
             session_id,
             follow,
