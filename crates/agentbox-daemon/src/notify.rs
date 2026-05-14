@@ -261,16 +261,18 @@ mod tests {
                         if is_get {
                             let payload = p.lock().await.clone();
                             let resp = format!(
-                                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{}",
+                                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                                 payload.len(),
                                 payload,
                             );
                             let _ = stream.write_all(resp.as_bytes()).await;
                         } else {
                             b.lock().await.push(body);
-                            let resp = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok";
+                            let resp =
+                                "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok";
                             let _ = stream.write_all(resp.as_bytes()).await;
                         }
+                        let _ = stream.shutdown().await;
                     });
                 }
             });
