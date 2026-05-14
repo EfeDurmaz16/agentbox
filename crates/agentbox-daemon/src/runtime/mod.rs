@@ -1,5 +1,6 @@
 pub mod agit;
 pub mod approval;
+pub mod bridge;
 pub mod fides;
 pub mod manager;
 pub mod policy;
