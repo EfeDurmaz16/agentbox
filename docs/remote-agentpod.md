@@ -262,8 +262,12 @@ still rejects file, socket, provider-token, and host environment inheritance
 until those handoff protocols are explicit.
 Before spawning a process, exec classifies the argv with the session AgentPod
 network policy. Commands outside the allowed policy return exit code `126`
-without being spawned; approval-required commands are denied until a remote
-approval bridge is implemented.
+without being spawned. Approval-required commands can run only when the
+session manifest already carries a matching, non-expired approval grant for the
+command, path, domain, or session. `Once` approval grants are deliberately not
+honored by the worker yet because the worker cannot safely synchronize one-time
+grant consumption back to the daemon. Dynamic worker-side approval prompts are
+still future work.
 Evidence upload validates the evidence metadata and records an in-memory receipt
 on the matching worker session before acknowledging the bundle hash and event
 count. With `--state-dir`, those receipts are also persisted in the worker state
@@ -288,8 +292,9 @@ When the daemon-side provider creates a remote session, it persists the worker
 endpoint, worker session id, worker identity, and worker evidence endpoint in
 session labels so later exec/destroy calls can route back to the same worker.
 Workspace materialization, workspace export, local apply, worker-side command
-policy, and session-bound env credential handoff now exist as governed flows.
-File/socket/provider-token credential handoff, full evidence streaming,
+policy, manifest-bound worker approval grants, and session-bound env credential
+handoff now exist as governed flows. Dynamic approval prompts,
+file/socket/provider-token credential handoff, full evidence streaming,
 supervised worker restarts, and merge/conflict UX beyond overwrite protection
 remain future work.
 

@@ -14,8 +14,8 @@ use agentbox_daemon::runtime::providers::remote::{
     RemoteAgentPodWorkspaceFile,
 };
 use agentbox_daemon::runtime::types::{
-    CommandResult, CredentialGrant, CredentialGrantKind, NetworkMode, RuntimeCapability,
-    RuntimeStatus,
+    ApprovalGrant, ApprovalScope, CommandResult, CredentialGrant, CredentialGrantKind,
+    FileAccessMode, NetworkMode, RuntimeCapability, RuntimeStatus,
 };
 use agentbox_policy::classify::{self, Bucket, CommandContext, PolicyConfig, PolicyNetworkMode};
 use axum::extract::{Path as AxumPath, Query, State};
@@ -73,6 +73,7 @@ struct WorkerSession {
     workspace_host_path: PathBuf,
     policy: WorkerPolicy,
     env_credentials: Vec<WorkerEnvCredentialGrant>,
+    approval_grants: Vec<ApprovalGrant>,
     status: RuntimeStatus,
     kill_tx: watch::Sender<bool>,
     evidence_receipts: Vec<WorkerEvidenceReceipt>,
@@ -131,6 +132,8 @@ struct WorkerSessionSnapshot {
     policy: WorkerPolicy,
     #[serde(default)]
     env_credentials: Vec<WorkerEnvCredentialGrant>,
+    #[serde(default)]
+    approval_grants: Vec<ApprovalGrant>,
     status: RuntimeStatus,
     evidence_receipts: Vec<WorkerEvidenceReceiptSnapshot>,
     #[serde(default)]
@@ -296,7 +299,13 @@ impl WorkerPolicyNetworkMode {
 impl WorkerSession {
     #[cfg(test)]
     fn new(session_id: String, workspace_host_path: PathBuf, policy: WorkerPolicy) -> Self {
-        Self::new_with_env_credentials(session_id, workspace_host_path, policy, Vec::new())
+        Self::new_with_env_credentials(
+            session_id,
+            workspace_host_path,
+            policy,
+            Vec::new(),
+            Vec::new(),
+        )
     }
 
     fn new_with_env_credentials(
@@ -304,6 +313,7 @@ impl WorkerSession {
         workspace_host_path: PathBuf,
         policy: WorkerPolicy,
         env_credentials: Vec<WorkerEnvCredentialGrant>,
+        approval_grants: Vec<ApprovalGrant>,
     ) -> Self {
         let (kill_tx, _kill_rx) = watch::channel(false);
         Self {
@@ -311,6 +321,7 @@ impl WorkerSession {
             workspace_host_path,
             policy,
             env_credentials,
+            approval_grants,
             status: RuntimeStatus::Running,
             kill_tx,
             evidence_receipts: Vec::new(),
@@ -334,6 +345,7 @@ impl WorkerSession {
             workspace_host_path: snapshot.workspace_host_path,
             policy: snapshot.policy,
             env_credentials: snapshot.env_credentials,
+            approval_grants: snapshot.approval_grants,
             status: snapshot.status,
             kill_tx,
             evidence_receipts: snapshot
@@ -367,6 +379,7 @@ impl WorkerSession {
             workspace_host_path: self.workspace_host_path.clone(),
             policy: self.policy.clone(),
             env_credentials: self.env_credentials.clone(),
+            approval_grants: self.approval_grants.clone(),
             status: self.status.clone(),
             evidence_receipts: self
                 .evidence_receipts
@@ -481,6 +494,7 @@ async fn create_session(
         workspace_host_path,
         WorkerPolicy::from_spec(&request.spec),
         worker_env_credentials(&request.spec.credentials.grants),
+        worker_approval_grants(&request.spec.id, &request.spec.approvals),
     );
     state
         .sessions
@@ -529,6 +543,14 @@ fn worker_env_credentials(grants: &[CredentialGrant]) -> Vec<WorkerEnvCredential
             name: grant.name.clone(),
             one_time: grant.one_time,
         })
+        .collect()
+}
+
+fn worker_approval_grants(session_id: &str, grants: &[ApprovalGrant]) -> Vec<ApprovalGrant> {
+    grants
+        .iter()
+        .cloned()
+        .map(|grant| grant.bound_to_session(session_id))
         .collect()
 }
 
@@ -672,9 +694,11 @@ fn validate_exec_material(
 
 struct WorkerExecContext {
     kill_rx: watch::Receiver<bool>,
+    session_id: String,
     workspace_host_path: PathBuf,
     policy: WorkerPolicy,
     env_credentials: Vec<WorkerEnvCredentialGrant>,
+    approval_grants: Vec<ApprovalGrant>,
 }
 
 async fn session_exec_context(
@@ -708,9 +732,11 @@ async fn session_exec_context(
     }
     Ok(WorkerExecContext {
         kill_rx: session.kill_receiver(),
+        session_id: session.session_id.clone(),
         workspace_host_path: session.workspace_host_path.clone(),
         policy: session.policy.clone(),
         env_credentials: session.env_credentials.clone(),
+        approval_grants: session.approval_grants.clone(),
     })
 }
 
@@ -834,7 +860,13 @@ fn enforce_worker_policy(
             .policy
             .to_policy_config(&context.workspace_host_path),
     );
-    if matches!(classification.bucket, Bucket::Allow) {
+    if matches!(classification.bucket, Bucket::Allow)
+        || (matches!(classification.bucket, Bucket::Approve)
+            && context
+                .approval_grants
+                .iter()
+                .any(|grant| worker_approval_grant_matches(grant, request, context, working_dir)))
+    {
         return None;
     }
 
@@ -847,6 +879,105 @@ fn enforce_worker_policy(
         ),
         duration_ms: elapsed_ms(started),
     })
+}
+
+fn worker_approval_grant_matches(
+    grant: &ApprovalGrant,
+    request: &RemoteAgentPodExecRequest,
+    context: &WorkerExecContext,
+    working_dir: &Path,
+) -> bool {
+    if grant.is_expired_at(Utc::now()) {
+        return false;
+    }
+    let binary = request.command.argv.first().cloned().unwrap_or_default();
+    let args = request
+        .command
+        .argv
+        .iter()
+        .skip(1)
+        .cloned()
+        .collect::<Vec<_>>();
+    match &grant.scope {
+        ApprovalScope::Once => false,
+        ApprovalScope::Command {
+            binary: grant_binary,
+            args_prefix,
+        } => binary == *grant_binary && args.starts_with(args_prefix),
+        ApprovalScope::Domain { domain } => args
+            .iter()
+            .filter_map(|arg| worker_extract_domain(arg))
+            .any(|candidate| worker_domain_matches(domain, &candidate)),
+        ApprovalScope::Session { session_id } => session_id == &context.session_id,
+        ApprovalScope::Path { path, access } => worker_command_paths(&args, working_dir)
+            .iter()
+            .any(|candidate| {
+                worker_path_matches(path, candidate)
+                    && worker_access_allows(access, &worker_path_access(&binary))
+            }),
+    }
+}
+
+fn worker_command_paths(args: &[String], working_dir: &Path) -> Vec<PathBuf> {
+    args.iter()
+        .filter(|arg| !arg.starts_with('-') && !arg.contains("://"))
+        .map(|arg| {
+            let path = PathBuf::from(arg);
+            if path.is_absolute() {
+                normalize_path(path)
+            } else {
+                normalize_path(working_dir.join(path))
+            }
+        })
+        .collect()
+}
+
+fn worker_path_matches(grant_path: &Path, candidate: &Path) -> bool {
+    normalize_path(candidate.to_path_buf()).starts_with(normalize_path(grant_path.to_path_buf()))
+}
+
+fn worker_path_access(binary: &str) -> FileAccessMode {
+    match binary {
+        "cat" | "less" | "more" | "head" | "tail" | "grep" | "rg" => FileAccessMode::Read,
+        "rm" | "touch" | "mkdir" | "rmdir" | "mv" | "cp" | "chmod" | "chown" | "nano" | "vim"
+        | "vi" | "code" => FileAccessMode::Write,
+        _ => FileAccessMode::ReadWrite,
+    }
+}
+
+fn worker_access_allows(grant: &FileAccessMode, requested: &FileAccessMode) -> bool {
+    matches!(grant, FileAccessMode::ReadWrite) || grant == requested
+}
+
+fn worker_extract_domain(url: &str) -> Option<String> {
+    let url = url.trim();
+    let (scheme, rest) = url.split_once("://")?;
+    if !matches!(scheme.to_ascii_lowercase().as_str(), "http" | "https") {
+        return None;
+    }
+    let authority = rest
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or(rest)
+        .rsplit('@')
+        .next()
+        .unwrap_or("");
+    let host = if let Some(bracketed) = authority.strip_prefix('[') {
+        bracketed.split_once(']')?.0
+    } else {
+        authority.split(':').next().unwrap_or("")
+    };
+    let host = host.trim().trim_end_matches('.').to_ascii_lowercase();
+    (!host.is_empty()).then_some(host)
+}
+
+fn worker_domain_matches(grant_domain: &str, candidate: &str) -> bool {
+    let grant_domain = grant_domain
+        .trim()
+        .trim_end_matches('.')
+        .to_ascii_lowercase();
+    let candidate = candidate.trim().trim_end_matches('.').to_ascii_lowercase();
+    candidate == grant_domain || candidate.ends_with(&format!(".{grant_domain}"))
 }
 
 async fn wait_for_kill(kill_rx: &mut watch::Receiver<bool>) -> bool {
@@ -1966,6 +2097,7 @@ mod tests {
                     name: "AGENTBOX_TEST_TOKEN".into(),
                     one_time: true,
                 }],
+                Vec::new(),
             ),
         );
         let request = RemoteAgentPodExecRequest {
@@ -2024,6 +2156,173 @@ mod tests {
         assert_eq!(response.result.exit_code, 126);
         assert!(response.result.stderr.contains("policy denied"));
         assert!(response.result.stderr.contains("unknown.example.com"));
+    }
+
+    #[test]
+    fn worker_approval_grant_matches_command_scope() {
+        let context = WorkerExecContext {
+            kill_rx: watch::channel(false).1,
+            session_id: "session-1".into(),
+            workspace_host_path: std::env::temp_dir(),
+            policy: WorkerPolicy::default(),
+            env_credentials: Vec::new(),
+            approval_grants: Vec::new(),
+        };
+        let request = RemoteAgentPodExecRequest {
+            session_id: "session-1".into(),
+            worker_session_id: "worker-session-1".into(),
+            command: ExecCommand {
+                argv: vec!["git".into(), "push".into(), "origin".into(), "main".into()],
+                working_dir: None,
+                env: HashMap::new(),
+                timeout_seconds: Some(5),
+            },
+        };
+        let grant = ApprovalGrant {
+            id: "grant-git-push".into(),
+            scope: ApprovalScope::Command {
+                binary: "git".into(),
+                args_prefix: vec!["push".into()],
+            },
+            reason: "operator approved git push".into(),
+            expires_at: None,
+        };
+
+        assert!(worker_approval_grant_matches(
+            &grant,
+            &request,
+            &context,
+            &std::env::temp_dir()
+        ));
+    }
+
+    #[test]
+    fn worker_approval_grant_matches_domain_session_and_path_scopes() {
+        let workspace = std::env::temp_dir().join("agentbox-remote-worker-approval-scope-test");
+        let context = WorkerExecContext {
+            kill_rx: watch::channel(false).1,
+            session_id: "session-1".into(),
+            workspace_host_path: workspace.clone(),
+            policy: WorkerPolicy::default(),
+            env_credentials: Vec::new(),
+            approval_grants: Vec::new(),
+        };
+        let curl_request = RemoteAgentPodExecRequest {
+            session_id: "session-1".into(),
+            worker_session_id: "worker-session-1".into(),
+            command: ExecCommand {
+                argv: vec!["curl".into(), "https://api.example.com/v1".into()],
+                working_dir: None,
+                env: HashMap::new(),
+                timeout_seconds: Some(5),
+            },
+        };
+        let domain_grant = ApprovalGrant {
+            id: "grant-domain".into(),
+            scope: ApprovalScope::Domain {
+                domain: "example.com".into(),
+            },
+            reason: "operator approved example.com".into(),
+            expires_at: None,
+        };
+        assert!(worker_approval_grant_matches(
+            &domain_grant,
+            &curl_request,
+            &context,
+            &workspace
+        ));
+
+        let session_grant = ApprovalGrant {
+            id: "grant-session".into(),
+            scope: ApprovalScope::Session {
+                session_id: "session-1".into(),
+            },
+            reason: "operator approved session".into(),
+            expires_at: None,
+        };
+        assert!(worker_approval_grant_matches(
+            &session_grant,
+            &curl_request,
+            &context,
+            &workspace
+        ));
+
+        let cat_request = RemoteAgentPodExecRequest {
+            session_id: "session-1".into(),
+            worker_session_id: "worker-session-1".into(),
+            command: ExecCommand {
+                argv: vec!["cat".into(), "allowed/notes.txt".into()],
+                working_dir: None,
+                env: HashMap::new(),
+                timeout_seconds: Some(5),
+            },
+        };
+        let path_grant = ApprovalGrant {
+            id: "grant-path".into(),
+            scope: ApprovalScope::Path {
+                path: workspace.join("allowed"),
+                access: FileAccessMode::Read,
+            },
+            reason: "operator approved reading allowed paths".into(),
+            expires_at: None,
+        };
+        assert!(worker_approval_grant_matches(
+            &path_grant,
+            &cat_request,
+            &context,
+            &workspace
+        ));
+    }
+
+    #[test]
+    fn worker_approval_grant_rejects_once_and_expired_grants() {
+        let workspace = std::env::temp_dir();
+        let context = WorkerExecContext {
+            kill_rx: watch::channel(false).1,
+            session_id: "session-1".into(),
+            workspace_host_path: workspace.clone(),
+            policy: WorkerPolicy::default(),
+            env_credentials: Vec::new(),
+            approval_grants: Vec::new(),
+        };
+        let request = RemoteAgentPodExecRequest {
+            session_id: "session-1".into(),
+            worker_session_id: "worker-session-1".into(),
+            command: ExecCommand {
+                argv: vec!["git".into(), "push".into()],
+                working_dir: None,
+                env: HashMap::new(),
+                timeout_seconds: Some(5),
+            },
+        };
+        let once_grant = ApprovalGrant {
+            id: "grant-once".into(),
+            scope: ApprovalScope::Once,
+            reason: "one-time grant cannot be consumed remotely yet".into(),
+            expires_at: None,
+        };
+        assert!(!worker_approval_grant_matches(
+            &once_grant,
+            &request,
+            &context,
+            &workspace
+        ));
+
+        let expired_grant = ApprovalGrant {
+            id: "grant-expired".into(),
+            scope: ApprovalScope::Command {
+                binary: "git".into(),
+                args_prefix: vec!["push".into()],
+            },
+            reason: "expired approval".into(),
+            expires_at: Some(Utc::now() - Duration::seconds(1)),
+        };
+        assert!(!worker_approval_grant_matches(
+            &expired_grant,
+            &request,
+            &context,
+            &workspace
+        ));
     }
 
     #[tokio::test]
@@ -2158,6 +2457,42 @@ mod tests {
         let session = sessions.get(&response.worker_session_id).unwrap();
         assert_eq!(session.env_credentials.len(), 1);
         assert_eq!(session.env_credentials[0].name, "OPENAI_API_KEY");
+        let _ = std::fs::remove_dir_all(workspace);
+    }
+
+    #[tokio::test]
+    async fn create_session_persists_manifest_approval_grants() {
+        let config = RemoteWorkerConfig::new(
+            "worker.local/dev",
+            "https://worker.example.com/agentpod/evidence",
+            SigningKey::from_bytes(&[44_u8; 32]),
+        );
+        let state = test_state(config);
+        let workspace = std::env::temp_dir().join(format!(
+            "agentbox-remote-worker-approval-workspace-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&workspace);
+        let mut request = create_session_request(workspace.clone());
+        request.spec.approvals.push(ApprovalGrant {
+            id: "grant-git-push".into(),
+            scope: ApprovalScope::Command {
+                binary: "git".into(),
+                args_prefix: vec!["push".into()],
+            },
+            reason: "operator approved git push".into(),
+            expires_at: None,
+        });
+
+        let response = create_session(State(state.clone()), Json(request))
+            .await
+            .unwrap()
+            .0;
+
+        let sessions = state.sessions.lock().await;
+        let session = sessions.get(&response.worker_session_id).unwrap();
+        assert_eq!(session.approval_grants.len(), 1);
+        assert_eq!(session.approval_grants[0].id, "grant-git-push");
         let _ = std::fs::remove_dir_all(workspace);
     }
 
