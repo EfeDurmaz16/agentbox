@@ -13,6 +13,7 @@ use crate::runtime::session::RuntimeSessionStore;
 use crate::runtime::types::{
     ApprovalGrant, CommandResult, ExecCommand, MinipodSpec, RuntimeSession, RuntimeStatus,
 };
+use crate::runtime::workspace::{WorkspaceDiffSnapshot, WorkspaceDiffSnapshotter};
 
 pub struct RuntimeManager {
     provider: Arc<dyn RuntimeProvider>,
@@ -215,6 +216,32 @@ impl RuntimeManager {
         self.sessions
             .list()
             .map_err(|e| RuntimeError::Internal(e.to_string()))
+    }
+
+    pub fn capture_workspace_diff(
+        &self,
+        session_id: &str,
+    ) -> Result<WorkspaceDiffSnapshot, RuntimeError> {
+        let session = self
+            .sessions
+            .get(session_id)
+            .map_err(|e| RuntimeError::Internal(e.to_string()))?
+            .ok_or_else(|| RuntimeError::NotFound(session_id.to_string()))?;
+        let snapshot = WorkspaceDiffSnapshotter::capture(&session);
+
+        if snapshot.available {
+            let changed_files = snapshot.changed_files.len();
+            self.audit_runtime_event(
+                &format!("workspace.diff_snapshot {}", snapshot.snapshot_id),
+                &session,
+                "workspace",
+                &format!("changed_files:{changed_files}"),
+                None,
+                Some(self.provider.name().to_string()),
+            )?;
+        }
+
+        Ok(snapshot)
     }
 
     fn enforce_exec_policy(
@@ -816,6 +843,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn capture_workspace_diff_records_snapshot_evidence_for_git_workspaces() {
+        let workspace = std::env::temp_dir().join(format!(
+            "agentbox-manager-workspace-snapshot-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&workspace);
+        fs::create_dir_all(&workspace).unwrap();
+        run_git(&workspace, &["init"]);
+        run_git(
+            &workspace,
+            &["config", "user.email", "agentbox@example.test"],
+        );
+        run_git(&workspace, &["config", "user.name", "Agentbox Test"]);
+        fs::write(workspace.join("README.md"), "hello\n").unwrap();
+        run_git(&workspace, &["add", "README.md"]);
+        run_git(&workspace, &["commit", "-m", "initial"]);
+        fs::write(workspace.join("README.md"), "hello\nchanged\n").unwrap();
+
+        let manager = manager("workspace-diff-snapshot");
+        let spec = MinipodSpec::for_agent_task("openclaw", &workspace);
+        let session = manager.create(&spec).await.unwrap();
+
+        let snapshot = manager.capture_workspace_diff(&session.id).unwrap();
+
+        assert!(snapshot.available);
+        assert!(snapshot.has_changes());
+        assert!(snapshot.changed_files.contains(&"README.md".to_string()));
+        let audit = manager.audit.recent(1).unwrap();
+        assert_eq!(audit[0].bucket, "workspace");
+        assert!(audit[0].command.contains("workspace.diff_snapshot"));
+        assert_eq!(audit[0].decision, "changed_files:1");
+
+        let _ = fs::remove_dir_all(&workspace);
+    }
+
+    #[tokio::test]
     async fn destroy_records_one_time_credential_revocation_events() {
         let manager = manager("destroy-credential-revoke");
         let mut spec = MinipodSpec::for_agent_task("aspendos", "/tmp/agentbox-work");
@@ -983,5 +1046,15 @@ mod tests {
             .session_approval_grants(&session.id)
             .unwrap()
             .is_empty());
+    }
+
+    fn run_git(workspace: &std::path::Path, args: &[&str]) {
+        let status = std::process::Command::new("git")
+            .arg("-C")
+            .arg(workspace)
+            .args(args)
+            .status()
+            .unwrap();
+        assert!(status.success());
     }
 }

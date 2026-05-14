@@ -8,3 +8,4 @@ pub mod providers;
 pub mod registry;
 pub mod session;
 pub mod types;
+pub mod workspace;

@@ -227,6 +227,8 @@ See [docs/product-direction.md](docs/product-direction.md) and
 Evidence records can now be mapped into FIDES-style signed action drafts and
 AGIT-style lineage drafts, but both intentionally require external authority or
 adapter code before claiming live integration.
+Runtime sessions can also capture Git workspace diff snapshots as evidence
+references for later AGIT lineage attachment.
 For macOS specifically, see
 [docs/macos-minipod-limitations.md](docs/macos-minipod-limitations.md).
 For file boundaries, see
