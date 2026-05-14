@@ -117,6 +117,9 @@ Windows support should not be marked available until process containment,
 credential boundary behavior, and evidence events are tested on Windows CI or a
 documented live host.
 
+See [Windows native provider](windows-native-provider.md) for the Job Objects,
+AppContainer, WFP, ETW, and Hyper-V/Sandbox boundary plan.
+
 ## Provider Rule
 
 Every provider must be honest:
