@@ -76,6 +76,11 @@ struct WorkerSession {
     approval_grants: Vec<ApprovalGrant>,
     status: RuntimeStatus,
     kill_tx: watch::Sender<bool>,
+    commands_started: u64,
+    commands_finished: u64,
+    active_command_count: u64,
+    last_command_exit_code: Option<i32>,
+    last_command_finished_at: Option<DateTime<Utc>>,
     evidence_receipts: Vec<WorkerEvidenceReceipt>,
     stored_evidence_bundles: Vec<WorkerStoredEvidenceBundle>,
 }
@@ -135,6 +140,16 @@ struct WorkerSessionSnapshot {
     #[serde(default)]
     approval_grants: Vec<ApprovalGrant>,
     status: RuntimeStatus,
+    #[serde(default)]
+    commands_started: u64,
+    #[serde(default)]
+    commands_finished: u64,
+    #[serde(default)]
+    active_command_count: u64,
+    #[serde(default)]
+    last_command_exit_code: Option<i32>,
+    #[serde(default)]
+    last_command_finished_at: Option<DateTime<Utc>>,
     evidence_receipts: Vec<WorkerEvidenceReceiptSnapshot>,
     #[serde(default)]
     stored_evidence_bundles: Vec<WorkerStoredEvidenceBundleSnapshot>,
@@ -221,6 +236,11 @@ struct WorkerEvidenceStatusResponse {
     session_id: String,
     worker_session_id: String,
     status: RuntimeStatus,
+    commands_started: u64,
+    commands_finished: u64,
+    active_command_count: u64,
+    last_command_exit_code: Option<i32>,
+    last_command_finished_at: Option<DateTime<Utc>>,
     evidence_receipts: Vec<WorkerEvidenceReceiptSnapshot>,
     stored_evidence_bundles: Vec<WorkerStoredEvidenceBundleSnapshot>,
 }
@@ -324,6 +344,11 @@ impl WorkerSession {
             approval_grants,
             status: RuntimeStatus::Running,
             kill_tx,
+            commands_started: 0,
+            commands_finished: 0,
+            active_command_count: 0,
+            last_command_exit_code: None,
+            last_command_finished_at: None,
             evidence_receipts: Vec::new(),
             stored_evidence_bundles: Vec::new(),
         }
@@ -348,6 +373,11 @@ impl WorkerSession {
             approval_grants: snapshot.approval_grants,
             status: snapshot.status,
             kill_tx,
+            commands_started: snapshot.commands_started,
+            commands_finished: snapshot.commands_finished,
+            active_command_count: 0,
+            last_command_exit_code: snapshot.last_command_exit_code,
+            last_command_finished_at: snapshot.last_command_finished_at,
             evidence_receipts: snapshot
                 .evidence_receipts
                 .into_iter()
@@ -381,6 +411,11 @@ impl WorkerSession {
             env_credentials: self.env_credentials.clone(),
             approval_grants: self.approval_grants.clone(),
             status: self.status.clone(),
+            commands_started: self.commands_started,
+            commands_finished: self.commands_finished,
+            active_command_count: self.active_command_count,
+            last_command_exit_code: self.last_command_exit_code,
+            last_command_finished_at: self.last_command_finished_at,
             evidence_receipts: self
                 .evidence_receipts
                 .iter()
@@ -658,7 +693,11 @@ async fn exec_command(
     let started = Instant::now();
     let context = session_exec_context(&state, &request).await?;
     validate_exec_material(&request, &context)?;
+    record_command_started(&state, &request.worker_session_id, &request.session_id).await?;
+    let worker_session_id = request.worker_session_id.clone();
+    let session_id = request.session_id.clone();
     let result = execute_command(request, started, context).await;
+    record_command_finished(&state, &worker_session_id, &session_id, &result).await?;
     Ok(Json(RemoteAgentPodExecResponse {
         result,
         lifecycle_events: vec![
@@ -690,6 +729,37 @@ fn validate_exec_material(
         ));
     }
     Ok(())
+}
+
+async fn record_command_started(
+    state: &Arc<RemoteWorkerState>,
+    worker_session_id: &str,
+    session_id: &str,
+) -> Result<(), (StatusCode, Json<WorkerError>)> {
+    {
+        let mut sessions = state.sessions.lock().await;
+        let session = get_matching_session_mut(&mut sessions, worker_session_id, session_id)?;
+        session.commands_started = session.commands_started.saturating_add(1);
+        session.active_command_count = session.active_command_count.saturating_add(1);
+    }
+    persist_sessions(state).await.map_err(worker_state_error)
+}
+
+async fn record_command_finished(
+    state: &Arc<RemoteWorkerState>,
+    worker_session_id: &str,
+    session_id: &str,
+    result: &CommandResult,
+) -> Result<(), (StatusCode, Json<WorkerError>)> {
+    {
+        let mut sessions = state.sessions.lock().await;
+        let session = get_matching_session_mut(&mut sessions, worker_session_id, session_id)?;
+        session.commands_finished = session.commands_finished.saturating_add(1);
+        session.active_command_count = session.active_command_count.saturating_sub(1);
+        session.last_command_exit_code = Some(result.exit_code);
+        session.last_command_finished_at = Some(Utc::now());
+    }
+    persist_sessions(state).await.map_err(worker_state_error)
 }
 
 struct WorkerExecContext {
@@ -1076,6 +1146,11 @@ async fn evidence_status(
         session_id: session.session_id.clone(),
         worker_session_id,
         status: session.status.clone(),
+        commands_started: session.commands_started,
+        commands_finished: session.commands_finished,
+        active_command_count: session.active_command_count,
+        last_command_exit_code: session.last_command_exit_code,
+        last_command_finished_at: session.last_command_finished_at,
         evidence_receipts: session
             .evidence_receipts
             .iter()
@@ -1945,7 +2020,10 @@ mod tests {
             },
         };
 
-        let response = exec_command(State(state), Json(request)).await.unwrap().0;
+        let response = exec_command(State(state.clone()), Json(request))
+            .await
+            .unwrap()
+            .0;
 
         assert_eq!(response.result.exit_code, 0);
         assert_eq!(response.result.stdout, "hello-agentbox");
@@ -1953,6 +2031,13 @@ mod tests {
         assert!(response
             .lifecycle_events
             .contains(&RemoteAgentPodLifecycleEvent::EvidenceSealed));
+        let sessions = state.sessions.lock().await;
+        let session = sessions.get("worker-session-1").unwrap();
+        assert_eq!(session.commands_started, 1);
+        assert_eq!(session.commands_finished, 1);
+        assert_eq!(session.active_command_count, 0);
+        assert_eq!(session.last_command_exit_code, Some(0));
+        assert!(session.last_command_finished_at.is_some());
     }
 
     #[tokio::test]
@@ -2702,6 +2787,11 @@ mod tests {
             std::env::temp_dir(),
             WorkerPolicy::default(),
         );
+        session.commands_started = 2;
+        session.commands_finished = 1;
+        session.active_command_count = 1;
+        session.last_command_exit_code = Some(0);
+        session.last_command_finished_at = Some(sealed_at);
         session.evidence_receipts.push(WorkerEvidenceReceipt {
             bundle_sha256: "c".repeat(64),
             derived_from_bundle: true,
@@ -2737,6 +2827,11 @@ mod tests {
         assert_eq!(response.session_id, "session-1");
         assert_eq!(response.worker_session_id, "worker-session-1");
         assert_eq!(response.status, RuntimeStatus::Running);
+        assert_eq!(response.commands_started, 2);
+        assert_eq!(response.commands_finished, 1);
+        assert_eq!(response.active_command_count, 1);
+        assert_eq!(response.last_command_exit_code, Some(0));
+        assert_eq!(response.last_command_finished_at, Some(sealed_at));
         assert_eq!(response.evidence_receipts.len(), 1);
         assert_eq!(response.evidence_receipts[0].event_count, 3);
         assert_eq!(

@@ -888,6 +888,16 @@ pub struct RemoteAgentPodEvidenceStatusResponse {
     pub session_id: String,
     pub worker_session_id: String,
     pub status: RuntimeStatus,
+    #[serde(default)]
+    pub commands_started: u64,
+    #[serde(default)]
+    pub commands_finished: u64,
+    #[serde(default)]
+    pub active_command_count: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_command_exit_code: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_command_finished_at: Option<DateTime<Utc>>,
     pub evidence_receipts: Vec<RemoteAgentPodEvidenceReceiptStatus>,
     pub stored_evidence_bundles: Vec<RemoteAgentPodStoredEvidenceBundleStatus>,
 }
@@ -903,6 +913,17 @@ impl RemoteAgentPodEvidenceStatusResponse {
         {
             return Err(RuntimeError::ManifestRejected(
                 "remote evidence status response session ids do not match request".into(),
+            ));
+        }
+        if self.commands_finished > self.commands_started {
+            return Err(RuntimeError::ManifestRejected(
+                "remote evidence status cannot finish more commands than it started".into(),
+            ));
+        }
+        if self.active_command_count > self.commands_started.saturating_sub(self.commands_finished)
+        {
+            return Err(RuntimeError::ManifestRejected(
+                "remote evidence status active command count exceeds unfinished commands".into(),
             ));
         }
         for receipt in &self.evidence_receipts {
@@ -2157,6 +2178,11 @@ mod tests {
                 session_id: request.session_id.clone(),
                 worker_session_id: request.worker_session_id.clone(),
                 status: RuntimeStatus::Running,
+                commands_started: 1,
+                commands_finished: 1,
+                active_command_count: 0,
+                last_command_exit_code: Some(0),
+                last_command_finished_at: Some(Utc::now()),
                 evidence_receipts: vec![RemoteAgentPodEvidenceReceiptStatus {
                     bundle_sha256: "e".repeat(64),
                     derived_from_bundle: false,
@@ -3055,6 +3081,11 @@ mod tests {
             session_id: "session-1".into(),
             worker_session_id: "worker-session-1".into(),
             status: RuntimeStatus::Running,
+            commands_started: 1,
+            commands_finished: 1,
+            active_command_count: 0,
+            last_command_exit_code: Some(0),
+            last_command_finished_at: Some(Utc::now()),
             evidence_receipts: vec![RemoteAgentPodEvidenceReceiptStatus {
                 bundle_sha256: "a".repeat(64),
                 derived_from_bundle: true,
@@ -3083,6 +3114,11 @@ mod tests {
             session_id: "session-1".into(),
             worker_session_id: "worker-session-1".into(),
             status: RuntimeStatus::Running,
+            commands_started: 0,
+            commands_finished: 0,
+            active_command_count: 0,
+            last_command_exit_code: None,
+            last_command_finished_at: None,
             evidence_receipts: Vec::new(),
             stored_evidence_bundles: vec![RemoteAgentPodStoredEvidenceBundleStatus {
                 bundle_sha256: "a".repeat(64),

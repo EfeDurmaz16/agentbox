@@ -446,6 +446,11 @@ with open(sys.argv[2], "r", encoding="utf-8") as fh:
     expected_bundle_hash = fh.read().strip()
 
 assert data["status"] == "Running"
+assert data["commands_started"] >= 1
+assert data["commands_finished"] >= 1
+assert data["active_command_count"] == 0
+assert data["last_command_exit_code"] == 0
+assert data["last_command_finished_at"]
 assert data["evidence_receipts"][0]["bundle_sha256"] == "f" * 64
 assert data["evidence_receipts"][0]["event_count"] == 2
 assert data["stored_evidence_bundles"][0]["bundle_sha256"] == expected_bundle_hash
@@ -468,6 +473,11 @@ matches = [
 ]
 assert matches
 assert matches[0]["status"] == "Running"
+assert matches[0]["commands_started"] >= 1
+assert matches[0]["commands_finished"] >= 1
+assert matches[0]["active_command_count"] == 0
+assert matches[0]["last_command_exit_code"] == 0
+assert matches[0]["last_command_finished_at"]
 assert matches[0]["evidence_receipts"][0]["bundle_sha256"] == "f" * 64
 assert matches[0]["evidence_receipts"][0]["event_count"] == 2
 assert matches[0]["stored_evidence_bundles"][0]["bundle_sha256"] == expected_bundle_hash

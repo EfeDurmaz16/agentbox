@@ -285,18 +285,21 @@ payloads it accepted.
 Worker routes that mutate session state fail the request if the configured
 state file cannot be serialized, prepared, or written; they do not acknowledge
 state-changing operations as durable when persistence fails.
-The status route returns the matching session status, evidence metadata
-receipts, and stored bundle payload references after binding the caller-provided
-`session_id` to the allocated `worker_session_id`.
+The status route returns the matching session status, command supervision
+counters, the last command exit code/timestamp, evidence metadata receipts, and
+stored bundle payload references after binding the caller-provided `session_id`
+to the allocated `worker_session_id`. If a worker restarts from persisted state,
+running command counters are reset to zero because the current contract worker
+does not yet reattach to orphaned OS processes.
 When the daemon-side provider creates a remote session, it persists the worker
 endpoint, worker session id, worker identity, and worker evidence endpoint in
 session labels so later exec/destroy calls can route back to the same worker.
 Workspace materialization, workspace export, local apply, worker-side command
-policy, manifest-bound worker approval grants, and session-bound env credential
-handoff now exist as governed flows. Dynamic approval prompts,
-file/socket/provider-token credential handoff, full evidence streaming,
-supervised worker restarts, and merge/conflict UX beyond overwrite protection
-remain future work.
+policy, manifest-bound worker approval grants, command supervision counters, and
+session-bound env credential handoff now exist as governed flows. Dynamic
+approval prompts, file/socket/provider-token credential handoff, full evidence
+streaming, supervised worker restarts, and merge/conflict UX beyond overwrite
+protection remain future work.
 
 `scripts/smoke-remote-worker.sh` starts this worker on a random loopback port,
 posts a handshake descriptor, checks the Ed25519 acknowledgement shape, creates
