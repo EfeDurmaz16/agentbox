@@ -306,7 +306,9 @@ accepts explicit file credential payloads when the session manifest contains a
 matching read-only credential mount and `FileMount` grant. The worker verifies
 the payload hash and byte count, materializes the file only under the session
 workspace guest path, stores only metadata in the worker snapshot, and exposes
-the worker-local path as `AGENTBOX_CREDENTIAL_FILE_<NAME>` during exec. Socket,
+the worker-local path as `AGENTBOX_CREDENTIAL_FILE_<NAME>` during exec.
+One-time file credentials are removed from the worker session metadata and
+unlinked from the worker workspace after the command finishes. Socket,
 provider-token, and host environment inheritance grants remain rejected.
 Before spawning a process, exec classifies the argv with the session AgentPod
 network policy. Commands outside the allowed policy return exit code `126`
@@ -418,7 +420,7 @@ implementation.
 ## Current Boundary
 
 `remote-agentpod` is now an experimental gated provider. The missing pieces are
-sandboxed remote execution, socket/provider-token credential handoff, one-time
-file credential consumption synchronization, full live event streaming,
+sandboxed remote execution, socket/provider-token credential handoff,
+daemon-synchronized credential consumption, full live event streaming,
 supervised worker lifecycle, richer workspace merge UX, and live HTTPS worker
 conformance tests.

@@ -1129,6 +1129,7 @@ async fn record_command_finished(
     session_id: &str,
     result: &CommandResult,
 ) -> Result<(), (StatusCode, Json<WorkerError>)> {
+    let mut consumed_file_credentials = Vec::new();
     {
         let mut sessions = state.sessions.lock().await;
         let session = get_matching_session_mut(&mut sessions, worker_session_id, session_id)?;
@@ -1136,8 +1137,36 @@ async fn record_command_finished(
         session.active_command_count = session.active_command_count.saturating_sub(1);
         session.last_command_exit_code = Some(result.exit_code);
         session.last_command_finished_at = Some(Utc::now());
+        let mut retained = Vec::with_capacity(session.file_credentials.len());
+        for credential in session.file_credentials.drain(..) {
+            if credential.one_time {
+                consumed_file_credentials.push(credential.host_path);
+            } else {
+                retained.push(credential);
+            }
+        }
+        session.file_credentials = retained;
     }
-    persist_sessions(state).await.map_err(worker_state_error)
+    persist_sessions(state).await.map_err(worker_state_error)?;
+    remove_consumed_file_credentials(consumed_file_credentials)
+        .await
+        .map_err(worker_state_error)
+}
+
+async fn remove_consumed_file_credentials(paths: Vec<PathBuf>) -> Result<(), String> {
+    for path in paths {
+        match tokio::fs::remove_file(&path).await {
+            Ok(()) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => {
+                return Err(format!(
+                    "failed to remove consumed file credential {}: {err}",
+                    path.display()
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 async fn record_pending_approval(
@@ -3059,13 +3088,40 @@ mod tests {
             },
         };
 
-        let response = exec_command(State(state), worker_session_path(), Json(request))
+        let response = exec_command(State(state.clone()), worker_session_path(), Json(request))
             .await
             .unwrap()
             .0;
 
         assert_eq!(response.result.exit_code, 0);
         assert_eq!(response.result.stdout, "agentbox-test-credential\n");
+        assert!(!credential_path.exists());
+        {
+            let sessions = state.sessions.lock().await;
+            let session = sessions.get("worker-session-1").unwrap();
+            assert!(session.file_credentials.is_empty());
+        }
+
+        let request = RemoteAgentPodExecRequest {
+            session_id: "session-1".into(),
+            worker_session_id: "worker-session-1".into(),
+            command: ExecCommand {
+                argv: vec![
+                    "sh".into(),
+                    "-c".into(),
+                    "test -z \"${AGENTBOX_CREDENTIAL_FILE_OPENAI+x}\"".into(),
+                ],
+                working_dir: None,
+                env: HashMap::new(),
+                timeout_seconds: Some(5),
+            },
+        };
+        let response = exec_command(State(state), worker_session_path(), Json(request))
+            .await
+            .unwrap()
+            .0;
+
+        assert_eq!(response.result.exit_code, 0);
         let _ = std::fs::remove_dir_all(workspace);
     }
 
