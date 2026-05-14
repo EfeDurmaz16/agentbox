@@ -16,11 +16,11 @@ implemented yet.
 | Hash-chained evidence | Shipped | New audit rows include `schema_version`, `prev_hash`, and `event_hash`. |
 | Evidence export | Shipped | `agentbox evidence --limit N` exports audit rows as JSONL. |
 | Doctor command | Shipped | `agentbox doctor` reports daemon, shim, audit, PATH, and provider readiness. |
-| Minipod manifest model | Shipped | `MinipodSpec` models filesystem, network, credentials, resources, services, labels, and agent profile. |
+| Minipod manifest model | Shipped | `MinipodSpec` models filesystem, network, credentials, resources, services, labels, agent profile, approvals, and task policy bundles. |
 | Manifest policy validation | Shipped | Unsafe host env inheritance, host network mode, and protected mounts are rejected before provider create. |
 | Runtime session store | Shipped | Runtime sessions persist to a local JSON store. |
 | Runtime manager | Shipped | Provider create, exec, status refresh, destroy, session persistence, and evidence events share one daemon-owned manager. |
-| Minipod manifest CLI | Shipped | `agentbox minipod-spec` generates and validates a deny-by-default manifest. |
+| Minipod manifest CLI | Shipped | `agentbox minipod-spec` generates and validates a deny-by-default manifest, including `--policy-bundle` task policy JSON files. |
 | Runtime provider registry | Shipped | `RuntimeProviderRegistry` can resolve AgentPod provider descriptors and compatibility providers. |
 | Runtime provider listing | Shipped | `agentbox providers` reports shipped, experimental, unavailable, and planned provider surfaces. |
 | AgentPod provider descriptors | Shipped | `agentpod-macos`, `agentpod-linux`, and `agentpod-windows` expose capability metadata while returning unavailable for execution. |

@@ -1,7 +1,30 @@
 use std::path::{Component, Path, PathBuf};
 
 use crate::runtime::provider::RuntimeError;
-use crate::runtime::types::{CredentialGrantKind, MinipodSpec, MountMode, NetworkMode};
+use crate::runtime::types::{
+    CredentialGrantKind, MinipodSpec, MountMode, NetworkMode, TaskPolicyBundle,
+};
+
+pub fn load_task_policy_bundle(path: impl AsRef<Path>) -> Result<TaskPolicyBundle, RuntimeError> {
+    let path = path.as_ref();
+    let contents = std::fs::read_to_string(path).map_err(|e| {
+        RuntimeError::ManifestRejected(format!(
+            "failed to read task policy bundle {}: {e}",
+            path.display()
+        ))
+    })?;
+    let mut bundle: TaskPolicyBundle = serde_json::from_str(&contents).map_err(|e| {
+        RuntimeError::ManifestRejected(format!(
+            "failed to parse task policy bundle {}: {e}",
+            path.display()
+        ))
+    })?;
+    if bundle.source.is_none() {
+        bundle.source = Some(path.display().to_string());
+    }
+    validate_task_policy_bundle(&bundle)?;
+    Ok(bundle)
+}
 
 pub fn validate_minipod_spec(spec: &MinipodSpec) -> Result<(), RuntimeError> {
     if spec.agent.command.is_empty() {
@@ -28,6 +51,10 @@ pub fn validate_minipod_spec(spec: &MinipodSpec) -> Result<(), RuntimeError> {
         return reject("memory limit must be greater than zero");
     }
 
+    for bundle in &spec.policy_bundles {
+        validate_task_policy_bundle(bundle)?;
+    }
+
     for mount in &spec.filesystem.mounts {
         if mount.host_path.as_os_str().is_empty() {
             return reject("mount host path cannot be empty");
@@ -45,6 +72,24 @@ pub fn validate_minipod_spec(spec: &MinipodSpec) -> Result<(), RuntimeError> {
         }
     }
 
+    Ok(())
+}
+
+fn validate_task_policy_bundle(bundle: &TaskPolicyBundle) -> Result<(), RuntimeError> {
+    if bundle.schema_version != 1 {
+        return reject(format!(
+            "unsupported task policy bundle schema version {}",
+            bundle.schema_version
+        ));
+    }
+    if bundle.id.trim().is_empty() {
+        return reject("task policy bundle id cannot be empty");
+    }
+    for mount in &bundle.read_only_mounts {
+        if !matches!(mount.mode, MountMode::ReadOnly) {
+            return reject("task policy bundle mounts must be read-only");
+        }
+    }
     Ok(())
 }
 
@@ -109,6 +154,7 @@ mod tests {
     use super::*;
     use crate::runtime::types::{
         CredentialGrant, FilesystemPolicy, MountRule, ProtectedPath, SensitivePathClass,
+        TaskPolicyBundle,
     };
 
     fn spec() -> MinipodSpec {
@@ -350,5 +396,110 @@ mod tests {
 
         assert!(reason.contains("symlink"));
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn rejects_task_policy_bundle_without_id() {
+        let mut spec = spec();
+        spec.policy_bundles.push(TaskPolicyBundle {
+            schema_version: 1,
+            id: " ".into(),
+            source: None,
+            description: None,
+            labels: Default::default(),
+            allowed_domains: vec![],
+            denied_domains: vec![],
+            read_only_mounts: vec![],
+            credential_grants: vec![],
+            approval_grants: vec![],
+            protected_paths: vec![],
+        });
+
+        let reason = rejection_reason(validate_minipod_spec(&spec));
+
+        assert!(reason.contains("policy bundle id"));
+    }
+
+    #[test]
+    fn rejects_read_write_mounts_inside_task_policy_bundle() {
+        let mut spec = spec();
+        spec.policy_bundles.push(TaskPolicyBundle {
+            schema_version: 1,
+            id: "deploy".into(),
+            source: None,
+            description: None,
+            labels: Default::default(),
+            allowed_domains: vec![],
+            denied_domains: vec![],
+            read_only_mounts: vec![MountRule {
+                host_path: "/tmp/config".into(),
+                guest_path: "/mnt/config".into(),
+                mode: MountMode::ReadWrite,
+                kind: Default::default(),
+            }],
+            credential_grants: vec![],
+            approval_grants: vec![],
+            protected_paths: vec![],
+        });
+
+        let reason = rejection_reason(validate_minipod_spec(&spec));
+
+        assert!(reason.contains("read-only"));
+    }
+
+    #[test]
+    fn rejects_unknown_task_policy_bundle_schema_version() {
+        let mut spec = spec();
+        spec.policy_bundles.push(TaskPolicyBundle {
+            schema_version: 99,
+            id: "deploy".into(),
+            ..TaskPolicyBundle::default()
+        });
+
+        let reason = rejection_reason(validate_minipod_spec(&spec));
+
+        assert!(reason.contains("schema version"));
+    }
+
+    #[test]
+    fn loads_task_policy_bundle_from_json() {
+        let path =
+            std::env::temp_dir().join(format!("agentbox-policy-{}.json", std::process::id()));
+        std::fs::write(
+            &path,
+            r#"{
+              "schema_version": 1,
+              "id": "github-research",
+              "allowed_domains": ["api.github.com"],
+              "read_only_mounts": [{
+                "host_path": "/tmp/docs",
+                "guest_path": "/mnt/docs",
+                "mode": "ReadOnly"
+              }]
+            }"#,
+        )
+        .unwrap();
+
+        let bundle = load_task_policy_bundle(&path).unwrap();
+
+        assert_eq!(bundle.id, "github-research");
+        assert_eq!(bundle.source, Some(path.display().to_string()));
+        assert_eq!(bundle.allowed_domains, vec!["api.github.com"]);
+        assert_eq!(bundle.read_only_mounts.len(), 1);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn rejects_invalid_task_policy_bundle_file() {
+        let path = std::env::temp_dir().join(format!(
+            "agentbox-policy-invalid-{}.json",
+            std::process::id()
+        ));
+        std::fs::write(&path, "{not-json").unwrap();
+
+        let reason = rejection_reason(load_task_policy_bundle(&path).map(|_| ()));
+
+        assert!(reason.contains("failed to parse"));
+        let _ = std::fs::remove_file(path);
     }
 }

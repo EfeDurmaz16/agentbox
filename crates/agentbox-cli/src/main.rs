@@ -87,6 +87,10 @@ enum Commands {
         #[arg(long = "credential-file")]
         credential_files: Vec<String>,
 
+        /// Load a task-scoped policy bundle JSON file
+        #[arg(long = "policy-bundle")]
+        policy_bundles: Vec<PathBuf>,
+
         /// Network domain allowed without first-contact approval
         #[arg(long = "allow-domain")]
         allow_domains: Vec<String>,
@@ -160,6 +164,10 @@ enum Commands {
         /// Add an explicit credential file grant as name=host_path:guest_path
         #[arg(long = "credential-file")]
         credential_files: Vec<String>,
+
+        /// Load a task-scoped policy bundle JSON file
+        #[arg(long = "policy-bundle")]
+        policy_bundles: Vec<PathBuf>,
     },
     /// List runtime providers and their current implementation status
     Providers,
@@ -800,6 +808,7 @@ struct RunOptions {
     memory: u64,
     read_only_mounts: Vec<String>,
     credential_files: Vec<String>,
+    policy_bundles: Vec<PathBuf>,
     allow_domains: Vec<String>,
 }
 
@@ -908,6 +917,10 @@ async fn cmd_run(options: RunOptions) {
         .iter()
         .filter_map(|service| service_spec(service))
         .collect();
+    for bundle_path in options.policy_bundles {
+        let bundle = load_task_policy_bundle(&bundle_path);
+        bundle.apply_to_minipod(&mut spec);
+    }
     for mount in options.read_only_mounts {
         spec.filesystem.mounts.push(parse_read_only_mount(&mount));
     }
@@ -1938,6 +1951,7 @@ fn cmd_minipod_spec(
     allow_domains: Vec<String>,
     read_only_mounts: Vec<String>,
     credential_files: Vec<String>,
+    policy_bundles: Vec<PathBuf>,
 ) {
     use agentbox_daemon::runtime::policy::validate_minipod_spec;
     use agentbox_daemon::runtime::types::{MinipodSpec, NetworkMode};
@@ -1950,9 +1964,9 @@ fn cmd_minipod_spec(
     });
     let mut spec = MinipodSpec::for_agent_task(agent, workspace);
 
-    if !allow_domains.is_empty() {
-        spec.network.mode = NetworkMode::AllowListed;
-        spec.network.allowed_domains = allow_domains;
+    for bundle_path in policy_bundles {
+        let bundle = load_task_policy_bundle(&bundle_path);
+        bundle.apply_to_minipod(&mut spec);
     }
     for mount in read_only_mounts {
         spec.filesystem.mounts.push(parse_read_only_mount(&mount));
@@ -1961,6 +1975,10 @@ fn cmd_minipod_spec(
         let (mount, credential_grant) = parse_credential_file_grant(&grant);
         spec.filesystem.mounts.push(mount);
         spec.credentials.grants.push(credential_grant);
+    }
+    if !allow_domains.is_empty() {
+        spec.network.mode = NetworkMode::AllowListed;
+        spec.network.allowed_domains = allow_domains;
     }
 
     if let Err(e) = validate_minipod_spec(&spec) {
@@ -1994,6 +2012,15 @@ fn parse_read_only_mount(raw: &str) -> agentbox_daemon::runtime::types::MountRul
         mode: MountMode::ReadOnly,
         kind: MountKind::ReadOnlyHost,
     }
+}
+
+fn load_task_policy_bundle(
+    path: &std::path::Path,
+) -> agentbox_daemon::runtime::types::TaskPolicyBundle {
+    agentbox_daemon::runtime::policy::load_task_policy_bundle(path).unwrap_or_else(|e| {
+        eprintln!("error: failed to load task policy bundle: {}", e);
+        std::process::exit(1);
+    })
 }
 
 fn parse_credential_file_grant(
@@ -2271,6 +2298,7 @@ async fn main() {
             memory,
             read_only_mounts,
             credential_files,
+            policy_bundles,
             allow_domains,
         } => {
             cmd_run(RunOptions {
@@ -2281,6 +2309,7 @@ async fn main() {
                 memory,
                 read_only_mounts,
                 credential_files,
+                policy_bundles,
                 allow_domains,
             })
             .await
@@ -2303,12 +2332,14 @@ async fn main() {
             allow_domains,
             read_only_mounts,
             credential_files,
+            policy_bundles,
         } => cmd_minipod_spec(
             agent,
             workspace,
             allow_domains,
             read_only_mounts,
             credential_files,
+            policy_bundles,
         ),
         Commands::Providers => cmd_providers(),
         Commands::MinipodInspect { session_id, json } => cmd_minipod_inspect(session_id, json),

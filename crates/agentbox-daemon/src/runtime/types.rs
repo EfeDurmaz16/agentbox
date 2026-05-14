@@ -209,6 +209,89 @@ pub struct ApprovalGrant {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskPolicyBundle {
+    #[serde(default = "default_task_policy_bundle_schema_version")]
+    pub schema_version: u32,
+    pub id: String,
+    #[serde(default)]
+    pub source: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub labels: HashMap<String, String>,
+    #[serde(default)]
+    pub allowed_domains: Vec<String>,
+    #[serde(default)]
+    pub denied_domains: Vec<String>,
+    #[serde(default)]
+    pub read_only_mounts: Vec<MountRule>,
+    #[serde(default)]
+    pub credential_grants: Vec<CredentialGrant>,
+    #[serde(default)]
+    pub approval_grants: Vec<ApprovalGrant>,
+    #[serde(default)]
+    pub protected_paths: Vec<ProtectedPath>,
+}
+
+fn default_task_policy_bundle_schema_version() -> u32 {
+    1
+}
+
+impl Default for TaskPolicyBundle {
+    fn default() -> Self {
+        Self {
+            schema_version: default_task_policy_bundle_schema_version(),
+            id: String::new(),
+            source: None,
+            description: None,
+            labels: HashMap::new(),
+            allowed_domains: vec![],
+            denied_domains: vec![],
+            read_only_mounts: vec![],
+            credential_grants: vec![],
+            approval_grants: vec![],
+            protected_paths: vec![],
+        }
+    }
+}
+
+impl TaskPolicyBundle {
+    pub fn apply_to_minipod(&self, spec: &mut MinipodSpec) {
+        spec.labels.insert(
+            format!("agentbox.policy_bundle.{}", self.id),
+            self.source.clone().unwrap_or_else(|| "inline".to_string()),
+        );
+        for (key, value) in &self.labels {
+            spec.labels.insert(key.clone(), value.clone());
+        }
+        if !self.allowed_domains.is_empty() {
+            spec.network.mode = NetworkMode::AllowListed;
+            append_unique(&mut spec.network.allowed_domains, &self.allowed_domains);
+        }
+        append_unique(&mut spec.network.denied_domains, &self.denied_domains);
+        spec.filesystem
+            .mounts
+            .extend(self.read_only_mounts.iter().cloned());
+        spec.filesystem
+            .protected_paths
+            .extend(self.protected_paths.iter().cloned());
+        spec.credentials
+            .grants
+            .extend(self.credential_grants.iter().cloned());
+        spec.approvals.extend(self.approval_grants.iter().cloned());
+        spec.policy_bundles.push(self.clone());
+    }
+}
+
+fn append_unique(values: &mut Vec<String>, additions: &[String]) {
+    for addition in additions {
+        if !values.iter().any(|value| value == addition) {
+            values.push(addition.clone());
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentProfile {
     pub name: String,
     pub kind: String,
@@ -231,6 +314,10 @@ pub struct MinipodSpec {
     pub network: NetworkPolicy,
     pub credentials: CredentialPolicy,
     pub resources: ResourcePolicy,
+    #[serde(default)]
+    pub approvals: Vec<ApprovalGrant>,
+    #[serde(default)]
+    pub policy_bundles: Vec<TaskPolicyBundle>,
     pub services: Vec<ServiceSpec>,
     pub labels: HashMap<String, String>,
     pub created_at: DateTime<Utc>,
@@ -262,6 +349,8 @@ impl MinipodSpec {
             network: NetworkPolicy::default(),
             credentials: CredentialPolicy::default(),
             resources: ResourcePolicy::default(),
+            approvals: vec![],
+            policy_bundles: vec![],
             services: vec![],
             labels,
             created_at: Utc::now(),
@@ -551,6 +640,20 @@ mod tests {
             requires_approval: true,
         });
         spec.resources.timeout_seconds = Some(600);
+        spec.approvals.push(ApprovalGrant {
+            id: "approval-1".into(),
+            scope: ApprovalScope::Domain {
+                domain: "api.openai.com".into(),
+            },
+            reason: "model API access".into(),
+            expires_at: None,
+        });
+        spec.policy_bundles.push(TaskPolicyBundle {
+            id: "research".into(),
+            source: Some("policy/research.json".into()),
+            allowed_domains: vec!["api.openai.com".into()],
+            ..TaskPolicyBundle::default()
+        });
         spec.services.push(ServiceSpec {
             name: "postgres".into(),
             image: "postgres:17-alpine".into(),
@@ -565,6 +668,7 @@ mod tests {
         assert_eq!(decoded, spec);
         assert!(encoded.contains("\"network\""));
         assert!(encoded.contains("\"credentials\""));
+        assert!(encoded.contains("\"policy_bundles\""));
         assert!(encoded.contains("\"agentbox.provider\""));
     }
 
@@ -700,6 +804,69 @@ mod tests {
             spec.filesystem.mounts[0].kind,
             MountKind::ReadOnlyHost
         ));
+        assert!(spec.approvals.is_empty());
+        assert!(spec.policy_bundles.is_empty());
+    }
+
+    #[test]
+    fn task_policy_bundle_applies_task_scoped_boundaries() {
+        let mut spec = MinipodSpec::for_agent_task("hermes", "/tmp/agentbox-work");
+        let bundle = TaskPolicyBundle {
+            schema_version: 1,
+            id: "deploy-preview".into(),
+            source: Some("/tmp/deploy-preview.policy.json".into()),
+            description: Some("preview deployment task policy".into()),
+            labels: HashMap::from([("agentbox.task.kind".into(), "deploy-preview".into())]),
+            allowed_domains: vec!["api.github.com".into(), "api.github.com".into()],
+            denied_domains: vec!["metadata.google.internal".into()],
+            read_only_mounts: vec![MountRule {
+                host_path: "/tmp/docs".into(),
+                guest_path: "/mnt/docs".into(),
+                mode: MountMode::ReadOnly,
+                kind: MountKind::ReadOnlyHost,
+            }],
+            credential_grants: vec![CredentialGrant {
+                name: "github-token".into(),
+                kind: CredentialGrantKind::EnvVar,
+                target: "GITHUB_TOKEN".into(),
+                one_time: true,
+                requires_approval: true,
+            }],
+            approval_grants: vec![ApprovalGrant {
+                id: "approve-github".into(),
+                scope: ApprovalScope::Domain {
+                    domain: "api.github.com".into(),
+                },
+                reason: "GitHub issue sync".into(),
+                expires_at: None,
+            }],
+            protected_paths: vec![ProtectedPath {
+                path: "/tmp/private".into(),
+                class: SensitivePathClass::Custom("private".into()),
+                reason: "private operator files".into(),
+            }],
+        };
+
+        bundle.apply_to_minipod(&mut spec);
+
+        assert!(matches!(spec.network.mode, NetworkMode::AllowListed));
+        assert_eq!(spec.network.allowed_domains, vec!["api.github.com"]);
+        assert_eq!(
+            spec.network.denied_domains,
+            vec!["metadata.google.internal"]
+        );
+        assert_eq!(spec.filesystem.mounts.len(), 1);
+        assert_eq!(spec.credentials.grants.len(), 1);
+        assert_eq!(spec.approvals.len(), 1);
+        assert_eq!(spec.policy_bundles.len(), 1);
+        assert_eq!(
+            spec.labels.get("agentbox.policy_bundle.deploy-preview"),
+            Some(&"/tmp/deploy-preview.policy.json".into())
+        );
+        assert_eq!(
+            spec.labels.get("agentbox.task.kind"),
+            Some(&"deploy-preview".into())
+        );
     }
 
     #[test]

@@ -175,6 +175,9 @@ agentbox run "openclaw start"
 # Generate the governed minipod manifest without starting a backend
 agentbox minipod-spec hermes --workspace . --allow-domain api.openai.com
 
+# Bind a task-scoped policy bundle into the manifest
+agentbox minipod-spec hermes --workspace . --policy-bundle ./agentbox.task-policy.json
+
 # With specific runtime and services
 agentbox run --runtime node --with postgres "npm test"
 
@@ -233,6 +236,7 @@ agentbox policy          # Show current policy posture
 agentbox doctor          # Local readiness check for daemon, shims, audit, and providers
 agentbox evidence        # Export audit/evidence JSONL
 agentbox minipod-spec    # Generate and validate a governed minipod manifest
+agentbox minipod-spec --policy-bundle ./task-policy.json
 
 agentbox run <command>   # Run agent in a guarded local minipod
 agentbox pods            # List running compatibility-backend minipods

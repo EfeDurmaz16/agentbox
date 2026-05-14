@@ -31,6 +31,20 @@ agentbox run --runtime node \
   npm test
 ```
 
+Task-scoped policy bundles can carry the same read-only mounts alongside
+allowed domains, denied domains, approval grants, protected paths, and explicit
+credential grants:
+
+```sh
+agentbox minipod-spec hermes \
+  --workspace ./task \
+  --policy-bundle ./agentbox.task-policy.json
+```
+
+Bundle mounts are validated as read-only. Credential grants inside a bundle are
+still explicit grants and should require approval; a bundle is manifest-time
+policy composition, not a signed authority boundary by itself.
+
 These mounts are represented as:
 
 ```json
