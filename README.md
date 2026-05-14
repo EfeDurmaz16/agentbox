@@ -1,8 +1,8 @@
 # Agentbox
 
-**Local-first governed micro-runtime for autonomous agents.** Agentbox gives
-agents a task-scoped local minipod on your machine, then wraps that minipod with
-filesystem, network, credential, policy, approval, and evidence boundaries.
+**Governed execution cells for autonomous agents.** Agentbox runs AgentPods:
+task-scoped execution cells for agents that need to touch files, run commands,
+use credentials, reach networks, or interact with local and remote systems.
 
 The wedge is not "2FA for agents" and it is not a generic Docker wrapper. The
 problem is that people run autonomous agents on their real machines, then buy
@@ -11,10 +11,11 @@ credentials, browser state, cloud CLIs, databases, deploys, or production
 repos. Agentbox aims to make that separation available locally as software.
 
 The validated core today is the control loop: **shim -> daemon -> policy ->
-approval -> audit**. The product direction is broader: **agent task ->
-AgentPod minipod -> governed host boundary -> policy / approval / evidence**.
-Podman is only the current compatibility backend; the product target is an
-Agentbox-owned runtime with OS-native providers.
+approval -> audit**. The product direction is broader: **agent intent ->
+AgentPod -> adaptive execution provider -> governed host bridge -> policy /
+approval / credentials / evidence**. Providers may use guarded host processes,
+native OS sandboxes, containers, VMs, or remote workers. Podman is only a
+compatibility provider; Agentbox owns the AgentPod contract.
 
 ## Why
 
@@ -25,10 +26,10 @@ machines. Most users choose between two bad defaults: let the agent run directly
 in the real shell and home directory, or move the agent into a heavy remote
 sandbox they do not control.
 
-Agentbox aims at the missing local layer: a governed, task-scoped runtime for
-agent work. An agent should be able to run in a small local execution cell with
-the right workspace, services, and tools, while dangerous side effects still go
-through policy, approval, and audit before they touch the host.
+Agentbox aims at the missing execution governance layer: a task-scoped AgentPod
+with the right workspace, services, credentials, and tools, while dangerous
+side effects still go through policy, approval, and audit before they touch the
+host.
 
 The interception primitive is what makes the sandbox agent-aware instead of just container-shaped. PATH-mediated calls to commands such as `git push`, `ssh`, `curl`, `psql`, or `rm` outside the workspace pass through the daemon. The classifier inspects the full context -- command name, arguments, current working directory, environment -- and routes to one of three buckets:
 
@@ -243,6 +244,9 @@ loader wiring are verified.
 See [docs/product-direction.md](docs/product-direction.md) and
 [docs/status-matrix.md](docs/status-matrix.md) for current shipped status, and
 [docs/roadmap-100-issues.md](docs/roadmap-100-issues.md) for the current sprint direction.
+See [docs/agentpod-contract.md](docs/agentpod-contract.md) for the final
+AgentPod product contract: adaptive providers, workspace modes, credential
+grants, network policy, host bridge, approval, and evidence.
 See [docs/glossary.md](docs/glossary.md) for the Agentbox vocabulary:
 AgentPod, minipod, boundary, provider, authority, evidence, and host bridge.
 See [docs/mac-mini-replacement-wedge.md](docs/mac-mini-replacement-wedge.md)

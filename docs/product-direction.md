@@ -1,6 +1,6 @@
 # Agentbox Product Direction
 
-Agentbox is a local-first governed micro-runtime for autonomous agents.
+Agentbox is a governed execution layer for autonomous agents.
 
 The original problem is not limited to coding agents and it is not primarily
 "phone approval for shell commands." People buy separate machines for autonomous
@@ -17,8 +17,7 @@ threat model.
 ## Product Thesis
 
 An autonomous agent should not run directly in the user's real shell by default.
-It should run inside a task-scoped local AgentPod minipod with an explicit
-boundary:
+It should run inside a task-scoped AgentPod with an explicit boundary:
 
 - what files it can read
 - what files it can write
@@ -29,7 +28,8 @@ boundary:
 - what evidence is produced after the run
 
 The approval flow is one control plane inside that runtime. It is not the whole
-product.
+product. See [AgentPod contract](agentpod-contract.md) for the canonical final
+shape.
 
 ## Target Agents
 
@@ -47,20 +47,21 @@ on a personal or workstation machine:
 Coding is the first visible wedge because it is easy to demo and test. The
 runtime should not be designed as coding-only infrastructure.
 
-## What "Minipod" Means
+## What "AgentPod" Means
 
-A minipod is a small, local, task-scoped execution cell for an agent. It is not
+An AgentPod is an adaptive governed execution cell for an agent task. It is not
 just a container and it is not necessarily the same primitive on every operating
 system.
 
 The product-level contract is stable:
 
 ```text
-agent task
-  -> minipod manifest
-  -> AgentPod execution cell
+agent intent
+  -> AgentPod manifest
+  -> adaptive execution provider
   -> governed host boundary
-  -> policy / approval / evidence
+  -> policy / approval / credential / network boundary
+  -> evidence bundle
 ```
 
 The platform implementation can vary:
@@ -73,9 +74,10 @@ The platform implementation can vary:
 - Windows: Job Objects, AppContainer, Windows Sandbox, Hyper-V isolation, and
   platform-specific filesystem/registry/network policy.
 
-"Micro" should mean fast to create, cheap to keep around, and tiny in per-task
-state. Strong isolation is still provided by real OS or virtualization
-primitives, not by branding.
+AgentPod providers should use real primitives: guarded host processes for low
+risk, native sandboxing for medium risk, VM-backed cells for high risk, and
+remote/disposable workers when useful. Strong isolation is provided by real OS
+or virtualization primitives, not by branding.
 
 ## Current State
 

@@ -1,9 +1,9 @@
 # Agentbox Status Matrix
 
 This file separates what is shipped in this repository from what is still
-experimental or planned. Agentbox is moving from command interception into a
-governed local minipod runtime for autonomous agents, but not every boundary is
-implemented yet.
+experimental or planned. Agentbox is moving from command interception into the
+AgentPod contract: adaptive governed execution cells for autonomous agents.
+Not every provider boundary is implemented yet.
 
 ## Product Surface
 
@@ -79,6 +79,9 @@ the product direction and should become the real enforcement layer.
 
 See [glossary](glossary.md) for the canonical meanings of AgentPod, minipod,
 boundary, policy, authority, evidence, provider, and host bridge.
+See [AgentPod contract](agentpod-contract.md) for the final product shape:
+adaptive providers, workspace modes, credential grants, network policy, host
+bridge, approval, and evidence.
 See [Mac mini replacement wedge](mac-mini-replacement-wedge.md) for the local
 software-boundary positioning and its limits.
 See [release readiness](release-readiness.md) for the checklist before tagging
