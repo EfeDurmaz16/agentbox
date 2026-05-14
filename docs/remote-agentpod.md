@@ -50,7 +50,9 @@ time, and the response fields a future worker must return:
 - `LifecycleAck`
 
 It does not include the nonce itself or any credential material. The transport
-and signed response verifier are still future work.
+and full signed response verifier are still future work. Current validation
+does require the acknowledgement signature field to bind the challenge id, so a
+worker cannot return an unrelated signed payload and satisfy the contract.
 
 ## Transport Conformance
 

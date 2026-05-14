@@ -79,6 +79,11 @@ impl RemoteAgentPodHandshakeAck {
                     .into(),
             ));
         }
+        if !self.signed_challenge.contains(&descriptor.challenge_id) {
+            return Err(RuntimeError::ManifestRejected(
+                "remote AgentPod handshake ack signature must bind the challenge id".into(),
+            ));
+        }
         if self.secret_material_included {
             return Err(RuntimeError::ManifestRejected(
                 "remote AgentPod handshake ack must not include secret material".into(),
@@ -799,6 +804,32 @@ mod tests {
             .validate_for(&descriptor, descriptor.created_at)
             .unwrap_err();
         assert!(secret_err.to_string().contains("secret material"));
+    }
+
+    #[test]
+    fn remote_handshake_ack_must_bind_challenge_id() {
+        let descriptor = RemoteAgentPodHandshakeDescriptor::new(
+            "https://worker.example.com/agentpod",
+            RemoteAgentPodAuthKind::SignedChallenge,
+            300,
+        )
+        .unwrap();
+        let ack = RemoteAgentPodHandshakeAck {
+            worker_identity: "worker.local/test".into(),
+            worker_public_key: "ed25519:test-public-key".into(),
+            signed_challenge: "signed:other-challenge".into(),
+            capabilities: vec![RuntimeCapability::EvidenceExport],
+            evidence_endpoint: "https://worker.example.com/agentpod/evidence".into(),
+            lifecycle_ack: true,
+            secret_material_included: false,
+            expires_at: descriptor.created_at + Duration::seconds(60),
+        };
+
+        let err = ack
+            .validate_for(&descriptor, descriptor.created_at)
+            .unwrap_err();
+
+        assert!(err.to_string().contains("challenge id"));
     }
 
     #[test]
