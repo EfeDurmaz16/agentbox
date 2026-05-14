@@ -199,7 +199,9 @@ snapshot, including bundle provenance fields such as `bundle_id`,
 `bundle_root_sha256`, `derived_from_bundle`, and `sealed_at` when provided.
 The separate evidence bundle payload route verifies the submitted bundle JSON
 against its SHA-256 and stores it under `evidence/<worker_session_id>/` inside
-the worker state directory.
+the worker state directory. Successful payload storage is also recorded on the
+matching worker session snapshot with the stored bundle hash, byte count, and
+storage path so a restarted worker can prove which bundle payloads it accepted.
 When the daemon-side provider creates a remote session, it persists the worker
 endpoint, worker session id, worker identity, and worker evidence endpoint in
 session labels so later exec/destroy calls can route back to the same worker.

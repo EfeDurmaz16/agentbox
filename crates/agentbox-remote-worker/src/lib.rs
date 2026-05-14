@@ -68,6 +68,7 @@ struct WorkerSession {
     status: RuntimeStatus,
     kill_tx: watch::Sender<bool>,
     evidence_receipts: Vec<WorkerEvidenceReceipt>,
+    stored_evidence_bundles: Vec<WorkerStoredEvidenceBundle>,
 }
 
 #[derive(Clone)]
@@ -80,6 +81,13 @@ struct WorkerEvidenceReceipt {
     sealed_at: Option<DateTime<Utc>>,
 }
 
+#[derive(Clone)]
+struct WorkerStoredEvidenceBundle {
+    bundle_sha256: String,
+    stored_bytes: u64,
+    storage_path: PathBuf,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct WorkerSessionSnapshot {
     session_id: String,
@@ -88,6 +96,8 @@ struct WorkerSessionSnapshot {
     workspace_host_path: PathBuf,
     status: RuntimeStatus,
     evidence_receipts: Vec<WorkerEvidenceReceiptSnapshot>,
+    #[serde(default)]
+    stored_evidence_bundles: Vec<WorkerStoredEvidenceBundleSnapshot>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -102,6 +112,13 @@ struct WorkerEvidenceReceiptSnapshot {
     event_count: u64,
     #[serde(default)]
     sealed_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct WorkerStoredEvidenceBundleSnapshot {
+    bundle_sha256: String,
+    stored_bytes: u64,
+    storage_path: PathBuf,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -148,6 +165,7 @@ impl WorkerSession {
             status: RuntimeStatus::Running,
             kill_tx,
             evidence_receipts: Vec::new(),
+            stored_evidence_bundles: Vec::new(),
         }
     }
 
@@ -179,6 +197,15 @@ impl WorkerSession {
                     sealed_at: receipt.sealed_at,
                 })
                 .collect(),
+            stored_evidence_bundles: snapshot
+                .stored_evidence_bundles
+                .into_iter()
+                .map(|bundle| WorkerStoredEvidenceBundle {
+                    bundle_sha256: bundle.bundle_sha256,
+                    stored_bytes: bundle.stored_bytes,
+                    storage_path: bundle.storage_path,
+                })
+                .collect(),
         }
     }
 
@@ -198,6 +225,15 @@ impl WorkerSession {
                     bundle_root_sha256: receipt.bundle_root_sha256.clone(),
                     event_count: receipt.event_count,
                     sealed_at: receipt.sealed_at,
+                })
+                .collect(),
+            stored_evidence_bundles: self
+                .stored_evidence_bundles
+                .iter()
+                .map(|bundle| WorkerStoredEvidenceBundleSnapshot {
+                    bundle_sha256: bundle.bundle_sha256.clone(),
+                    stored_bytes: bundle.stored_bytes,
+                    storage_path: bundle.storage_path.clone(),
                 })
                 .collect(),
         }
@@ -572,6 +608,7 @@ async fn upload_evidence_bundle(
     validate_evidence_bundle_upload(&request)?;
     require_matching_session(&state, &request.worker_session_id, &request.session_id).await?;
     let path = persist_evidence_bundle(&state.config, &request).await?;
+    record_stored_evidence_bundle(&state, &request, &path).await?;
     Ok(Json(WorkerEvidenceBundleUploadResponse {
         session_id: request.session_id,
         worker_session_id: request.worker_session_id,
@@ -651,6 +688,38 @@ async fn persist_evidence_bundle(
         path,
         stored_bytes: request.bundle_json.len().try_into().unwrap_or(u64::MAX),
     })
+}
+
+async fn record_stored_evidence_bundle(
+    state: &Arc<RemoteWorkerState>,
+    request: &WorkerEvidenceBundleUploadRequest,
+    stored: &StoredEvidenceBundlePath,
+) -> Result<(), (StatusCode, Json<WorkerError>)> {
+    let mut sessions = state.sessions.lock().await;
+    let session = get_matching_session_mut(
+        &mut sessions,
+        &request.worker_session_id,
+        &request.session_id,
+    )?;
+    if let Some(existing) = session
+        .stored_evidence_bundles
+        .iter_mut()
+        .find(|bundle| bundle.bundle_sha256 == request.bundle_sha256)
+    {
+        existing.stored_bytes = stored.stored_bytes;
+        existing.storage_path = stored.path.clone();
+    } else {
+        session
+            .stored_evidence_bundles
+            .push(WorkerStoredEvidenceBundle {
+                bundle_sha256: request.bundle_sha256.clone(),
+                stored_bytes: stored.stored_bytes,
+                storage_path: stored.path.clone(),
+            });
+    }
+    drop(sessions);
+    persist_sessions(state).await;
+    Ok(())
 }
 
 async fn accept_evidence(
@@ -1280,7 +1349,7 @@ mod tests {
             secret_material_included: false,
         };
 
-        let response = upload_evidence_bundle(State(state), Json(request))
+        let response = upload_evidence_bundle(State(state.clone()), Json(request))
             .await
             .unwrap()
             .0;
@@ -1290,6 +1359,17 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(response.storage_path).unwrap(),
             bundle_json
+        );
+        let sessions = state.sessions.lock().await;
+        let session = sessions.get("worker-session-1").unwrap();
+        assert_eq!(session.stored_evidence_bundles.len(), 1);
+        assert_eq!(
+            session.stored_evidence_bundles[0].bundle_sha256,
+            bundle_sha256
+        );
+        assert_eq!(
+            session.stored_evidence_bundles[0].stored_bytes,
+            bundle_json.len() as u64
         );
         let _ = std::fs::remove_dir_all(state_dir);
     }
@@ -1397,6 +1477,13 @@ mod tests {
             event_count: 5,
             sealed_at: Some(sealed_at),
         });
+        session
+            .stored_evidence_bundles
+            .push(WorkerStoredEvidenceBundle {
+                bundle_sha256: "b".repeat(64),
+                stored_bytes: 128,
+                storage_path: path.join("evidence/worker-session-1/bundle.json"),
+            });
         session.mark_stopped();
         state
             .sessions
@@ -1423,6 +1510,15 @@ mod tests {
         );
         assert_eq!(session.evidence_receipts[0].event_count, 5);
         assert_eq!(session.evidence_receipts[0].sealed_at, Some(sealed_at));
+        assert_eq!(session.stored_evidence_bundles.len(), 1);
+        assert_eq!(
+            session.stored_evidence_bundles[0].bundle_sha256,
+            "b".repeat(64)
+        );
+        assert_eq!(session.stored_evidence_bundles[0].stored_bytes, 128);
+        assert!(session.stored_evidence_bundles[0]
+            .storage_path
+            .ends_with("evidence/worker-session-1/bundle.json"));
         let _ = std::fs::remove_file(path);
     }
 }

@@ -193,12 +193,14 @@ with open(data["storage_path"], "r", encoding="utf-8") as fh:
 assert stored
 PY
 
-python3 - "$TMPDIR/worker-state/worker-sessions.json" "$SESSION_ID" "$WORKER_SESSION_ID" <<'PY'
+python3 - "$TMPDIR/worker-state/worker-sessions.json" "$SESSION_ID" "$WORKER_SESSION_ID" "$TMPDIR/evidence-bundle-upload.expected" <<'PY'
 import json
 import sys
 
 with open(sys.argv[1], "r", encoding="utf-8") as fh:
     sessions = json.load(fh)
+with open(sys.argv[4], "r", encoding="utf-8") as fh:
+    expected_bundle_hash = fh.read().strip()
 
 matches = [
     session for session in sessions
@@ -209,6 +211,11 @@ assert matches
 assert matches[0]["status"] == "Running"
 assert matches[0]["evidence_receipts"][0]["bundle_sha256"] == "f" * 64
 assert matches[0]["evidence_receipts"][0]["event_count"] == 2
+assert matches[0]["stored_evidence_bundles"][0]["bundle_sha256"] == expected_bundle_hash
+assert matches[0]["stored_evidence_bundles"][0]["stored_bytes"] > 0
+assert matches[0]["stored_evidence_bundles"][0]["storage_path"].endswith(
+    f"{expected_bundle_hash}.json"
+)
 PY
 
 kill "$WORKER_PID"
