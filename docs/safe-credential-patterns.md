@@ -63,7 +63,8 @@ secret in its process environment:
 ```sh
 agentbox run deploy-agent \
   --workspace ./release-work \
-  --credential-env OPENAI_API_KEY=AGENTBOX_OPENAI_API_KEY
+  --credential-env OPENAI_API_KEY=AGENTBOX_OPENAI_API_KEY \
+  --credential-ttl-seconds 900
 ```
 
 Agentbox does not inherit the host environment by default. A runtime exec
@@ -73,6 +74,22 @@ after exposure. This is command-level mediation, not a complete secret manager:
 a process that receives the env value can still print it, copy it, or pass it
 to children. Transcripts are redacted, but the main control is explicit
 least-privilege exposure.
+
+## Expiring Grants
+
+Use `--credential-ttl-seconds` when a task should only hold a credential for a
+short window:
+
+```sh
+agentbox minipod-spec deploy-agent \
+  --workspace ./release-work \
+  --credential-file vercel=./secrets/vercel-token:/run/agentbox/secrets/vercel \
+  --credential-ttl-seconds 900
+```
+
+Expired grants are removed from persisted session state before listing or exec.
+Agentbox records a credential revocation event with an `expired` reason. Expiry
+does not rotate the upstream secret or revoke a token already copied elsewhere.
 
 ## Listing And Revoking Grants
 
