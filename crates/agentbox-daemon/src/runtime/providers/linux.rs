@@ -792,4 +792,52 @@ mod tests {
 
         assert!(err.to_string().contains("only available on Linux"));
     }
+
+    #[test]
+    fn rootless_execution_plan_composes_linux_kernel_boundaries() {
+        let mut spec = MinipodSpec::for_agent_task("hermes", "/tmp/agentbox-work");
+        spec.filesystem.mounts.push(MountRule {
+            host_path: PathBuf::from("/tmp/agentbox-fixtures"),
+            guest_path: "/fixtures".into(),
+            mode: MountMode::ReadOnly,
+            kind: MountKind::ReadOnlyHost,
+        });
+        spec.seccomp = SeccompProfile::deny_syscalls(
+            &["ptrace", "bpf"],
+            "debugging and kernel instrumentation require explicit support",
+        );
+        let command = command(&["/bin/true"]);
+
+        let user = LinuxUserNamespaceLauncher::plan(&command).unwrap();
+        let mount = LinuxMountNamespaceLauncher::plan(&spec).unwrap();
+        let pid = LinuxPidNamespaceLauncher::plan(&command).unwrap();
+        let cgroup = LinuxCgroupV2Limiter::plan(&spec.id, &spec.resources).unwrap();
+        let seccomp = LinuxSeccompProfileLoader::plan(&spec.seccomp).unwrap();
+        let landlock = LinuxLandlockRuleset::plan(&spec).unwrap();
+
+        assert!(user.map_root_user);
+        assert!(user.deny_setgroups);
+        assert_eq!(mount.propagation, "private");
+        assert!(pid.fork_init);
+        assert!(pid.mount_proc);
+        assert_eq!(cgroup.cgroup_name, format!("agentbox-{}", spec.id));
+        assert!(seccomp.requires_loader);
+        assert!(landlock.default_deny);
+        assert!(landlock.requires_loader);
+    }
+
+    #[test]
+    fn rootless_execution_live_path_is_not_claimed_by_default() {
+        let live_enabled = matches!(
+            std::env::var("AGENTBOX_LINUX_LIVE_TESTS").as_deref(),
+            Ok("1")
+        );
+        if live_enabled && !linux_live_tests_can_run_here() {
+            panic!("live rootless execution can only run on Linux");
+        }
+    }
+
+    fn linux_live_tests_can_run_here() -> bool {
+        cfg!(target_os = "linux")
+    }
 }
