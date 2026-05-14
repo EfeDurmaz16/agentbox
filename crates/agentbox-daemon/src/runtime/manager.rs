@@ -151,7 +151,7 @@ impl RuntimeManager {
             .map_err(|e| RuntimeError::Internal(e.to_string()))?
             .ok_or_else(|| RuntimeError::NotFound(session_id.to_string()))?;
 
-        session.status = self.provider.status(session_id).await?;
+        session.status = self.provider.status_session(&session).await?;
         if matches!(
             session.status,
             RuntimeStatus::Stopped | RuntimeStatus::Failed(_)

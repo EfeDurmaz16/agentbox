@@ -300,6 +300,8 @@ does not yet reattach to orphaned OS processes.
 When the daemon-side provider creates a remote session, it persists the worker
 endpoint, worker session id, worker identity, and worker evidence endpoint in
 session labels so later exec/destroy calls can route back to the same worker.
+Runtime status refresh for remote sessions uses those labels to query the
+worker evidence-status route instead of treating remote status as unavailable.
 Workspace materialization, workspace export, local apply, worker-side command
 policy, manifest-bound worker approval grants, command supervision counters, and
 session-bound env credential handoff now exist as governed flows. Dynamic

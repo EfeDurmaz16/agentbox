@@ -143,6 +143,13 @@ pub trait RuntimeProvider: Send + Sync {
 
     async fn status(&self, session_id: &str) -> Result<RuntimeStatus, RuntimeError>;
 
+    async fn status_session(
+        &self,
+        session: &RuntimeSession,
+    ) -> Result<RuntimeStatus, RuntimeError> {
+        self.status(&session.id).await
+    }
+
     async fn destroy(&self, session_id: &str) -> Result<(), RuntimeError>;
 
     async fn destroy_session(&self, session: &RuntimeSession) -> Result<(), RuntimeError> {

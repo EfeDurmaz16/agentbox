@@ -2005,6 +2005,22 @@ impl RuntimeProvider for RemoteAgentPodProvider {
         Err(self.unavailable())
     }
 
+    async fn status_session(
+        &self,
+        session: &RuntimeSession,
+    ) -> Result<RuntimeStatus, RuntimeError> {
+        let endpoint = self.endpoint_from_session(session)?;
+        let worker_session_id = self.worker_session_from_session(session)?;
+        let transport = self.transport_for(endpoint)?;
+        let status = transport
+            .evidence_status(RemoteAgentPodEvidenceStatusRequest {
+                session_id: session.id.clone(),
+                worker_session_id: worker_session_id.to_string(),
+            })
+            .await?;
+        Ok(status.status)
+    }
+
     async fn destroy(&self, _session_id: &str) -> Result<(), RuntimeError> {
         Err(self.unavailable())
     }
@@ -2301,6 +2317,11 @@ mod tests {
         let result = provider.exec_session(&session, &command).await.unwrap();
         assert_eq!(result.exit_code, 0);
         assert_eq!(result.stdout, "ok\n");
+
+        assert_eq!(
+            provider.status_session(&session).await.unwrap(),
+            RuntimeStatus::Running
+        );
 
         provider.destroy_session(&session).await.unwrap();
     }
