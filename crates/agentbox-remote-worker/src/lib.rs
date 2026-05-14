@@ -7,11 +7,12 @@ use std::time::Instant;
 use agentbox_daemon::runtime::providers::remote::{
     Ed25519HandshakeVerifier, RemoteAgentPodCreateSessionRequest,
     RemoteAgentPodCreateSessionResponse, RemoteAgentPodDestroySessionRequest,
-    RemoteAgentPodDestroySessionResponse, RemoteAgentPodEvidenceUploadRequest,
-    RemoteAgentPodEvidenceUploadResponse, RemoteAgentPodExecRequest, RemoteAgentPodExecResponse,
-    RemoteAgentPodHandshakeAck, RemoteAgentPodHandshakeDescriptor, RemoteAgentPodLifecycleEvent,
-    RemoteAgentPodWorkspaceBundle, RemoteAgentPodWorkspaceExportResponse,
-    RemoteAgentPodWorkspaceFile,
+    RemoteAgentPodDestroySessionResponse, RemoteAgentPodEvidenceStreamChunkRequest,
+    RemoteAgentPodEvidenceStreamChunkResponse, RemoteAgentPodEvidenceStreamStatus,
+    RemoteAgentPodEvidenceUploadRequest, RemoteAgentPodEvidenceUploadResponse,
+    RemoteAgentPodExecRequest, RemoteAgentPodExecResponse, RemoteAgentPodHandshakeAck,
+    RemoteAgentPodHandshakeDescriptor, RemoteAgentPodLifecycleEvent, RemoteAgentPodWorkspaceBundle,
+    RemoteAgentPodWorkspaceExportResponse, RemoteAgentPodWorkspaceFile,
 };
 use agentbox_daemon::runtime::types::{
     ApprovalGrant, ApprovalScope, CommandResult, CredentialGrant, CredentialGrantKind,
@@ -83,6 +84,7 @@ struct WorkerSession {
     last_command_finished_at: Option<DateTime<Utc>>,
     evidence_receipts: Vec<WorkerEvidenceReceipt>,
     stored_evidence_bundles: Vec<WorkerStoredEvidenceBundle>,
+    evidence_streams: HashMap<String, WorkerEvidenceStream>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -127,6 +129,19 @@ struct WorkerStoredEvidenceBundle {
     storage_path: PathBuf,
 }
 
+#[derive(Clone)]
+struct WorkerEvidenceStream {
+    stream_id: String,
+    next_sequence: u64,
+    next_offset: u64,
+    received_bytes: u64,
+    chunks: u64,
+    sealed: bool,
+    stream_sha256: Option<String>,
+    updated_at: Option<DateTime<Utc>>,
+    contents_utf8: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct WorkerSessionSnapshot {
     session_id: String,
@@ -153,6 +168,8 @@ struct WorkerSessionSnapshot {
     evidence_receipts: Vec<WorkerEvidenceReceiptSnapshot>,
     #[serde(default)]
     stored_evidence_bundles: Vec<WorkerStoredEvidenceBundleSnapshot>,
+    #[serde(default)]
+    evidence_streams: Vec<WorkerEvidenceStreamSnapshot>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -174,6 +191,22 @@ struct WorkerStoredEvidenceBundleSnapshot {
     bundle_sha256: String,
     stored_bytes: u64,
     storage_path: PathBuf,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct WorkerEvidenceStreamSnapshot {
+    stream_id: String,
+    next_sequence: u64,
+    next_offset: u64,
+    received_bytes: u64,
+    chunks: u64,
+    sealed: bool,
+    #[serde(default)]
+    stream_sha256: Option<String>,
+    #[serde(default)]
+    updated_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    contents_utf8: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -243,6 +276,7 @@ struct WorkerEvidenceStatusResponse {
     last_command_finished_at: Option<DateTime<Utc>>,
     evidence_receipts: Vec<WorkerEvidenceReceiptSnapshot>,
     stored_evidence_bundles: Vec<WorkerStoredEvidenceBundleSnapshot>,
+    evidence_streams: Vec<RemoteAgentPodEvidenceStreamStatus>,
 }
 
 type WorkerRouteResult<T> = Result<Json<T>, (StatusCode, Json<WorkerError>)>;
@@ -351,6 +385,7 @@ impl WorkerSession {
             last_command_finished_at: None,
             evidence_receipts: Vec::new(),
             stored_evidence_bundles: Vec::new(),
+            evidence_streams: HashMap::new(),
         }
     }
 
@@ -399,6 +434,26 @@ impl WorkerSession {
                     storage_path: bundle.storage_path,
                 })
                 .collect(),
+            evidence_streams: snapshot
+                .evidence_streams
+                .into_iter()
+                .map(|stream| {
+                    (
+                        stream.stream_id.clone(),
+                        WorkerEvidenceStream {
+                            stream_id: stream.stream_id,
+                            next_sequence: stream.next_sequence,
+                            next_offset: stream.next_offset,
+                            received_bytes: stream.received_bytes,
+                            chunks: stream.chunks,
+                            sealed: stream.sealed,
+                            stream_sha256: stream.stream_sha256,
+                            updated_at: stream.updated_at,
+                            contents_utf8: stream.contents_utf8,
+                        },
+                    )
+                })
+                .collect(),
         }
     }
 
@@ -437,6 +492,21 @@ impl WorkerSession {
                     storage_path: bundle.storage_path.clone(),
                 })
                 .collect(),
+            evidence_streams: self
+                .evidence_streams
+                .values()
+                .map(|stream| WorkerEvidenceStreamSnapshot {
+                    stream_id: stream.stream_id.clone(),
+                    next_sequence: stream.next_sequence,
+                    next_offset: stream.next_offset,
+                    received_bytes: stream.received_bytes,
+                    chunks: stream.chunks,
+                    sealed: stream.sealed,
+                    stream_sha256: stream.stream_sha256.clone(),
+                    updated_at: stream.updated_at,
+                    contents_utf8: stream.contents_utf8.clone(),
+                })
+                .collect(),
         }
     }
 }
@@ -462,6 +532,10 @@ pub fn router(config: RemoteWorkerConfig) -> Router {
         .route(
             "/sessions/{worker_session_id}/evidence/bundle",
             post(upload_evidence_bundle),
+        )
+        .route(
+            "/sessions/{worker_session_id}/evidence/stream",
+            post(upload_evidence_stream_chunk),
         )
         .route(
             "/sessions/{worker_session_id}/workspace/export",
@@ -1157,6 +1231,28 @@ async fn upload_evidence_bundle(
     }))
 }
 
+async fn upload_evidence_stream_chunk(
+    State(state): State<Arc<RemoteWorkerState>>,
+    AxumPath(route_worker_session_id): AxumPath<String>,
+    Json(request): Json<RemoteAgentPodEvidenceStreamChunkRequest>,
+) -> WorkerRouteResult<RemoteAgentPodEvidenceStreamChunkResponse> {
+    require_route_worker_session_id(&route_worker_session_id, &request.worker_session_id)?;
+    request
+        .validate()
+        .map_err(|err| worker_error(StatusCode::BAD_REQUEST, err.to_string()))?;
+    let stream_sha256 = accept_evidence_stream_chunk(&state, &request).await?;
+    Ok(Json(RemoteAgentPodEvidenceStreamChunkResponse {
+        session_id: request.session_id,
+        worker_session_id: request.worker_session_id,
+        stream_id: request.stream_id,
+        accepted_sequence: request.sequence,
+        accepted_offset: request.offset,
+        accepted_bytes: request.chunk_bytes,
+        stream_sha256,
+        lifecycle_events: vec![RemoteAgentPodLifecycleEvent::EvidenceSealed],
+    }))
+}
+
 async fn evidence_status(
     State(state): State<Arc<RemoteWorkerState>>,
     AxumPath(worker_session_id): AxumPath<String>,
@@ -1204,6 +1300,11 @@ async fn evidence_status(
                 stored_bytes: bundle.stored_bytes,
                 storage_path: bundle.storage_path.clone(),
             })
+            .collect(),
+        evidence_streams: session
+            .evidence_streams
+            .values()
+            .map(worker_evidence_stream_status)
             .collect(),
     }))
 }
@@ -1653,6 +1754,76 @@ async fn accept_evidence(
     drop(sessions);
     persist_sessions(state).await.map_err(worker_state_error)?;
     Ok(receipt)
+}
+
+async fn accept_evidence_stream_chunk(
+    state: &Arc<RemoteWorkerState>,
+    request: &RemoteAgentPodEvidenceStreamChunkRequest,
+) -> Result<Option<String>, (StatusCode, Json<WorkerError>)> {
+    let mut sessions = state.sessions.lock().await;
+    let session = get_matching_session_mut(
+        &mut sessions,
+        &request.worker_session_id,
+        &request.session_id,
+    )?;
+    let stream = session
+        .evidence_streams
+        .entry(request.stream_id.clone())
+        .or_insert_with(|| WorkerEvidenceStream {
+            stream_id: request.stream_id.clone(),
+            next_sequence: 0,
+            next_offset: 0,
+            received_bytes: 0,
+            chunks: 0,
+            sealed: false,
+            stream_sha256: None,
+            updated_at: None,
+            contents_utf8: String::new(),
+        });
+    if stream.sealed {
+        return Err(worker_error(
+            StatusCode::CONFLICT,
+            "agentbox remote worker evidence stream is already sealed",
+        ));
+    }
+    if request.sequence != stream.next_sequence || request.offset != stream.next_offset {
+        return Err(worker_error(
+            StatusCode::CONFLICT,
+            format!(
+                "agentbox remote worker evidence stream chunk is out of order: expected sequence {} offset {}",
+                stream.next_sequence, stream.next_offset
+            ),
+        ));
+    }
+    stream.contents_utf8.push_str(&request.chunk_utf8);
+    stream.chunks = stream.chunks.saturating_add(1);
+    stream.received_bytes = stream.received_bytes.saturating_add(request.chunk_bytes);
+    stream.next_sequence = stream.next_sequence.saturating_add(1);
+    stream.next_offset = stream.received_bytes;
+    stream.updated_at = Some(Utc::now());
+    if request.final_chunk {
+        stream.sealed = true;
+        stream.stream_sha256 = Some(sha256_hex(stream.contents_utf8.as_bytes()));
+    }
+    let stream_sha256 = stream.stream_sha256.clone();
+    drop(sessions);
+    persist_sessions(state).await.map_err(worker_state_error)?;
+    Ok(stream_sha256)
+}
+
+fn worker_evidence_stream_status(
+    stream: &WorkerEvidenceStream,
+) -> RemoteAgentPodEvidenceStreamStatus {
+    RemoteAgentPodEvidenceStreamStatus {
+        stream_id: stream.stream_id.clone(),
+        next_sequence: stream.next_sequence,
+        next_offset: stream.next_offset,
+        received_bytes: stream.received_bytes,
+        chunks: stream.chunks,
+        sealed: stream.sealed,
+        stream_sha256: stream.stream_sha256.clone(),
+        updated_at: stream.updated_at,
+    }
 }
 
 async fn require_matching_session(
@@ -2211,6 +2382,26 @@ mod tests {
         .await
         .unwrap_err();
         assert_eq!(bundle_err.0, StatusCode::CONFLICT);
+
+        let stream_err = upload_evidence_stream_chunk(
+            State(state.clone()),
+            AxumPath("worker-session-other".into()),
+            Json(RemoteAgentPodEvidenceStreamChunkRequest {
+                session_id: "session-1".into(),
+                worker_session_id: "worker-session-1".into(),
+                stream_id: "stdout".into(),
+                sequence: 0,
+                offset: 0,
+                chunk_sha256: sha256_hex(b"hello"),
+                chunk_bytes: 5,
+                chunk_utf8: "hello".into(),
+                final_chunk: false,
+                secret_material_included: false,
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(stream_err.0, StatusCode::CONFLICT);
 
         let destroy_err = destroy_session(
             State(state),
@@ -2978,6 +3169,20 @@ mod tests {
                 stored_bytes: 42,
                 storage_path: PathBuf::from("/tmp/evidence/worker-session-1/bundle.json"),
             });
+        session.evidence_streams.insert(
+            "stdout".into(),
+            WorkerEvidenceStream {
+                stream_id: "stdout".into(),
+                next_sequence: 2,
+                next_offset: 12,
+                received_bytes: 12,
+                chunks: 2,
+                sealed: true,
+                stream_sha256: Some(sha256_hex(b"hello world\n")),
+                updated_at: Some(sealed_at),
+                contents_utf8: "hello world\n".into(),
+            },
+        );
         state
             .sessions
             .lock()
@@ -3011,6 +3216,171 @@ mod tests {
         );
         assert_eq!(response.stored_evidence_bundles.len(), 1);
         assert_eq!(response.stored_evidence_bundles[0].stored_bytes, 42);
+        assert_eq!(response.evidence_streams.len(), 1);
+        assert_eq!(response.evidence_streams[0].stream_id, "stdout");
+        assert_eq!(response.evidence_streams[0].next_sequence, 2);
+        assert_eq!(response.evidence_streams[0].next_offset, 12);
+        assert_eq!(response.evidence_streams[0].received_bytes, 12);
+        assert!(response.evidence_streams[0].sealed);
+        assert_eq!(
+            response.evidence_streams[0].stream_sha256.as_deref(),
+            Some(sha256_hex(b"hello world\n").as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn upload_evidence_stream_accepts_ordered_chunks_and_seals_hash() {
+        let config = RemoteWorkerConfig::new(
+            "worker.local/dev",
+            "https://worker.example.com/agentpod/evidence",
+            SigningKey::from_bytes(&[46_u8; 32]),
+        );
+        let state = test_state(config);
+        state.sessions.lock().await.insert(
+            "worker-session-1".into(),
+            WorkerSession::new(
+                "session-1".into(),
+                std::env::temp_dir(),
+                WorkerPolicy::default(),
+            ),
+        );
+
+        let first = upload_evidence_stream_chunk(
+            State(state.clone()),
+            worker_session_path(),
+            Json(RemoteAgentPodEvidenceStreamChunkRequest {
+                session_id: "session-1".into(),
+                worker_session_id: "worker-session-1".into(),
+                stream_id: "stdout".into(),
+                sequence: 0,
+                offset: 0,
+                chunk_sha256: sha256_hex(b"hello "),
+                chunk_bytes: 6,
+                chunk_utf8: "hello ".into(),
+                final_chunk: false,
+                secret_material_included: false,
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(first.accepted_sequence, 0);
+        assert_eq!(first.accepted_offset, 0);
+        assert!(first.stream_sha256.is_none());
+
+        let second = upload_evidence_stream_chunk(
+            State(state.clone()),
+            worker_session_path(),
+            Json(RemoteAgentPodEvidenceStreamChunkRequest {
+                session_id: "session-1".into(),
+                worker_session_id: "worker-session-1".into(),
+                stream_id: "stdout".into(),
+                sequence: 1,
+                offset: 6,
+                chunk_sha256: sha256_hex(b"world\n"),
+                chunk_bytes: 6,
+                chunk_utf8: "world\n".into(),
+                final_chunk: true,
+                secret_material_included: false,
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+
+        assert_eq!(
+            second.stream_sha256.as_deref(),
+            Some(sha256_hex(b"hello world\n").as_str())
+        );
+        let sessions = state.sessions.lock().await;
+        let stream = sessions
+            .get("worker-session-1")
+            .unwrap()
+            .evidence_streams
+            .get("stdout")
+            .unwrap();
+        assert_eq!(stream.next_sequence, 2);
+        assert_eq!(stream.next_offset, 12);
+        assert_eq!(stream.received_bytes, 12);
+        assert_eq!(stream.chunks, 2);
+        assert!(stream.sealed);
+    }
+
+    #[tokio::test]
+    async fn upload_evidence_stream_rejects_out_of_order_and_sealed_writes() {
+        let config = RemoteWorkerConfig::new(
+            "worker.local/dev",
+            "https://worker.example.com/agentpod/evidence",
+            SigningKey::from_bytes(&[47_u8; 32]),
+        );
+        let state = test_state(config);
+        state.sessions.lock().await.insert(
+            "worker-session-1".into(),
+            WorkerSession::new(
+                "session-1".into(),
+                std::env::temp_dir(),
+                WorkerPolicy::default(),
+            ),
+        );
+        let out_of_order = upload_evidence_stream_chunk(
+            State(state.clone()),
+            worker_session_path(),
+            Json(RemoteAgentPodEvidenceStreamChunkRequest {
+                session_id: "session-1".into(),
+                worker_session_id: "worker-session-1".into(),
+                stream_id: "stdout".into(),
+                sequence: 1,
+                offset: 0,
+                chunk_sha256: sha256_hex(b"late"),
+                chunk_bytes: 4,
+                chunk_utf8: "late".into(),
+                final_chunk: false,
+                secret_material_included: false,
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(out_of_order.0, StatusCode::CONFLICT);
+
+        let _ = upload_evidence_stream_chunk(
+            State(state.clone()),
+            worker_session_path(),
+            Json(RemoteAgentPodEvidenceStreamChunkRequest {
+                session_id: "session-1".into(),
+                worker_session_id: "worker-session-1".into(),
+                stream_id: "stdout".into(),
+                sequence: 0,
+                offset: 0,
+                chunk_sha256: sha256_hex(b"done"),
+                chunk_bytes: 4,
+                chunk_utf8: "done".into(),
+                final_chunk: true,
+                secret_material_included: false,
+            }),
+        )
+        .await
+        .unwrap();
+
+        let sealed = upload_evidence_stream_chunk(
+            State(state),
+            worker_session_path(),
+            Json(RemoteAgentPodEvidenceStreamChunkRequest {
+                session_id: "session-1".into(),
+                worker_session_id: "worker-session-1".into(),
+                stream_id: "stdout".into(),
+                sequence: 1,
+                offset: 4,
+                chunk_sha256: sha256_hex(b"again"),
+                chunk_bytes: 5,
+                chunk_utf8: "again".into(),
+                final_chunk: false,
+                secret_material_included: false,
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(sealed.0, StatusCode::CONFLICT);
+        assert!(sealed.1 .0.error.contains("already sealed"));
     }
 
     #[tokio::test]

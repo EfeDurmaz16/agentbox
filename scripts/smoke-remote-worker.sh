@@ -345,6 +345,68 @@ import json
 import sys
 
 tmpdir, session_id, worker_session_id = sys.argv[1:4]
+chunks = [
+    ("stream-chunk-0.json", 0, 0, "remote "),
+    ("stream-chunk-1.json", 1, 7, "stream\n"),
+]
+for filename, sequence, offset, contents in chunks:
+    with open(f"{tmpdir}/{filename}", "w", encoding="utf-8") as fh:
+        json.dump(
+            {
+                "session_id": session_id,
+                "worker_session_id": worker_session_id,
+                "stream_id": "stdout",
+                "sequence": sequence,
+                "offset": offset,
+                "chunk_sha256": hashlib.sha256(contents.encode()).hexdigest(),
+                "chunk_bytes": len(contents.encode()),
+                "chunk_utf8": contents,
+                "final_chunk": sequence == 1,
+                "secret_material_included": False,
+            },
+            fh,
+        )
+with open(f"{tmpdir}/stream.expected", "w", encoding="utf-8") as fh:
+    fh.write(hashlib.sha256("remote stream\n".encode()).hexdigest())
+PY
+
+curl -fsS "http://127.0.0.1:${PORT}/sessions/${WORKER_SESSION_ID}/evidence/stream" \
+  -H 'content-type: application/json' \
+  --data @"$TMPDIR/stream-chunk-0.json" \
+  >"$TMPDIR/stream-chunk-0-response.json"
+curl -fsS "http://127.0.0.1:${PORT}/sessions/${WORKER_SESSION_ID}/evidence/stream" \
+  -H 'content-type: application/json' \
+  --data @"$TMPDIR/stream-chunk-1.json" \
+  >"$TMPDIR/stream-chunk-1-response.json"
+
+python3 - "$TMPDIR/stream-chunk-0-response.json" "$TMPDIR/stream-chunk-1-response.json" "$TMPDIR/stream.expected" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], "r", encoding="utf-8") as fh:
+    first = json.load(fh)
+with open(sys.argv[2], "r", encoding="utf-8") as fh:
+    second = json.load(fh)
+with open(sys.argv[3], "r", encoding="utf-8") as fh:
+    expected_stream_hash = fh.read().strip()
+
+assert first["accepted_sequence"] == 0
+assert first["accepted_offset"] == 0
+assert first["accepted_bytes"] == 7
+assert first.get("stream_sha256") is None
+assert second["accepted_sequence"] == 1
+assert second["accepted_offset"] == 7
+assert second["accepted_bytes"] == 7
+assert second["stream_sha256"] == expected_stream_hash
+assert "EvidenceSealed" in second["lifecycle_events"]
+PY
+
+python3 - "$TMPDIR" "$SESSION_ID" "$WORKER_SESSION_ID" <<'PY'
+import hashlib
+import json
+import sys
+
+tmpdir, session_id, worker_session_id = sys.argv[1:4]
 bundle_file = json.dumps(
     {
         "schema_version": 1,
@@ -465,9 +527,14 @@ assert data["evidence_receipts"][0]["bundle_sha256"] == "f" * 64
 assert data["evidence_receipts"][0]["event_count"] == 2
 assert data["stored_evidence_bundles"][0]["bundle_sha256"] == expected_bundle_hash
 assert data["stored_evidence_bundles"][0]["stored_bytes"] > 0
+assert data["evidence_streams"][0]["stream_id"] == "stdout"
+assert data["evidence_streams"][0]["next_sequence"] == 2
+assert data["evidence_streams"][0]["next_offset"] == 14
+assert data["evidence_streams"][0]["received_bytes"] == 14
+assert data["evidence_streams"][0]["sealed"] is True
 PY
 
-python3 - "$TMPDIR/worker-state/worker-sessions.json" "$SESSION_ID" "$WORKER_SESSION_ID" "$TMPDIR/evidence-bundle-upload.expected" <<'PY'
+python3 - "$TMPDIR/worker-state/worker-sessions.json" "$SESSION_ID" "$WORKER_SESSION_ID" "$TMPDIR/evidence-bundle-upload.expected" "$TMPDIR/stream.expected" <<'PY'
 import json
 import sys
 
@@ -475,6 +542,8 @@ with open(sys.argv[1], "r", encoding="utf-8") as fh:
     sessions = json.load(fh)
 with open(sys.argv[4], "r", encoding="utf-8") as fh:
     expected_bundle_hash = fh.read().strip()
+with open(sys.argv[5], "r", encoding="utf-8") as fh:
+    expected_stream_hash = fh.read().strip()
 
 matches = [
     session for session in sessions
@@ -495,6 +564,9 @@ assert matches[0]["stored_evidence_bundles"][0]["stored_bytes"] > 0
 assert matches[0]["stored_evidence_bundles"][0]["storage_path"].endswith(
     f"{expected_bundle_hash}.json"
 )
+assert matches[0]["evidence_streams"][0]["stream_id"] == "stdout"
+assert matches[0]["evidence_streams"][0]["stream_sha256"] == expected_stream_hash
+assert matches[0]["evidence_streams"][0]["contents_utf8"] == "remote stream\n"
 PY
 
 kill "$WORKER_PID"

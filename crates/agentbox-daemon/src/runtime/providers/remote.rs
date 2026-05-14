@@ -900,6 +900,8 @@ pub struct RemoteAgentPodEvidenceStatusResponse {
     pub last_command_finished_at: Option<DateTime<Utc>>,
     pub evidence_receipts: Vec<RemoteAgentPodEvidenceReceiptStatus>,
     pub stored_evidence_bundles: Vec<RemoteAgentPodStoredEvidenceBundleStatus>,
+    #[serde(default)]
+    pub evidence_streams: Vec<RemoteAgentPodEvidenceStreamStatus>,
 }
 
 impl RemoteAgentPodEvidenceStatusResponse {
@@ -947,6 +949,154 @@ impl RemoteAgentPodEvidenceStatusResponse {
                     "remote stored evidence bundle status must include byte count and path".into(),
                 ));
             }
+        }
+        for stream in &self.evidence_streams {
+            stream.validate()?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteAgentPodEvidenceStreamChunkRequest {
+    pub session_id: String,
+    pub worker_session_id: String,
+    pub stream_id: String,
+    pub sequence: u64,
+    pub offset: u64,
+    pub chunk_sha256: String,
+    pub chunk_bytes: u64,
+    pub chunk_utf8: String,
+    #[serde(default)]
+    pub final_chunk: bool,
+    pub secret_material_included: bool,
+}
+
+impl RemoteAgentPodEvidenceStreamChunkRequest {
+    pub fn validate(&self) -> Result<(), RuntimeError> {
+        if self.session_id.trim().is_empty()
+            || self.worker_session_id.trim().is_empty()
+            || self.stream_id.trim().is_empty()
+        {
+            return Err(RuntimeError::ManifestRejected(
+                "remote evidence stream chunk must include session ids and stream id".into(),
+            ));
+        }
+        if !self
+            .stream_id
+            .bytes()
+            .all(|byte| matches!(byte, b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'-' | b'_'))
+        {
+            return Err(RuntimeError::ManifestRejected(
+                "remote evidence stream id must be a safe path segment".into(),
+            ));
+        }
+        validate_sha256_hex(&self.chunk_sha256, "remote evidence stream chunk hash")?;
+        let bytes = self.chunk_utf8.as_bytes();
+        if self.chunk_bytes != bytes.len().try_into().unwrap_or(u64::MAX) {
+            return Err(RuntimeError::ManifestRejected(
+                "remote evidence stream chunk byte count does not match payload".into(),
+            ));
+        }
+        if sha256_hex(bytes) != self.chunk_sha256 {
+            return Err(RuntimeError::ManifestRejected(
+                "remote evidence stream chunk hash does not match payload".into(),
+            ));
+        }
+        if self.secret_material_included {
+            return Err(RuntimeError::ManifestRejected(
+                "remote evidence stream chunk must not include secret material".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteAgentPodEvidenceStreamChunkResponse {
+    pub session_id: String,
+    pub worker_session_id: String,
+    pub stream_id: String,
+    pub accepted_sequence: u64,
+    pub accepted_offset: u64,
+    pub accepted_bytes: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_sha256: Option<String>,
+    pub lifecycle_events: Vec<RemoteAgentPodLifecycleEvent>,
+}
+
+impl RemoteAgentPodEvidenceStreamChunkResponse {
+    pub fn validate_for(
+        &self,
+        request: &RemoteAgentPodEvidenceStreamChunkRequest,
+    ) -> Result<(), RuntimeError> {
+        request.validate()?;
+        if self.session_id != request.session_id
+            || self.worker_session_id != request.worker_session_id
+            || self.stream_id != request.stream_id
+        {
+            return Err(RuntimeError::ManifestRejected(
+                "remote evidence stream chunk response ids do not match request".into(),
+            ));
+        }
+        if self.accepted_sequence != request.sequence
+            || self.accepted_offset != request.offset
+            || self.accepted_bytes != request.chunk_bytes
+        {
+            return Err(RuntimeError::ManifestRejected(
+                "remote evidence stream chunk response must acknowledge submitted chunk position"
+                    .into(),
+            ));
+        }
+        if let Some(stream_hash) = &self.stream_sha256 {
+            validate_sha256_hex(stream_hash, "remote evidence stream hash")?;
+        }
+        require_lifecycle_events(
+            &self.lifecycle_events,
+            &[RemoteAgentPodLifecycleEvent::EvidenceSealed],
+            "evidence stream chunk response",
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteAgentPodEvidenceStreamStatus {
+    pub stream_id: String,
+    pub next_sequence: u64,
+    pub next_offset: u64,
+    pub received_bytes: u64,
+    pub chunks: u64,
+    pub sealed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<DateTime<Utc>>,
+}
+
+impl RemoteAgentPodEvidenceStreamStatus {
+    pub fn validate(&self) -> Result<(), RuntimeError> {
+        if self.stream_id.trim().is_empty() {
+            return Err(RuntimeError::ManifestRejected(
+                "remote evidence stream status must include stream id".into(),
+            ));
+        }
+        if self.next_offset != self.received_bytes {
+            return Err(RuntimeError::ManifestRejected(
+                "remote evidence stream status offset must match received bytes".into(),
+            ));
+        }
+        if self.next_sequence < self.chunks {
+            return Err(RuntimeError::ManifestRejected(
+                "remote evidence stream status next sequence cannot be behind chunk count".into(),
+            ));
+        }
+        if self.sealed && self.stream_sha256.is_none() {
+            return Err(RuntimeError::ManifestRejected(
+                "sealed remote evidence stream status must include stream hash".into(),
+            ));
+        }
+        if let Some(stream_hash) = &self.stream_sha256 {
+            validate_sha256_hex(stream_hash, "remote evidence stream status hash")?;
         }
         Ok(())
     }
@@ -1036,6 +1186,11 @@ pub trait RemoteAgentPodTransport: Send + Sync {
         &self,
         request: RemoteAgentPodEvidenceStatusRequest,
     ) -> Result<RemoteAgentPodEvidenceStatusResponse, RuntimeError>;
+
+    async fn upload_evidence_stream_chunk(
+        &self,
+        request: RemoteAgentPodEvidenceStreamChunkRequest,
+    ) -> Result<RemoteAgentPodEvidenceStreamChunkResponse, RuntimeError>;
 
     async fn export_workspace(
         &self,
@@ -1266,6 +1421,38 @@ impl RemoteAgentPodTransport for HttpRemoteAgentPodTransport {
             .map_err(|err| {
                 RuntimeError::ManifestRejected(format!(
                     "remote evidence status response was invalid JSON: {err}"
+                ))
+            })?;
+        response.validate_for(&request)?;
+        Ok(response)
+    }
+
+    async fn upload_evidence_stream_chunk(
+        &self,
+        request: RemoteAgentPodEvidenceStreamChunkRequest,
+    ) -> Result<RemoteAgentPodEvidenceStreamChunkResponse, RuntimeError> {
+        request.validate()?;
+        let response = self
+            .client
+            .post(self.route(format!(
+                "sessions/{}/evidence/stream",
+                request.worker_session_id
+            )))
+            .json(&request)
+            .send()
+            .await
+            .map_err(|err| {
+                RuntimeError::Unavailable(format!("remote evidence stream upload failed: {err}"))
+            })?
+            .error_for_status()
+            .map_err(|err| {
+                RuntimeError::Unavailable(format!("remote evidence stream upload rejected: {err}"))
+            })?
+            .json::<RemoteAgentPodEvidenceStreamChunkResponse>()
+            .await
+            .map_err(|err| {
+                RuntimeError::ManifestRejected(format!(
+                    "remote evidence stream response was invalid JSON: {err}"
                 ))
             })?;
         response.validate_for(&request)?;
@@ -2216,6 +2403,36 @@ mod tests {
                         "e".repeat(64)
                     ),
                 }],
+                evidence_streams: vec![RemoteAgentPodEvidenceStreamStatus {
+                    stream_id: "stdout".into(),
+                    next_sequence: 1,
+                    next_offset: 2,
+                    received_bytes: 2,
+                    chunks: 1,
+                    sealed: true,
+                    stream_sha256: Some("a".repeat(64)),
+                    updated_at: Some(Utc::now()),
+                }],
+            };
+            response.validate_for(&request)?;
+            Ok(response)
+        }
+
+        async fn upload_evidence_stream_chunk(
+            &self,
+            request: RemoteAgentPodEvidenceStreamChunkRequest,
+        ) -> Result<RemoteAgentPodEvidenceStreamChunkResponse, RuntimeError> {
+            let response = RemoteAgentPodEvidenceStreamChunkResponse {
+                session_id: request.session_id.clone(),
+                worker_session_id: request.worker_session_id.clone(),
+                stream_id: request.stream_id.clone(),
+                accepted_sequence: request.sequence,
+                accepted_offset: request.offset,
+                accepted_bytes: request.chunk_bytes,
+                stream_sha256: request
+                    .final_chunk
+                    .then(|| sha256_hex(request.chunk_utf8.as_bytes())),
+                lifecycle_events: vec![RemoteAgentPodLifecycleEvent::EvidenceSealed],
             };
             response.validate_for(&request)?;
             Ok(response)
@@ -3120,6 +3337,16 @@ mod tests {
                 stored_bytes: 64,
                 storage_path: "evidence/worker-session-1/a.json".into(),
             }],
+            evidence_streams: vec![RemoteAgentPodEvidenceStreamStatus {
+                stream_id: "stdout".into(),
+                next_sequence: 1,
+                next_offset: 5,
+                received_bytes: 5,
+                chunks: 1,
+                sealed: true,
+                stream_sha256: Some(sha256_hex(b"hello")),
+                updated_at: Some(Utc::now()),
+            }],
         };
 
         response.validate_for(&request).unwrap();
@@ -3146,6 +3373,7 @@ mod tests {
                 stored_bytes: 0,
                 storage_path: String::new(),
             }],
+            evidence_streams: Vec::new(),
         };
 
         let err = response.validate_for(&request).unwrap_err();

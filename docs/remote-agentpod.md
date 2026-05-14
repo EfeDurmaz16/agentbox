@@ -171,8 +171,8 @@ agentbox remote-workspace-apply \
 
 ## Transport Conformance
 
-The daemon models the minimum remote transport contract in code without shipping
-a network adapter yet. A conforming worker must:
+The daemon models the minimum remote transport contract in code and ships an
+HTTPS adapter for the gated worker path. A conforming worker must:
 
 - return a handshake acknowledgement without secret material
 - acknowledge the lifecycle contract before session creation
@@ -181,12 +181,14 @@ a network adapter yet. A conforming worker must:
   execution
 - acknowledge submitted evidence bundle hashes and event counts without secret
   material
+- accept ordered evidence stream chunks only when chunk hashes, offsets, and
+  session ids match
 - emit `KillSwitchAck` and `WorkerDestroyed` for session destruction when the
   kill switch is required
 
 The current test suite uses an in-memory fake transport to prove this schema and
-lifecycle ordering. `RemoteAgentPodProvider` still returns unavailable until a
-real HTTP, SSH, or tunnel adapter exists.
+lifecycle ordering. `RemoteAgentPodProvider` uses the HTTPS adapter when
+`AGENTBOX_REMOTE_AGENTPOD_ENDPOINT` is configured.
 
 An HTTPS transport adapter now exists in the daemon code for the future worker
 API. It posts:
@@ -197,15 +199,15 @@ API. It posts:
 - `POST /sessions/{worker_session_id}/evidence`
 - `GET /sessions/{worker_session_id}/evidence/status?session_id=...`
 - `POST /sessions/{worker_session_id}/evidence/bundle`
+- `POST /sessions/{worker_session_id}/evidence/stream`
 - `POST /sessions/{worker_session_id}/destroy`
 
 The adapter validates the same handshake, create, exec, evidence metadata,
-evidence bundle payload, and lifecycle contracts before returning responses. The
-handshake path now routes
+evidence bundle payload, evidence stream chunk, and lifecycle contracts before
+returning responses. The handshake path now routes
 `ed25519:<challenge-id>:<signature>` acknowledgements through Ed25519 signature
 verification and falls back to the legacy canonical digest verifier for older
-fixtures. It is not wired into `RemoteAgentPodProvider` yet because there is no
-shipped remote worker server.
+fixtures.
 
 Evidence metadata upload identifies the session, worker session, evidence mode,
 SHA-256 bundle hash, event count, and sealed time. Agentbox rejects metadata that
@@ -213,8 +215,9 @@ embeds secret material, carries an invalid bundle hash, or accepts a different
 bundle than the one submitted. The worker also exposes an experimental
 `/evidence/bundle` payload route that requires `--state-dir`, verifies the
 SHA-256 hash against the submitted JSON payload, rejects secret-bearing payloads,
-and stores the bundle under the worker state directory. Streaming evidence is
-still future work.
+and stores the bundle under the worker state directory. The stream route is
+chunked and append-only, but full live event streaming into daemon-side evidence
+readers is still future work.
 
 ## Contract Worker Binary
 
@@ -234,7 +237,8 @@ The worker requires an explicit 32-byte hex Ed25519 seed. It signs handshake
 acknowledgements using the Ed25519 format described above and exposes the same
 `/handshake`, `/sessions`, `/sessions/{worker_session_id}/exec`,
 `/sessions/{worker_session_id}/evidence`,
-`/sessions/{worker_session_id}/evidence/bundle`, and
+`/sessions/{worker_session_id}/evidence/bundle`,
+`/sessions/{worker_session_id}/evidence/stream`, and
 `/sessions/{worker_session_id}/destroy` routes expected by the HTTPS adapter.
 When `--state-dir` is set, created sessions, stopped status, and evidence
 receipt metadata are written to `worker-sessions.json` and loaded again when the
@@ -288,15 +292,22 @@ count, and the bundle root before accepting it. Successful payload storage is
 also recorded on the matching worker session snapshot with the stored bundle
 hash, byte count, and storage path so a restarted worker can prove which bundle
 payloads it accepted.
+The stream route accepts ordered, session-bound UTF-8 evidence chunks with a
+per-chunk SHA-256, explicit offset, and final-chunk marker. The worker rejects
+out-of-order chunks, rejects writes after a stream is sealed, and reports the
+final stream SHA-256 in the acknowledgement and status response. This is the
+first executable append-only stream contract; it is still not a full live event
+bus or bidirectional approval channel.
 Worker routes that mutate session state fail the request if the configured
 state file cannot be serialized, prepared, or written; they do not acknowledge
 state-changing operations as durable when persistence fails.
 The status route returns the matching session status, command supervision
 counters, the last command exit code/timestamp, evidence metadata receipts, and
-stored bundle payload references after binding the caller-provided `session_id`
-to the allocated `worker_session_id`. If a worker restarts from persisted state,
-running command counters are reset to zero because the current contract worker
-does not yet reattach to orphaned OS processes.
+stored bundle payload references, and evidence stream status after binding the
+caller-provided `session_id` to the allocated `worker_session_id`. If a worker
+restarts from persisted state, running command counters are reset to zero
+because the current contract worker does not yet reattach to orphaned OS
+processes.
 When the daemon-side provider creates a remote session, it persists the worker
 endpoint, worker session id, worker identity, and worker evidence endpoint in
 session labels so later exec/destroy calls can route back to the same worker.
@@ -304,10 +315,11 @@ Runtime status refresh for remote sessions uses those labels to query the
 worker evidence-status route instead of treating remote status as unavailable.
 Workspace materialization, workspace export, local apply, worker-side command
 policy, manifest-bound worker approval grants, command supervision counters, and
-session-bound env credential handoff now exist as governed flows. Dynamic
+session-bound env credential handoff now exist as governed flows. Ordered
+evidence stream chunks also exist at the worker contract layer. Dynamic
 approval prompts, file/socket/provider-token credential handoff, full evidence
-streaming, supervised worker restarts, and merge/conflict UX beyond overwrite
-protection remain future work.
+event streaming, supervised worker restarts, and merge/conflict UX beyond
+overwrite protection remain future work.
 
 `scripts/smoke-remote-worker.sh` starts this worker on a random loopback port,
 posts a handshake descriptor, checks the Ed25519 acknowledgement shape, creates
@@ -317,9 +329,10 @@ proves deny-by-default worker policy blocks an unknown `curl` before spawn,
 exports the worker workspace through both direct HTTP and the CLI pullback
 command, applies the pulled workspace to a local directory, uploads a bundle
 metadata receipt, verifies the returned lifecycle evidence, uploads and verifies
-a hash-bound bundle payload, restarts the worker to prove persisted session
-reload, then starts a long-running command and proves destroy sends a kill
-signal that returns exit code `130` plus `KillSwitchAck`.
+a hash-bound bundle payload, uploads ordered evidence stream chunks and verifies
+the sealed stream hash, restarts the worker to prove persisted session reload,
+then starts a long-running command and proves destroy sends a kill signal that
+returns exit code `130` plus `KillSwitchAck`.
 
 ## Lifecycle Contract
 
@@ -361,5 +374,5 @@ implementation.
 
 `remote-agentpod` is now an experimental gated provider. The missing pieces are
 sandboxed remote execution, file/socket/provider-token credential handoff,
-evidence streaming, supervised worker lifecycle, richer workspace merge UX, and
-live HTTPS worker conformance tests.
+full live event streaming, supervised worker lifecycle, richer workspace merge
+UX, and live HTTPS worker conformance tests.
