@@ -1,3 +1,4 @@
+pub mod agit;
 pub mod approval;
 pub mod fides;
 pub mod manager;

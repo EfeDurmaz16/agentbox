@@ -52,7 +52,7 @@ implemented yet.
 | Surface | Status | Notes |
 |---------|--------|-------|
 | FIDES credential authority hook | Shipped | Agentbox exposes a FIDES-compatible credential authority request/decision skeleton without hard dependency on the FIDES runtime. The default hook requires external authority and does not fake approval. |
-| agit evidence lineage | Planned | Agentbox should export session evidence that agit can attach to workspace diffs and commit lineage. No agit adapter is shipped yet. |
+| agit evidence lineage | Shipped skeleton | Agentbox can map runtime audit events into AGIT-style lineage records with optional commit and workspace diff refs. The default publisher requires an external AGIT adapter and does not claim live integration. |
 | Switchboard coordination | Planned | Switchboard can coordinate multiple agents, while Agentbox owns each local runtime boundary. No direct integration is shipped yet. |
 | Aspendos consumer path | Planned | Aspendos-style general agents are target consumers for governed minipods. No bundled Aspendos runtime integration is shipped yet. |
 
