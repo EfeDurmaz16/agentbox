@@ -2548,16 +2548,17 @@ fn cmd_providers() {
     use agentbox_daemon::runtime::registry::RuntimeProviderRegistry;
 
     println!(
-        "{:<18} {:<14} {:<10} {:<18} {:<24} CAPABILITIES",
-        "PROVIDER", "FAMILY", "PLATFORM", "STATUS", "NETWORK"
+        "{:<18} {:<14} {:<10} {:<18} {:<18} {:<24} CAPABILITIES",
+        "PROVIDER", "FAMILY", "PLATFORM", "STATUS", "BRIDGE", "NETWORK"
     );
-    println!("{}", "-".repeat(132));
+    println!("{}", "-".repeat(152));
     println!(
-        "{:<18} {:<14} {:<10} {:<18} {:<24} shim, policy, approval, audit",
+        "{:<18} {:<14} {:<10} {:<18} {:<18} {:<24} shim, policy, approval, audit",
         "direct-host",
         "direct-host",
         std::env::consts::OS,
         "shipped",
+        "unix-socket",
         "command-mediation"
     );
 
@@ -2581,11 +2582,12 @@ fn cmd_providers() {
             .collect::<Vec<_>>()
             .join(", ");
         println!(
-            "{:<18} {:<14} {:<10} {:<18} {:<24} {}",
+            "{:<18} {:<14} {:<10} {:<18} {:<18} {:<24} {}",
             provider.name(),
             format_provider_family(provider.family()),
             provider.platform(),
             format_provider_status(provider.implementation_status()),
+            format_bridge_transports(provider.bridge_transport_kinds()),
             format_network_enforcement(provider.network_enforcement_capabilities()),
             capabilities
         );
@@ -2602,8 +2604,8 @@ fn cmd_providers() {
         "unavailable"
     };
     println!(
-        "{:<18} {:<14} {:<10} {:<18} {:<24} container isolation, shim bridge",
-        "podman", "compat", "linux-vm", podman_status, "none"
+        "{:<18} {:<14} {:<10} {:<18} {:<18} {:<24} container isolation, shim bridge",
+        "podman", "compat", "linux-vm", podman_status, "unix-socket", "none"
     );
 }
 
@@ -2646,6 +2648,27 @@ fn format_network_enforcement(
     capabilities
         .iter()
         .map(|capability| format!("{capability:?}"))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn format_bridge_transports(
+    transports: &[agentbox_daemon::runtime::bridge::HostBridgeTransportKind],
+) -> String {
+    use agentbox_daemon::runtime::bridge::HostBridgeTransportKind;
+
+    if transports.is_empty() {
+        return "none".to_string();
+    }
+
+    transports
+        .iter()
+        .map(|transport| match transport {
+            HostBridgeTransportKind::UnixSocket => "unix-socket",
+            HostBridgeTransportKind::NamedPipe => "named-pipe",
+            HostBridgeTransportKind::Vsock => "vsock",
+            HostBridgeTransportKind::RemoteTunnel => "remote-tunnel",
+        })
         .collect::<Vec<_>>()
         .join(",")
 }
