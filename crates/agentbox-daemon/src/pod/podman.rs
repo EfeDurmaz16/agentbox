@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::fs;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -101,7 +102,7 @@ impl PodmanProvider {
         container: &ContainerSpec,
         spec: &PodSpec,
     ) -> Result<(), PodError> {
-        validate_linux_guest_shim(&self.shim_binary)?;
+        let shim_binary = resolve_linux_guest_shim(&self.shim_binary)?;
 
         let pod_name = Self::pod_name(id);
         let container_name = Self::container_name(id, "workspace");
@@ -123,7 +124,7 @@ impl PodmanProvider {
         args.push("-v".to_string());
         args.push(format!(
             "{}:/usr/local/bin/agentbox-shim:ro",
-            self.shim_binary
+            shim_binary.display()
         ));
 
         // Mount user-specified volumes (workspace, etc.)
@@ -483,7 +484,60 @@ impl PodProvider for PodmanProvider {
     }
 }
 
-fn validate_linux_guest_shim(path: &str) -> Result<(), PodError> {
+fn resolve_linux_guest_shim(configured_path: &str) -> Result<PathBuf, PodError> {
+    let configured = PathBuf::from(configured_path);
+    for candidate in linux_guest_shim_candidates(&configured) {
+        if is_linux_elf(&candidate) {
+            return Ok(candidate);
+        }
+    }
+
+    validate_linux_guest_shim(&configured)?;
+    Ok(configured)
+}
+
+fn linux_guest_shim_candidates(configured_path: &Path) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Ok(path) = std::env::var("AGENTBOX_LINUX_SHIM") {
+        candidates.push(PathBuf::from(path));
+    }
+    candidates.push(configured_path.to_path_buf());
+    candidates.push(configured_path.with_extension("linux"));
+
+    if let Some(target_dir) = infer_target_dir(configured_path) {
+        for triple in [
+            "x86_64-unknown-linux-gnu",
+            "x86_64-unknown-linux-musl",
+            "aarch64-unknown-linux-gnu",
+            "aarch64-unknown-linux-musl",
+        ] {
+            for profile in ["debug", "release"] {
+                candidates.push(target_dir.join(triple).join(profile).join("agentbox-shim"));
+            }
+        }
+    }
+
+    candidates
+}
+
+fn infer_target_dir(configured_path: &Path) -> Option<PathBuf> {
+    let mut current = configured_path.parent();
+    while let Some(dir) = current {
+        if dir.file_name().is_some_and(|name| name == "target") {
+            return Some(dir.to_path_buf());
+        }
+        current = dir.parent();
+    }
+    None
+}
+
+fn is_linux_elf(path: &Path) -> bool {
+    fs::read(path)
+        .map(|magic| magic.starts_with(b"\x7fELF"))
+        .unwrap_or(false)
+}
+
+fn validate_linux_guest_shim(path: &Path) -> Result<(), PodError> {
     let magic = fs::read(path)
         .map_err(|e| PodError::Unavailable(format!("agentbox-shim not readable: {e}")))?;
     if magic.starts_with(b"\x7fELF") {
@@ -495,7 +549,7 @@ fn validate_linux_guest_shim(path: &str) -> Result<(), PodError> {
         ));
     }
     Err(PodError::Unavailable(
-        "configured agentbox-shim is not a Linux ELF binary".into(),
+        "configured agentbox-shim is not a Linux ELF binary; set AGENTBOX_LINUX_SHIM or build a Linux-targeted agentbox-shim artifact".into(),
     ))
 }
 
@@ -607,7 +661,7 @@ mod tests {
         let path = std::env::temp_dir().join(format!("agentbox-shim-elf-{}", std::process::id()));
         fs::write(&path, b"\x7fELFdemo").unwrap();
 
-        validate_linux_guest_shim(&path.to_string_lossy()).unwrap();
+        validate_linux_guest_shim(&path).unwrap();
 
         let _ = fs::remove_file(path);
     }
@@ -618,10 +672,27 @@ mod tests {
         let mut file = fs::File::create(&path).unwrap();
         file.write_all(&[0xcf, 0xfa, 0xed, 0xfe, 0x00]).unwrap();
 
-        let error = validate_linux_guest_shim(&path.to_string_lossy()).unwrap_err();
+        let error = validate_linux_guest_shim(&path).unwrap_err();
 
         assert!(error.to_string().contains("Mach-O"));
         let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn linux_guest_shim_resolves_sidecar_linux_artifact() {
+        let base =
+            std::env::temp_dir().join(format!("agentbox-shim-resolve-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(&base).unwrap();
+        let configured = base.join("agentbox-shim");
+        let linux_artifact = configured.with_extension("linux");
+        fs::write(&configured, &[0xcf, 0xfa, 0xed, 0xfe, 0x00]).unwrap();
+        fs::write(&linux_artifact, b"\x7fELFdemo").unwrap();
+
+        let resolved = resolve_linux_guest_shim(&configured.to_string_lossy()).unwrap();
+
+        assert_eq!(resolved, linux_artifact);
+        let _ = fs::remove_dir_all(base);
     }
 
     #[test]
