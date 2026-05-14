@@ -517,6 +517,79 @@ pub struct LinuxIsolationBenchmarkLayer {
     pub expected_boundary: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LinuxAgentPodExecutionPlan {
+    pub schema_version: i64,
+    pub provider: String,
+    pub session_id: String,
+    pub command_argv: Vec<String>,
+    pub composed_argv: Vec<String>,
+    pub user_namespace: LinuxUserNamespacePlan,
+    pub mount_namespace: LinuxMountNamespacePlan,
+    pub pid_namespace: LinuxPidNamespacePlan,
+    pub cgroup: LinuxCgroupV2Plan,
+    pub seccomp: LinuxSeccompPlan,
+    pub landlock: LinuxLandlockPlan,
+    pub live_env_var: String,
+    pub live_execution_enabled: bool,
+    pub requires_linux: bool,
+    pub security_claim: String,
+}
+
+impl LinuxAgentPodExecutionPlan {
+    pub fn from_minipod_spec(
+        spec: &MinipodSpec,
+        command: &ExecCommand,
+    ) -> Result<Self, RuntimeError> {
+        if command.argv.is_empty() {
+            return Err(RuntimeError::ManifestRejected(
+                "Linux AgentPod execution command cannot be empty".into(),
+            ));
+        }
+
+        let user_namespace = LinuxUserNamespaceLauncher::plan(command)?;
+        let mount_namespace = LinuxMountNamespaceLauncher::plan(spec)?;
+        let pid_namespace = LinuxPidNamespaceLauncher::plan(command)?;
+        let cgroup = LinuxCgroupV2Limiter::plan(&spec.id, &spec.resources)?;
+        let seccomp = LinuxSeccompProfileLoader::plan(&spec.seccomp)?;
+        let landlock = LinuxLandlockRuleset::plan(spec)?;
+
+        let mut composed_argv = vec![
+            "unshare".to_string(),
+            "--user".to_string(),
+            "--map-root-user".to_string(),
+            "--setgroups=deny".to_string(),
+            "--mount".to_string(),
+            "--propagation".to_string(),
+            mount_namespace.propagation.clone(),
+        ];
+        composed_argv.extend(LinuxPidNamespaceLauncher::command_args(&pid_namespace));
+
+        Ok(Self {
+            schema_version: 1,
+            provider: "agentpod-linux".into(),
+            session_id: spec.id.clone(),
+            command_argv: command.argv.clone(),
+            composed_argv,
+            user_namespace,
+            mount_namespace,
+            pid_namespace,
+            cgroup,
+            seccomp,
+            landlock,
+            live_env_var: "AGENTBOX_LINUX_NATIVE".into(),
+            live_execution_enabled: linux_native_execution_enabled(),
+            requires_linux: true,
+            security_claim: "prototype namespace/resource execution plan; not a complete sandbox"
+                .into(),
+        })
+    }
+
+    pub fn runnable_on_current_host(&self) -> bool {
+        cfg!(target_os = "linux") && self.live_execution_enabled
+    }
+}
+
 impl LinuxIsolationBenchmarkPlan {
     pub fn from_minipod_spec(
         spec: &MinipodSpec,
@@ -636,6 +709,13 @@ fn prefixed_command(binary: &str, args: Vec<String>) -> Vec<String> {
     let mut argv = vec![binary.to_string()];
     argv.extend(args);
     argv
+}
+
+fn linux_native_execution_enabled() -> bool {
+    matches!(
+        std::env::var("AGENTBOX_LINUX_NATIVE").as_deref(),
+        Ok("1") | Ok("true") | Ok("yes")
+    )
 }
 
 fn cpu_shares_to_cgroup_weight(cpu_shares: u32) -> u32 {
@@ -1033,6 +1113,58 @@ mod tests {
             .expected_boundary
             .contains("resource write plan only"));
         assert_eq!(plan.layers[6].argv, vec!["ptrace", "bpf"]);
+    }
+
+    #[test]
+    fn agentpod_execution_plan_composes_linux_native_boundaries() {
+        let spec = MinipodSpec::for_agent_task("hermes", "/tmp/agentbox-work");
+        let command = command(&["/bin/true"]);
+
+        let plan = LinuxAgentPodExecutionPlan::from_minipod_spec(&spec, &command).unwrap();
+
+        assert_eq!(plan.schema_version, 1);
+        assert_eq!(plan.provider, "agentpod-linux");
+        assert_eq!(plan.session_id, spec.id);
+        assert_eq!(plan.command_argv, vec!["/bin/true"]);
+        assert_eq!(plan.live_env_var, "AGENTBOX_LINUX_NATIVE");
+        assert!(plan.requires_linux);
+        assert!(plan.composed_argv.starts_with(&[
+            "unshare".into(),
+            "--user".into(),
+            "--map-root-user".into(),
+            "--setgroups=deny".into(),
+            "--mount".into(),
+        ]));
+        assert!(plan
+            .composed_argv
+            .windows(2)
+            .any(|window| window == ["--pid", "--fork"]));
+        assert!(plan.security_claim.contains("prototype"));
+        assert_eq!(plan.cgroup.cgroup_name, format!("agentbox-{}", spec.id));
+        assert!(plan.landlock.default_deny);
+        assert!(!plan.seccomp.requires_loader);
+    }
+
+    #[test]
+    fn agentpod_execution_plan_rejects_empty_commands() {
+        let spec = MinipodSpec::for_agent_task("hermes", "/tmp/agentbox-work");
+
+        let err = LinuxAgentPodExecutionPlan::from_minipod_spec(&spec, &command(&[])).unwrap_err();
+
+        assert!(err.to_string().contains("cannot be empty"));
+    }
+
+    #[test]
+    fn agentpod_execution_plan_is_not_live_without_explicit_env_gate() {
+        let spec = MinipodSpec::for_agent_task("hermes", "/tmp/agentbox-work");
+        let command = command(&["/bin/true"]);
+
+        let plan = LinuxAgentPodExecutionPlan::from_minipod_spec(&spec, &command).unwrap();
+
+        if std::env::var("AGENTBOX_LINUX_NATIVE").is_err() {
+            assert!(!plan.live_execution_enabled);
+            assert!(!plan.runnable_on_current_host());
+        }
     }
 
     #[test]

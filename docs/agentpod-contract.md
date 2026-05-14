@@ -69,6 +69,14 @@ Provider status must stay honest:
 - `descriptor only`: metadata exists, execution returns unavailable
 - `planned`: product direction only
 
+`agentpod-linux` now has a composed native execution plan in code. The plan
+combines rootless user namespace, mount namespace metadata, PID namespace,
+cgroup v2 resource writes, seccomp profile metadata, and Landlock ruleset
+metadata into one object. This is still a prototype primitive: live execution
+must be explicitly gated with `AGENTBOX_LINUX_NATIVE`, and it is not a complete
+sandbox claim until the loaders and provider lifecycle are wired and tested on
+Linux.
+
 ## Adaptive Runtime Selection
 
 Agentbox should choose or recommend a provider by task risk.
