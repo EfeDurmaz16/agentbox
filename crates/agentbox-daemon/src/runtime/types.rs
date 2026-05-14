@@ -4,6 +4,8 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use ulid::Ulid;
 
+use crate::audit::AuditEvent;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RuntimeCapability {
     ContainerIsolation,
@@ -306,6 +308,77 @@ impl RuntimeSession {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionEvidenceEvent {
+    pub audit_event_id: String,
+    pub timestamp: String,
+    pub bucket: String,
+    pub decision: String,
+    pub command: String,
+    pub event_hash: Option<String>,
+}
+
+impl From<&AuditEvent> for SessionEvidenceEvent {
+    fn from(event: &AuditEvent) -> Self {
+        Self {
+            audit_event_id: event.id.clone(),
+            timestamp: event.timestamp.clone(),
+            bucket: event.bucket.clone(),
+            decision: event.decision.clone(),
+            command: event.command.clone(),
+            event_hash: event.event_hash.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionEvidenceBundle {
+    pub schema_version: i64,
+    pub bundle_id: String,
+    pub session_id: String,
+    pub session_name: String,
+    pub provider: String,
+    pub platform: String,
+    pub status: RuntimeStatus,
+    pub manifest: MinipodSpec,
+    pub approvals: Vec<SessionEvidenceEvent>,
+    pub commands: Vec<SessionEvidenceEvent>,
+    pub boundary_events: Vec<SessionEvidenceEvent>,
+    pub generated_at: DateTime<Utc>,
+}
+
+impl SessionEvidenceBundle {
+    pub fn from_session_events(session: &RuntimeSession, events: &[AuditEvent]) -> Self {
+        let mut approvals = Vec::new();
+        let mut commands = Vec::new();
+        let mut boundary_events = Vec::new();
+
+        for event in events {
+            let evidence_event = SessionEvidenceEvent::from(event);
+            match event.bucket.as_str() {
+                "approve" => approvals.push(evidence_event),
+                "allow" | "block" => commands.push(evidence_event),
+                _ => boundary_events.push(evidence_event),
+            }
+        }
+
+        Self {
+            schema_version: 1,
+            bundle_id: Ulid::new().to_string(),
+            session_id: session.id.clone(),
+            session_name: session.name.clone(),
+            provider: session.provider.clone(),
+            platform: session.platform.clone(),
+            status: session.status.clone(),
+            manifest: session.spec.clone(),
+            approvals,
+            commands,
+            boundary_events,
+            generated_at: Utc::now(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExecCommand {
     pub argv: Vec<String>,
     pub working_dir: Option<String>,
@@ -493,6 +566,59 @@ mod tests {
         assert!(encoded.contains("\"network\""));
         assert!(encoded.contains("\"credentials\""));
         assert!(encoded.contains("\"agentbox.provider\""));
+    }
+
+    #[test]
+    fn session_evidence_bundle_groups_audit_events() {
+        let spec = MinipodSpec::for_agent_task("openclaw", "/tmp/agentbox-work");
+        let session = RuntimeSession::new(
+            spec.name.clone(),
+            "agentpod-linux".into(),
+            "linux".into(),
+            spec,
+        );
+        let events = vec![
+            AuditEvent::new(
+                1,
+                Some("openclaw".into()),
+                format!("runtime.create {}", session.id),
+                "/tmp/agentbox-work".into(),
+                "runtime".into(),
+                "created".into(),
+                None,
+                Some("agentpod-linux".into()),
+            ),
+            AuditEvent::new(
+                1,
+                Some("openclaw".into()),
+                "git push origin main".into(),
+                "/tmp/agentbox-work".into(),
+                "approve".into(),
+                "approved".into(),
+                Some(1200),
+                Some("agentbox-shim".into()),
+            ),
+            AuditEvent::new(
+                1,
+                Some("openclaw".into()),
+                "rm -rf /".into(),
+                "/tmp/agentbox-work".into(),
+                "block".into(),
+                "blocked".into(),
+                None,
+                Some("agentbox-shim".into()),
+            ),
+        ];
+
+        let bundle = SessionEvidenceBundle::from_session_events(&session, &events);
+
+        assert_eq!(bundle.schema_version, 1);
+        assert_eq!(bundle.session_id, session.id);
+        assert_eq!(bundle.provider, "agentpod-linux");
+        assert_eq!(bundle.approvals.len(), 1);
+        assert_eq!(bundle.commands.len(), 1);
+        assert_eq!(bundle.boundary_events.len(), 1);
+        assert_eq!(bundle.manifest.agent.name, "openclaw");
     }
 
     #[test]

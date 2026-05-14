@@ -131,6 +131,10 @@ enum Commands {
         /// Verify the audit hash chain instead of exporting rows
         #[arg(long)]
         verify: bool,
+
+        /// Export a session-scoped evidence bundle for a persisted minipod id
+        #[arg(long)]
+        session: Option<String>,
     },
     /// Generate a governed minipod manifest for an agent task
     MinipodSpec {
@@ -1757,7 +1761,7 @@ fn cmd_history(show_all: bool, bucket_filter: Option<String>, json_output: bool)
     }
 }
 
-fn cmd_evidence(limit: usize, verify: bool) {
+fn cmd_evidence(limit: usize, verify: bool, session: Option<String>) {
     let db_path = audit_db_path();
     if !db_path.exists() {
         eprintln!("no audit log found at {}", db_path.display());
@@ -1793,6 +1797,11 @@ fn cmd_evidence(limit: usize, verify: bool) {
             eprintln!("- {}: {}", violation.event_id, violation.reason);
         }
         std::process::exit(1);
+    }
+
+    if let Some(session_id) = session {
+        cmd_session_evidence_bundle(&db_path, &session_id, limit);
+        return;
     }
 
     let conn = Connection::open(&db_path).expect("failed to open audit db");
@@ -1836,6 +1845,73 @@ fn cmd_evidence(limit: usize, verify: bool) {
             }
         }
     }
+}
+
+fn cmd_session_evidence_bundle(db_path: &PathBuf, session_id: &str, limit: usize) {
+    use agentbox_daemon::audit::AuditEvent;
+    use agentbox_daemon::config;
+    use agentbox_daemon::runtime::session::RuntimeSessionStore;
+    use agentbox_daemon::runtime::types::SessionEvidenceBundle;
+
+    let config = config::load().unwrap_or_else(|e| {
+        eprintln!("error: failed to load Agentbox config: {}", e);
+        std::process::exit(1);
+    });
+    let store = RuntimeSessionStore::new(config.session_store_path);
+    let session = store.get(session_id).unwrap_or_else(|e| {
+        eprintln!("error: failed to read runtime session store: {}", e);
+        std::process::exit(1);
+    });
+    let Some(session) = session else {
+        eprintln!("error: minipod session not found: {}", session_id);
+        eprintln!("hint: session bundle export currently requires a persisted active session");
+        std::process::exit(1);
+    };
+
+    let conn = Connection::open(db_path).expect("failed to open audit db");
+    ensure_evidence_columns(&conn);
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, schema_version, timestamp, agent_pid, agent_name, command, cwd,
+                    bucket, decision, user_response_ms, parent_process, prev_hash, event_hash
+             FROM audit_log
+             WHERE command LIKE ?1 OR agent_name = ?2
+             ORDER BY timestamp ASC
+             LIMIT ?3",
+        )
+        .expect("failed to prepare session evidence query");
+    let pattern = format!("%{}%", session.id);
+    let rows = stmt
+        .query_map((&pattern, &session.spec.agent.name, limit as i64), |row| {
+            Ok(AuditEvent {
+                id: row.get(0)?,
+                schema_version: row.get(1)?,
+                timestamp: row.get(2)?,
+                agent_pid: row.get(3)?,
+                agent_name: row.get(4)?,
+                command: agentbox_daemon::audit::redact_sensitive_text(&row.get::<_, String>(5)?),
+                cwd: agentbox_daemon::audit::redact_sensitive_text(&row.get::<_, String>(6)?),
+                bucket: row.get(7)?,
+                decision: row.get(8)?,
+                user_response_ms: row.get(9)?,
+                parent_process: row
+                    .get::<_, Option<String>>(10)?
+                    .map(|value| agentbox_daemon::audit::redact_sensitive_text(&value)),
+                prev_hash: row.get(11)?,
+                event_hash: row.get(12)?,
+            })
+        })
+        .expect("failed to query session evidence");
+
+    let events = rows.collect::<Result<Vec<_>, _>>().unwrap_or_else(|e| {
+        eprintln!("failed to read session evidence row: {}", e);
+        std::process::exit(1);
+    });
+    let bundle = SessionEvidenceBundle::from_session_events(&session, &events);
+    println!(
+        "{}",
+        serde_json::to_string(&bundle).expect("failed to serialize session bundle")
+    );
 }
 
 fn cmd_minipod_spec(
@@ -2141,7 +2217,11 @@ async fn main() {
         Commands::PolicySimulate { command } => cmd_policy_simulate(command),
         Commands::PolicyExplain { command } => cmd_policy_explain(command),
         Commands::History { all, bucket, json } => cmd_history(all, bucket, json),
-        Commands::Evidence { limit, verify } => cmd_evidence(limit, verify),
+        Commands::Evidence {
+            limit,
+            verify,
+            session,
+        } => cmd_evidence(limit, verify, session),
         Commands::MinipodSpec {
             agent,
             workspace,
