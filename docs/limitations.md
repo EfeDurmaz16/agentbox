@@ -40,16 +40,17 @@ Use this mode as a compatibility backend while AgentPod native providers mature.
 ## Native AgentPod Descriptors
 
 `agentpod-macos`, `agentpod-linux`, and `agentpod-windows` currently describe
-planned capability surfaces. They intentionally return unavailable for
-execution.
+planned capability surfaces. `agentpod-linux` has a gated prototype executor on
+Linux, and `agentpod-macos` has a native plan compiler. macOS and Windows
+provider execution intentionally returns unavailable.
 
 Limitations:
 
-- no native provider is shipped as an enforcement backend yet
+- no native provider is shipped as a complete enforcement backend yet
 - planned primitives do not imply active protection
 - provider metadata is not a security boundary
-- tests currently prove honest unavailability and metadata, not live kernel or
-  OS enforcement
+- default tests prove honest unavailability, metadata, and plan compilers, not
+  live kernel or OS enforcement
 
 Use these descriptors to understand direction and plan integrations. Do not
 market them as shipped isolation.

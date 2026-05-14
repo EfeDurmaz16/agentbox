@@ -81,7 +81,14 @@ The plan can be inspected without execution:
 
 ```sh
 agentbox native-plan --provider agentpod-linux -- /bin/true
+agentbox native-plan --provider agentpod-macos -- /bin/true
 ```
+
+The macOS plan compiler emits the VM cell, host bridge, Endpoint Security,
+Network Extension, entitlement, and evidence shape. It remains a plan compiler:
+provider execution is still unavailable until the Apple Virtualization runner,
+signed system extension, Network Extension lifecycle, and live enforcement tests
+exist.
 
 The Rust daemon also contains a prototype Linux executor function for that plan.
 It refuses to run unless `AGENTBOX_LINUX_NATIVE=1` is set on a Linux host, and

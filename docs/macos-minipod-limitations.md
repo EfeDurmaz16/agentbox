@@ -74,8 +74,18 @@ The macOS native provider should eventually own:
   state, cloud CLIs, and local services.
 - Tamper-evident evidence for both allowed and denied boundary crossings.
 
-Until those pieces exist, Agentbox should describe macOS native enforcement as a
-planned provider descriptor, not as shipped support.
+Agentbox now exposes the planned macOS shape through:
+
+```sh
+agentbox native-plan --provider agentpod-macos -- /bin/true
+```
+
+That command is a compiler for the VM cell, Endpoint Security, Network
+Extension, entitlement, host bridge, and evidence surfaces. It does not launch a
+VM, install a system extension, activate Network Extension filtering, or enforce
+host file/network decisions. Until those pieces exist, Agentbox should describe
+macOS native enforcement as a provider descriptor with a plan compiler, not as
+shipped support.
 
 See [macOS Endpoint Security enforcement design](macos-endpoint-security.md) and
 [macOS system extension scaffold plan](macos-system-extension-scaffold.md) for

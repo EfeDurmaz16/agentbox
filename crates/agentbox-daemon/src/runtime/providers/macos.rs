@@ -1,0 +1,302 @@
+use serde::{Deserialize, Serialize};
+
+use crate::runtime::bridge::HostBridgeTransportKind;
+use crate::runtime::provider::RuntimeError;
+use crate::runtime::types::{ExecCommand, MinipodSpec, MountKind, MountMode, NetworkMode};
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MacOsVirtualizationCellPlan {
+    pub schema_version: i64,
+    pub bundle_id: String,
+    pub guest_os: String,
+    pub cpu_count: u32,
+    pub memory_bytes: u64,
+    pub workspace_host_path: String,
+    pub workspace_guest_path: String,
+    pub shared_directories: Vec<MacOsSharedDirectoryPlan>,
+    pub host_bridge: MacOsHostBridgePlan,
+    pub requires_apple_virtualization: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MacOsSharedDirectoryPlan {
+    pub host_path: String,
+    pub guest_path: String,
+    pub read_only: bool,
+    pub kind: MountKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MacOsHostBridgePlan {
+    pub transport: HostBridgeTransportKind,
+    pub guest_socket_path: String,
+    pub policy_endpoint: String,
+    pub evidence_endpoint: String,
+}
+
+impl MacOsVirtualizationCellPlan {
+    pub fn from_minipod_spec(spec: &MinipodSpec) -> Result<Self, RuntimeError> {
+        if spec.id.trim().is_empty() {
+            return Err(RuntimeError::ManifestRejected(
+                "macOS AgentPod session id cannot be empty".into(),
+            ));
+        }
+        if spec.resources.memory_bytes == 0 {
+            return Err(RuntimeError::ManifestRejected(
+                "macOS AgentPod VM memory limit cannot be zero".into(),
+            ));
+        }
+        if spec.filesystem.workspace_host_path.as_os_str().is_empty() {
+            return Err(RuntimeError::ManifestRejected(
+                "macOS AgentPod workspace host path cannot be empty".into(),
+            ));
+        }
+
+        let mut shared_directories = vec![MacOsSharedDirectoryPlan {
+            host_path: spec.filesystem.workspace_host_path.display().to_string(),
+            guest_path: spec.filesystem.workspace_guest_path.clone(),
+            read_only: false,
+            kind: MountKind::Workspace,
+        }];
+        shared_directories.extend(spec.filesystem.mounts.iter().map(|mount| {
+            MacOsSharedDirectoryPlan {
+                host_path: mount.host_path.display().to_string(),
+                guest_path: mount.guest_path.clone(),
+                read_only: matches!(mount.mode, MountMode::ReadOnly),
+                kind: mount.kind.clone(),
+            }
+        }));
+
+        Ok(Self {
+            schema_version: 1,
+            bundle_id: format!("dev.agentbox.agentpod.{}", spec.id),
+            guest_os: "linux".into(),
+            cpu_count: cpu_shares_to_vcpu(spec.resources.cpu_shares),
+            memory_bytes: spec.resources.memory_bytes,
+            workspace_host_path: spec.filesystem.workspace_host_path.display().to_string(),
+            workspace_guest_path: spec.filesystem.workspace_guest_path.clone(),
+            shared_directories,
+            host_bridge: MacOsHostBridgePlan {
+                transport: HostBridgeTransportKind::Vsock,
+                guest_socket_path: "/run/agentbox/bridge.sock".into(),
+                policy_endpoint: "agentbox.policy.v1.Decide".into(),
+                evidence_endpoint: "agentbox.evidence.v1.Append".into(),
+            },
+            requires_apple_virtualization: true,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MacOsEndpointSecurityPlan {
+    pub schema_version: i64,
+    pub subscribe_events: Vec<String>,
+    pub protected_paths: Vec<MacOsProtectedPathPlan>,
+    pub deny_home_by_default: bool,
+    pub requires_system_extension: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MacOsProtectedPathPlan {
+    pub path: String,
+    pub reason: String,
+}
+
+impl MacOsEndpointSecurityPlan {
+    pub fn from_minipod_spec(spec: &MinipodSpec) -> Self {
+        Self {
+            schema_version: 1,
+            subscribe_events: vec![
+                "ES_EVENT_TYPE_AUTH_EXEC".into(),
+                "ES_EVENT_TYPE_AUTH_OPEN".into(),
+                "ES_EVENT_TYPE_AUTH_CREATE".into(),
+                "ES_EVENT_TYPE_AUTH_RENAME".into(),
+                "ES_EVENT_TYPE_AUTH_UNLINK".into(),
+            ],
+            protected_paths: spec
+                .filesystem
+                .protected_paths
+                .iter()
+                .map(|path| MacOsProtectedPathPlan {
+                    path: path.path.display().to_string(),
+                    reason: path.reason.clone(),
+                })
+                .collect(),
+            deny_home_by_default: spec.filesystem.deny_home_by_default,
+            requires_system_extension: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MacOsNetworkExtensionPlan {
+    pub schema_version: i64,
+    pub mode: NetworkMode,
+    pub allowed_domains: Vec<String>,
+    pub denied_domains: Vec<String>,
+    pub allow_localhost: bool,
+    pub requires_network_extension: bool,
+}
+
+impl MacOsNetworkExtensionPlan {
+    pub fn from_minipod_spec(spec: &MinipodSpec) -> Self {
+        Self {
+            schema_version: 1,
+            mode: spec.network.mode.clone(),
+            allowed_domains: spec.network.allowed_domains.clone(),
+            denied_domains: spec.network.denied_domains.clone(),
+            allow_localhost: spec.network.allow_localhost,
+            requires_network_extension: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MacOsAgentPodExecutionPlan {
+    pub schema_version: i64,
+    pub provider: String,
+    pub session_id: String,
+    pub command_argv: Vec<String>,
+    pub virtualization: MacOsVirtualizationCellPlan,
+    pub endpoint_security: MacOsEndpointSecurityPlan,
+    pub network_extension: MacOsNetworkExtensionPlan,
+    pub required_entitlements: Vec<String>,
+    pub live_env_var: String,
+    pub live_execution_enabled: bool,
+    pub requires_macos: bool,
+    pub security_claim: String,
+}
+
+impl MacOsAgentPodExecutionPlan {
+    pub fn from_minipod_spec(
+        spec: &MinipodSpec,
+        command: &ExecCommand,
+    ) -> Result<Self, RuntimeError> {
+        if command.argv.is_empty() {
+            return Err(RuntimeError::ManifestRejected(
+                "macOS AgentPod execution command cannot be empty".into(),
+            ));
+        }
+
+        Ok(Self {
+            schema_version: 1,
+            provider: "agentpod-macos".into(),
+            session_id: spec.id.clone(),
+            command_argv: command.argv.clone(),
+            virtualization: MacOsVirtualizationCellPlan::from_minipod_spec(spec)?,
+            endpoint_security: MacOsEndpointSecurityPlan::from_minipod_spec(spec),
+            network_extension: MacOsNetworkExtensionPlan::from_minipod_spec(spec),
+            required_entitlements: vec![
+                "com.apple.security.virtualization".into(),
+                "com.apple.developer.endpoint-security.client".into(),
+                "com.apple.developer.networking.networkextension".into(),
+            ],
+            live_env_var: "AGENTBOX_MACOS_NATIVE".into(),
+            live_execution_enabled: macos_native_execution_enabled(),
+            requires_macos: true,
+            security_claim: "VM cell plan plus host ES/NE enforcement plan; execution is not wired"
+                .into(),
+        })
+    }
+
+    pub fn runnable_on_current_host(&self) -> bool {
+        cfg!(target_os = "macos") && self.live_execution_enabled
+    }
+}
+
+pub fn macos_native_execution_enabled() -> bool {
+    matches!(std::env::var("AGENTBOX_MACOS_NATIVE").as_deref(), Ok("1"))
+}
+
+fn cpu_shares_to_vcpu(cpu_shares: u32) -> u32 {
+    let vcpus = (cpu_shares.max(1) as u64).div_ceil(2048);
+    vcpus.clamp(1, 8) as u32
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::runtime::types::{MountRule, ResourcePolicy};
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+
+    fn command(argv: &[&str]) -> ExecCommand {
+        ExecCommand {
+            argv: argv.iter().map(|arg| arg.to_string()).collect(),
+            working_dir: None,
+            env: HashMap::new(),
+            timeout_seconds: None,
+        }
+    }
+
+    #[test]
+    fn virtualization_plan_maps_agentpod_manifest_to_vm_cell() {
+        let mut spec = MinipodSpec::for_agent_task("codex", "/tmp/agentbox-work");
+        spec.resources = ResourcePolicy {
+            memory_bytes: 2_147_483_648,
+            cpu_shares: 4096,
+            timeout_seconds: Some(30),
+        };
+        spec.filesystem.mounts.push(MountRule {
+            host_path: PathBuf::from("/tmp/agentbox-ro"),
+            guest_path: "/ro".into(),
+            mode: MountMode::ReadOnly,
+            kind: MountKind::ReadOnlyHost,
+        });
+
+        let plan = MacOsVirtualizationCellPlan::from_minipod_spec(&spec).unwrap();
+
+        assert_eq!(plan.schema_version, 1);
+        assert_eq!(plan.bundle_id, format!("dev.agentbox.agentpod.{}", spec.id));
+        assert_eq!(plan.guest_os, "linux");
+        assert_eq!(plan.cpu_count, 2);
+        assert_eq!(plan.memory_bytes, 2_147_483_648);
+        assert_eq!(plan.workspace_guest_path, "/workspace");
+        assert_eq!(plan.host_bridge.transport, HostBridgeTransportKind::Vsock);
+        assert!(plan.requires_apple_virtualization);
+        assert_eq!(plan.shared_directories.len(), 2);
+        assert!(!plan.shared_directories[0].read_only);
+        assert!(plan.shared_directories[1].read_only);
+    }
+
+    #[test]
+    fn macos_execution_plan_composes_vm_host_enforcement_and_network() {
+        let spec = MinipodSpec::for_agent_task("hermes", "/tmp/agentbox-work");
+        let plan =
+            MacOsAgentPodExecutionPlan::from_minipod_spec(&spec, &command(&["/bin/true"])).unwrap();
+
+        assert_eq!(plan.schema_version, 1);
+        assert_eq!(plan.provider, "agentpod-macos");
+        assert_eq!(plan.session_id, spec.id);
+        assert_eq!(plan.command_argv, vec!["/bin/true"]);
+        assert_eq!(plan.live_env_var, "AGENTBOX_MACOS_NATIVE");
+        assert!(plan.requires_macos);
+        assert!(plan
+            .required_entitlements
+            .contains(&"com.apple.security.virtualization".into()));
+        assert!(plan.endpoint_security.requires_system_extension);
+        assert!(plan.network_extension.requires_network_extension);
+        assert!(plan.security_claim.contains("execution is not wired"));
+    }
+
+    #[test]
+    fn macos_execution_plan_rejects_empty_commands() {
+        let spec = MinipodSpec::for_agent_task("hermes", "/tmp/agentbox-work");
+
+        let err = MacOsAgentPodExecutionPlan::from_minipod_spec(&spec, &command(&[])).unwrap_err();
+
+        assert!(err.to_string().contains("cannot be empty"));
+    }
+
+    #[test]
+    fn macos_execution_plan_is_not_live_without_explicit_env_gate() {
+        let spec = MinipodSpec::for_agent_task("hermes", "/tmp/agentbox-work");
+        let plan =
+            MacOsAgentPodExecutionPlan::from_minipod_spec(&spec, &command(&["/bin/true"])).unwrap();
+
+        if std::env::var("AGENTBOX_MACOS_NATIVE").is_err() {
+            assert!(!plan.live_execution_enabled);
+            assert!(!plan.runnable_on_current_host());
+        }
+    }
+}

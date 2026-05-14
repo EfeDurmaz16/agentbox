@@ -102,13 +102,16 @@ Every failure mode should produce an evidence event if the daemon is reachable.
 
 ## First Implementation Slice
 
-The first code slice should be a descriptor and protocol scaffold, not a
-privileged extension:
+The first code slice is a descriptor and protocol scaffold, not a privileged
+extension:
 
 1. Add `agentpod-macos` primitive descriptors for Endpoint Security and Network
    Extension.
-2. Add a local event schema for file and exec authorization requests.
-3. Add tests that unknown macOS enforcement returns unavailable.
-4. Add `agentbox doctor` rows for macOS entitlement/extension readiness.
+2. Add a native plan compiler that emits Apple Virtualization, Endpoint
+   Security, Network Extension, entitlement, host bridge, and evidence
+   requirements without executing them.
+3. Add a local event schema for file and exec authorization requests.
+4. Add tests that unknown macOS enforcement returns unavailable.
+5. Add `agentbox doctor` rows for macOS entitlement/extension readiness.
 
 Only after that should a separate macOS system extension target be added.

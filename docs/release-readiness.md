@@ -62,7 +62,9 @@ CI, run them manually and record the reason.
 
 - [ ] `agentbox minipod-spec hermes --workspace .` emits valid JSON.
 - [ ] `scripts/demo-autonomous-agent.sh` passes.
-- [ ] Native AgentPod providers remain unavailable until live enforcement lands.
+- [ ] macOS native plan compiler output is tested without claiming execution.
+- [ ] Native AgentPod providers remain unavailable until live enforcement lands,
+      except explicitly gated Linux prototype runs.
 - [ ] Podman compatibility is marked experimental or unavailable honestly.
 - [ ] Podman live smoke is run only on hosts where Podman is installed.
 - [ ] `scripts/smoke-podman-bridge.sh` proves daemon socket visibility and shim

@@ -535,7 +535,7 @@ enum Commands {
     },
     /// Generate a native provider execution plan without running it
     NativePlan {
-        /// Native provider: agentpod-linux
+        /// Native provider: agentpod-linux or agentpod-macos
         #[arg(long = "provider", default_value = "agentpod-linux")]
         provider: String,
 
@@ -4790,14 +4790,15 @@ fn cmd_native_plan(
     command: Vec<String>,
 ) {
     use agentbox_daemon::runtime::providers::linux::LinuxAgentPodExecutionPlan;
+    use agentbox_daemon::runtime::providers::macos::MacOsAgentPodExecutionPlan;
     use agentbox_daemon::runtime::types::{ExecCommand, MinipodSpec};
 
-    if provider != "agentpod-linux" {
+    if !matches!(provider.as_str(), "agentpod-linux" | "agentpod-macos") {
         eprintln!(
             "error: native plan provider `{}` is not supported yet",
             provider
         );
-        eprintln!("hint: supported value: agentpod-linux");
+        eprintln!("hint: supported values: agentpod-linux, agentpod-macos");
         std::process::exit(1);
     }
     if command.is_empty() {
@@ -4815,7 +4816,7 @@ fn cmd_native_plan(
     let mut spec = MinipodSpec::for_agent_task_with_profile(agent_name, &workspace, agent_profile);
     spec.risk = parse_agentpod_risk(&risk);
     spec.labels
-        .insert("agentbox.provider".into(), "agentpod-linux".into());
+        .insert("agentbox.provider".into(), provider.clone());
 
     let exec = ExecCommand {
         argv: command,
@@ -4823,10 +4824,23 @@ fn cmd_native_plan(
         env: HashMap::new(),
         timeout_seconds: None,
     };
-    let plan = LinuxAgentPodExecutionPlan::from_minipod_spec(&spec, &exec).unwrap_or_else(|e| {
-        eprintln!("error: failed to build native AgentPod plan: {}", e);
-        std::process::exit(1);
-    });
+    let plan = match provider.as_str() {
+        "agentpod-linux" => serde_json::to_value(
+            LinuxAgentPodExecutionPlan::from_minipod_spec(&spec, &exec).unwrap_or_else(|e| {
+                eprintln!("error: failed to build Linux native AgentPod plan: {}", e);
+                std::process::exit(1);
+            }),
+        )
+        .expect("failed to serialize Linux native AgentPod plan"),
+        "agentpod-macos" => serde_json::to_value(
+            MacOsAgentPodExecutionPlan::from_minipod_spec(&spec, &exec).unwrap_or_else(|e| {
+                eprintln!("error: failed to build macOS native AgentPod plan: {}", e);
+                std::process::exit(1);
+            }),
+        )
+        .expect("failed to serialize macOS native AgentPod plan"),
+        _ => unreachable!("provider was validated above"),
+    };
 
     println!(
         "{}",

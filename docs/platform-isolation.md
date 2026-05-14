@@ -62,7 +62,7 @@ The Podman path should become credible only when live smoke tests prove:
 
 ## macOS AgentPod
 
-Status: descriptor only.
+Status: descriptor plus plan compiler.
 
 The macOS provider should combine three surfaces:
 
@@ -70,8 +70,11 @@ The macOS provider should combine three surfaces:
 - Endpoint Security for host process and filesystem authorization
 - Network Extension for egress governance
 
-Until the system extension and entitlement flow exist, `agentpod-macos` must
-remain unavailable for execution.
+`agentbox native-plan --provider agentpod-macos -- <cmd>` emits the planned VM
+cell, host bridge, Endpoint Security event, Network Extension, and entitlement
+shape without running anything. Until the VM runner, system extension,
+entitlement flow, Network Extension lifecycle, and live allow/deny tests exist,
+`agentpod-macos` must remain unavailable for execution.
 
 ## Linux AgentPod
 

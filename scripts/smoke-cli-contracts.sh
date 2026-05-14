@@ -44,6 +44,14 @@ log "checking high-risk provider recommendation truth"
 validate_json "$TMPDIR/run-plan-high.json" \
   "data.get('schema_version') == 1 and data.get('selected_provider', {}).get('name', '').startswith('agentpod-') and any('not generally runnable' in warning for warning in data.get('warnings', []))"
 
+log "checking macOS native plan compiler truth"
+AGENTBOX_MACOS_NATIVE= "${CLI[@]}" native-plan \
+  --provider agentpod-macos \
+  --workspace "$TMPDIR" \
+  -- /bin/true >"$TMPDIR/native-plan-macos.json"
+validate_json "$TMPDIR/native-plan-macos.json" \
+  "data.get('schema_version') == 1 and data.get('provider') == 'agentpod-macos' and data.get('virtualization', {}).get('requires_apple_virtualization') == True and data.get('endpoint_security', {}).get('requires_system_extension') == True and data.get('network_extension', {}).get('requires_network_extension') == True and data.get('live_env_var') == 'AGENTBOX_MACOS_NATIVE' and data.get('live_execution_enabled') == False and 'execution is not wired' in data.get('security_claim', '')"
+
 log "checking remote descriptor JSON"
 "${CLI[@]}" remote-descriptor \
   --endpoint https://worker.example.com/agentpod \

@@ -240,13 +240,15 @@ their probe command before starting the workspace agent container.
 
 **Current compatibility backend:** [Podman](https://podman.io)
 (`brew install podman` on macOS). Native AgentPod providers are descriptor-only
-until enforcement lands. `agentbox providers` separates planned provider
-capability metadata from active network enforcement flags, so Podman
-compatibility is not presented as domain or packet-level policy enforcement.
-Linux AgentPod work has started with user, mount, PID namespace, cgroups v2,
-seccomp profile, and Landlock filesystem primitives, but native AgentPod
-provider execution remains unavailable until the remaining network boundary and
-loader wiring are verified.
+or prototype-gated until enforcement lands. `agentbox providers` separates
+planned provider capability metadata from active network enforcement flags, so
+Podman compatibility is not presented as domain or packet-level policy
+enforcement. Linux AgentPod work has started with user, mount, PID namespace,
+cgroups v2, seccomp profile, and Landlock filesystem primitives, plus a gated
+prototype executor. macOS AgentPod now has a native plan compiler for the Apple
+Virtualization, Endpoint Security, Network Extension, entitlement, host bridge,
+and evidence surfaces, but provider execution remains unavailable until live
+runner and enforcement tests exist.
 
 **How guarded minipods work:**
 - Agent runs inside a container with governed filesystem and network policy metadata
