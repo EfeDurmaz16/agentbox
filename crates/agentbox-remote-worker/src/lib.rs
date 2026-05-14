@@ -10,6 +10,7 @@ use agentbox_daemon::runtime::providers::remote::{
     RemoteAgentPodDestroySessionResponse, RemoteAgentPodEvidenceUploadRequest,
     RemoteAgentPodEvidenceUploadResponse, RemoteAgentPodExecRequest, RemoteAgentPodExecResponse,
     RemoteAgentPodHandshakeAck, RemoteAgentPodHandshakeDescriptor, RemoteAgentPodLifecycleEvent,
+    RemoteAgentPodWorkspaceBundle,
 };
 use agentbox_daemon::runtime::types::{CommandResult, RuntimeCapability, RuntimeStatus};
 use axum::extract::{Path as AxumPath, Query, State};
@@ -355,6 +356,9 @@ async fn create_session(
     let worker_session_id = format!("worker-{}", request.spec.id);
     let workspace_host_path = request.spec.filesystem.workspace_host_path.clone();
     prepare_worker_workspace(&workspace_host_path).await?;
+    if let Some(bundle) = request.workspace_bundle.as_ref() {
+        materialize_worker_workspace_bundle(&workspace_host_path, bundle).await?;
+    }
     let session = WorkerSession::new(request.spec.id.clone(), workspace_host_path);
     state
         .sessions
@@ -420,6 +424,66 @@ async fn prepare_worker_workspace(
         ));
     }
     Ok(())
+}
+
+async fn materialize_worker_workspace_bundle(
+    workspace_host_path: &Path,
+    bundle: &RemoteAgentPodWorkspaceBundle,
+) -> Result<(), (StatusCode, Json<WorkerError>)> {
+    bundle.validate().map_err(|err| {
+        worker_error(
+            StatusCode::BAD_REQUEST,
+            format!("agentbox remote worker rejected workspace bundle: {err}"),
+        )
+    })?;
+    for file in &bundle.files {
+        let relative = safe_worker_bundle_path(&file.path)?;
+        let path = workspace_host_path.join(relative);
+        if let Some(parent) = path.parent() {
+            tokio::fs::create_dir_all(parent).await.map_err(|err| {
+                worker_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!(
+                        "agentbox remote worker failed to prepare workspace bundle directory {}: {err}",
+                        parent.display()
+                    ),
+                )
+            })?;
+        }
+        tokio::fs::write(&path, file.contents_utf8.as_bytes())
+            .await
+            .map_err(|err| {
+                worker_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!(
+                        "agentbox remote worker failed to materialize workspace bundle file {}: {err}",
+                        path.display()
+                    ),
+                )
+            })?;
+    }
+    Ok(())
+}
+
+fn safe_worker_bundle_path(path: &str) -> Result<PathBuf, (StatusCode, Json<WorkerError>)> {
+    let candidate = PathBuf::from(path);
+    if candidate.as_os_str().is_empty()
+        || candidate.is_absolute()
+        || candidate.components().any(|component| {
+            matches!(
+                component,
+                std::path::Component::ParentDir
+                    | std::path::Component::RootDir
+                    | std::path::Component::Prefix(_)
+            )
+        })
+    {
+        return Err(worker_error(
+            StatusCode::BAD_REQUEST,
+            "agentbox remote worker workspace bundle file path is unsafe",
+        ));
+    }
+    Ok(candidate)
 }
 
 async fn exec_command(
@@ -1173,7 +1237,8 @@ mod tests {
     use agentbox_daemon::runtime::providers::remote::{
         Ed25519HandshakeVerifier, RemoteAgentPodAuthKind, RemoteAgentPodDestroySessionRequest,
         RemoteAgentPodEvidenceMode, RemoteAgentPodHandshakeVerifier,
-        RemoteAgentPodTransportDescriptor,
+        RemoteAgentPodTransportDescriptor, RemoteAgentPodWorkspaceBundle,
+        RemoteAgentPodWorkspaceFile,
     };
     use agentbox_daemon::runtime::types::{
         CredentialGrant, CredentialGrantKind, ExecCommand, MinipodSpec,
@@ -1215,6 +1280,7 @@ mod tests {
                 expires_at: chrono::Utc::now() + Duration::seconds(60),
             },
             spec: MinipodSpec::for_agent_task("remote-test-agent", workspace),
+            workspace_bundle: None,
         }
     }
 
@@ -1273,6 +1339,29 @@ mod tests {
             serde_json::to_string(&envelope).expect("failed to serialize test envelope");
         let envelope_sha256 = sha256_hex(envelope_json.as_bytes());
         (envelope_json, envelope_sha256)
+    }
+
+    fn test_workspace_bundle(path: &str, contents: &str) -> RemoteAgentPodWorkspaceBundle {
+        let file = RemoteAgentPodWorkspaceFile {
+            path: path.into(),
+            media_type: "text/plain".into(),
+            sha256: sha256_hex(contents.as_bytes()),
+            bytes: contents.len(),
+            contents_utf8: contents.into(),
+        };
+        let root = sha256_hex(
+            format!(
+                "agentbox-workspace-root-v1\n{}\0{}\0{}\0{}",
+                file.path, file.sha256, file.bytes, file.media_type
+            )
+            .as_bytes(),
+        );
+        RemoteAgentPodWorkspaceBundle {
+            schema_version: 1,
+            root_sha256: root,
+            files: vec![file],
+            secret_material_included: false,
+        }
     }
 
     #[tokio::test]
@@ -1475,6 +1564,33 @@ mod tests {
         assert!(err.1 .0.error.contains("failed to prepare workspace"));
         assert!(state.sessions.lock().await.is_empty());
         let _ = std::fs::remove_file(workspace_file);
+    }
+
+    #[tokio::test]
+    async fn create_session_materializes_workspace_bundle() {
+        let config = RemoteWorkerConfig::new(
+            "worker.local/dev",
+            "https://worker.example.com/agentpod/evidence",
+            SigningKey::from_bytes(&[32_u8; 32]),
+        );
+        let state = test_state(config);
+        let workspace = std::env::temp_dir().join(format!(
+            "agentbox-remote-worker-workspace-bundle-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&workspace);
+        let mut request = create_session_request(workspace.clone());
+        request.workspace_bundle = Some(test_workspace_bundle("src/main.rs", "fn main() {}\n"));
+
+        let Json(response) = create_session(State(state.clone()), Json(request))
+            .await
+            .unwrap();
+
+        assert_eq!(response.status, RuntimeStatus::Running);
+        let materialized = std::fs::read_to_string(workspace.join("src/main.rs")).unwrap();
+        assert_eq!(materialized, "fn main() {}\n");
+        assert_eq!(state.sessions.lock().await.len(), 1);
+        let _ = std::fs::remove_dir_all(workspace);
     }
 
     #[tokio::test]

@@ -7,6 +7,9 @@ and cloud-hosted execution cells. It is experimental and disabled by default.
 For local verification against `agentbox-remote-worker`, loopback-only HTTP can
 be enabled with `AGENTBOX_REMOTE_AGENTPOD_ALLOW_HTTP_LOOPBACK=1`; non-loopback
 HTTP and credential-bearing endpoints remain rejected.
+Create-session requests can also carry an optional hash-bound workspace bundle.
+The worker verifies every indexed path, byte count, and SHA-256 digest before
+materializing files into the worker workspace.
 
 The product surface starts with a secret-free transport descriptor:
 

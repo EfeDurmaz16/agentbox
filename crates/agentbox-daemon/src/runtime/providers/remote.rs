@@ -461,6 +461,50 @@ pub struct RemoteAgentPodCreateSessionRequest {
     pub transport: RemoteAgentPodTransportDescriptor,
     pub handshake_ack: RemoteAgentPodHandshakeAck,
     pub spec: MinipodSpec,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_bundle: Option<RemoteAgentPodWorkspaceBundle>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteAgentPodWorkspaceBundle {
+    pub schema_version: i64,
+    pub root_sha256: String,
+    pub files: Vec<RemoteAgentPodWorkspaceFile>,
+    pub secret_material_included: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteAgentPodWorkspaceFile {
+    pub path: String,
+    pub media_type: String,
+    pub sha256: String,
+    pub bytes: usize,
+    pub contents_utf8: String,
+}
+
+impl RemoteAgentPodWorkspaceBundle {
+    pub fn validate(&self) -> Result<(), RuntimeError> {
+        if self.schema_version != 1 {
+            return Err(RuntimeError::ManifestRejected(
+                "remote workspace bundle schema version is unsupported".into(),
+            ));
+        }
+        if self.secret_material_included {
+            return Err(RuntimeError::ManifestRejected(
+                "remote workspace bundle must not include secret material".into(),
+            ));
+        }
+        let computed_root = workspace_bundle_root_sha256(&self.files)?;
+        if self.root_sha256 != computed_root {
+            return Err(RuntimeError::ManifestRejected(
+                "remote workspace bundle root hash does not match file index".into(),
+            ));
+        }
+        for file in &self.files {
+            validate_workspace_bundle_file(file)?;
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1260,6 +1304,55 @@ fn evidence_bundle_root_sha256(files: &[RemoteAgentPodEvidenceBundleFile]) -> St
     sha256_hex(format!("agentbox-evidence-root-v1\n{}", entries.join("\n")).as_bytes())
 }
 
+fn workspace_bundle_root_sha256(
+    files: &[RemoteAgentPodWorkspaceFile],
+) -> Result<String, RuntimeError> {
+    let mut entries = Vec::with_capacity(files.len());
+    for file in files {
+        validate_workspace_bundle_file(file)?;
+        entries.push(format!(
+            "{}\0{}\0{}\0{}",
+            file.path, file.sha256, file.bytes, file.media_type
+        ));
+    }
+    entries.sort();
+    Ok(sha256_hex(
+        format!("agentbox-workspace-root-v1\n{}", entries.join("\n")).as_bytes(),
+    ))
+}
+
+fn validate_workspace_bundle_file(file: &RemoteAgentPodWorkspaceFile) -> Result<(), RuntimeError> {
+    let candidate = std::path::PathBuf::from(&file.path);
+    if candidate.as_os_str().is_empty()
+        || candidate.is_absolute()
+        || candidate.components().any(|component| {
+            matches!(
+                component,
+                std::path::Component::ParentDir
+                    | std::path::Component::RootDir
+                    | std::path::Component::Prefix(_)
+            )
+        })
+    {
+        return Err(RuntimeError::ManifestRejected(
+            "remote workspace bundle file path is unsafe".into(),
+        ));
+    }
+    if file.media_type.trim().is_empty() {
+        return Err(RuntimeError::ManifestRejected(
+            "remote workspace bundle file media type cannot be empty".into(),
+        ));
+    }
+    if file.bytes != file.contents_utf8.len()
+        || sha256_hex(file.contents_utf8.as_bytes()) != file.sha256
+    {
+        return Err(RuntimeError::ManifestRejected(
+            "remote workspace bundle file bytes or hash do not match contents".into(),
+        ));
+    }
+    Ok(())
+}
+
 fn remote_evidence_event_count(bundle: &SessionEvidenceBundle) -> u64 {
     (bundle.lifecycle_events.len()
         + bundle.approvals.len()
@@ -1566,6 +1659,7 @@ impl RuntimeProvider for RemoteAgentPodProvider {
                 transport: transport_descriptor,
                 handshake_ack: handshake_ack.clone(),
                 spec: spec.clone(),
+                workspace_bundle: None,
             })
             .await?;
         let mut session = RuntimeSession::new(
@@ -1962,6 +2056,30 @@ mod tests {
             remote_worker_working_dir(&session, Some("/tmp/agentbox-workspace")),
             Some("/tmp/agentbox-workspace".to_string())
         );
+    }
+
+    #[test]
+    fn remote_workspace_bundle_validates_file_hashes_and_paths() {
+        let contents = "hello remote workspace\n".to_string();
+        let mut file = RemoteAgentPodWorkspaceFile {
+            path: "src/main.rs".to_string(),
+            media_type: "text/plain".to_string(),
+            sha256: sha256_hex(contents.as_bytes()),
+            bytes: contents.len(),
+            contents_utf8: contents,
+        };
+        let root_sha256 = workspace_bundle_root_sha256(&[file.clone()]).unwrap();
+        let bundle = RemoteAgentPodWorkspaceBundle {
+            schema_version: 1,
+            root_sha256,
+            files: vec![file.clone()],
+            secret_material_included: false,
+        };
+        bundle.validate().unwrap();
+
+        file.path = "../secret".to_string();
+        let err = workspace_bundle_root_sha256(&[file]).unwrap_err();
+        assert!(err.to_string().contains("unsafe"));
     }
 
     #[test]
@@ -2367,6 +2485,7 @@ mod tests {
             transport,
             handshake_ack,
             spec: spec.clone(),
+            workspace_bundle: None,
         };
         let response = RemoteAgentPodCreateSessionResponse {
             session_id: spec.id.clone(),
@@ -2661,6 +2780,7 @@ mod tests {
                 transport,
                 handshake_ack,
                 spec: spec.clone(),
+                workspace_bundle: None,
             })
             .await
             .unwrap();
