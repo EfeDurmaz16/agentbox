@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use agentbox_policy::classify::PolicyConfig;
+use agentbox_policy::classify::{PolicyConfig, PolicyNetworkMode};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -89,6 +89,7 @@ impl Config {
             allowed_domains: self.allowed_domains.clone(),
             denied_domains: self.denied_domains.clone(),
             allow_localhost: true,
+            network_mode: PolicyNetworkMode::ApprovalOnFirstContact,
             always_allow: self.always_allow.clone(),
             always_block: self.always_block.clone(),
         }

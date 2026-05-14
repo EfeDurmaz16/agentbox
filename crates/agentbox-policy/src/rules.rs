@@ -1,4 +1,4 @@
-use crate::classify::{Bucket, Classification, CommandContext, PolicyConfig};
+use crate::classify::{Bucket, Classification, CommandContext, PolicyConfig, PolicyNetworkMode};
 
 /// Extract domain from a URL string. Returns None if parsing fails.
 fn extract_domain(url: &str) -> Option<String> {
@@ -144,6 +144,32 @@ pub fn check_config_overrides(
                         reason: format!("{} to {} — domain in allowlist", ctx.binary, domain),
                         notification_summary: None,
                     });
+                }
+
+                match config.network_mode {
+                    PolicyNetworkMode::None
+                    | PolicyNetworkMode::DenyByDefault
+                    | PolicyNetworkMode::AllowListed => {
+                        return Some(Classification {
+                            bucket: Bucket::Block,
+                            reason: format!(
+                                "{} to {} — network mode blocks unknown external domains",
+                                ctx.binary, domain
+                            ),
+                            notification_summary: None,
+                        });
+                    }
+                    PolicyNetworkMode::OpenWithGuardrails | PolicyNetworkMode::Host => {
+                        return Some(Classification {
+                            bucket: Bucket::Allow,
+                            reason: format!(
+                                "{} to {} — open network mode allowed with guardrail audit",
+                                ctx.binary, domain
+                            ),
+                            notification_summary: None,
+                        });
+                    }
+                    PolicyNetworkMode::ApprovalOnFirstContact => {}
                 }
             }
         }
@@ -742,10 +768,47 @@ mod tests {
     fn test_curl_unknown_domain_needs_approval() {
         let config = PolicyConfig {
             allowed_domains: vec!["api.github.com".into()],
+            network_mode: PolicyNetworkMode::ApprovalOnFirstContact,
             ..Default::default()
         };
         let c = classify(&ctx("curl", &["https://evil.example.com/steal"]), &config);
         assert_eq!(c.bucket, Bucket::Approve);
+    }
+
+    #[test]
+    fn test_curl_unknown_domain_blocked_by_deny_by_default_mode() {
+        let config = PolicyConfig {
+            network_mode: PolicyNetworkMode::DenyByDefault,
+            ..Default::default()
+        };
+        let c = classify(&ctx("curl", &["https://unknown.example.com"]), &config);
+
+        assert_eq!(c.bucket, Bucket::Block);
+        assert!(c.reason.contains("network mode blocks unknown"));
+    }
+
+    #[test]
+    fn test_curl_unknown_domain_blocked_by_allowlisted_mode() {
+        let config = PolicyConfig {
+            network_mode: PolicyNetworkMode::AllowListed,
+            allowed_domains: vec!["api.github.com".into()],
+            ..Default::default()
+        };
+        let c = classify(&ctx("curl", &["https://unknown.example.com"]), &config);
+
+        assert_eq!(c.bucket, Bucket::Block);
+    }
+
+    #[test]
+    fn test_curl_unknown_domain_allowed_by_open_with_guardrails_mode() {
+        let config = PolicyConfig {
+            network_mode: PolicyNetworkMode::OpenWithGuardrails,
+            ..Default::default()
+        };
+        let c = classify(&ctx("curl", &["https://unknown.example.com"]), &config);
+
+        assert_eq!(c.bucket, Bucket::Allow);
+        assert!(c.reason.contains("guardrail audit"));
     }
 
     #[test]

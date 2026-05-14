@@ -36,6 +36,16 @@ pub struct Classification {
     pub notification_summary: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PolicyNetworkMode {
+    None,
+    DenyByDefault,
+    AllowListed,
+    ApprovalOnFirstContact,
+    OpenWithGuardrails,
+    Host,
+}
+
 /// Policy configuration for context-rich classification.
 #[derive(Debug, Clone)]
 pub struct PolicyConfig {
@@ -47,6 +57,8 @@ pub struct PolicyConfig {
     pub denied_domains: Vec<String>,
     /// Whether localhost and loopback HTTP targets are available without approval
     pub allow_localhost: bool,
+    /// How unknown HTTP egress should be handled by command mediation
+    pub network_mode: PolicyNetworkMode,
     /// Commands that are always allowed (user overrides)
     pub always_allow: Vec<String>,
     /// Commands that are always blocked (user overrides)
@@ -60,6 +72,7 @@ impl Default for PolicyConfig {
             allowed_domains: vec![],
             denied_domains: vec![],
             allow_localhost: true,
+            network_mode: PolicyNetworkMode::ApprovalOnFirstContact,
             always_allow: vec![],
             always_block: vec![],
         }

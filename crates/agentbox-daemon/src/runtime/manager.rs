@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use agentbox_policy::classify::{self, Bucket, Classification, PolicyConfig};
+use agentbox_policy::classify::{self, Bucket, Classification, PolicyConfig, PolicyNetworkMode};
 use chrono::Utc;
 
 use crate::audit::{AuditEvent, AuditStore};
@@ -282,6 +282,7 @@ impl RuntimeManager {
                 allowed_domains: session.spec.network.allowed_domains.clone(),
                 denied_domains: session.spec.network.denied_domains.clone(),
                 allow_localhost: session.spec.network.allow_localhost,
+                network_mode: policy_network_mode(&session.spec.network.mode),
                 always_allow: vec![],
                 always_block: vec![],
             },
@@ -454,6 +455,21 @@ fn is_network_http_command(command: &ExecCommand) -> bool {
         let lower = arg.to_ascii_lowercase();
         lower.starts_with("http://") || lower.starts_with("https://")
     })
+}
+
+fn policy_network_mode(mode: &crate::runtime::types::NetworkMode) -> PolicyNetworkMode {
+    match mode {
+        crate::runtime::types::NetworkMode::None => PolicyNetworkMode::None,
+        crate::runtime::types::NetworkMode::DenyByDefault => PolicyNetworkMode::DenyByDefault,
+        crate::runtime::types::NetworkMode::AllowListed => PolicyNetworkMode::AllowListed,
+        crate::runtime::types::NetworkMode::ApprovalOnFirstContact => {
+            PolicyNetworkMode::ApprovalOnFirstContact
+        }
+        crate::runtime::types::NetworkMode::OpenWithGuardrails => {
+            PolicyNetworkMode::OpenWithGuardrails
+        }
+        crate::runtime::types::NetworkMode::Host => PolicyNetworkMode::Host,
+    }
 }
 
 #[cfg(test)]
@@ -853,7 +869,8 @@ mod tests {
     #[tokio::test]
     async fn exec_records_network_boundary_evidence_for_required_approval() {
         let manager = manager("exec-network-approval-evidence");
-        let spec = MinipodSpec::for_agent_task("openclaw", "/tmp/agentbox-work");
+        let mut spec = MinipodSpec::for_agent_task("openclaw", "/tmp/agentbox-work");
+        spec.network.mode = crate::runtime::types::NetworkMode::ApprovalOnFirstContact;
         let session = manager.create(&spec).await.unwrap();
         let command = ExecCommand {
             argv: vec!["curl".into(), "https://unknown.example.test".into()],
@@ -868,6 +885,50 @@ mod tests {
         let audit = manager.audit.recent(2).unwrap();
         assert_eq!(audit[0].bucket, "network");
         assert!(audit[0].decision.contains("approval_required:"));
+    }
+
+    #[tokio::test]
+    async fn exec_blocks_unknown_http_in_deny_by_default_mode() {
+        let manager = manager("exec-network-deny-by-default");
+        let mut spec = MinipodSpec::for_agent_task("openclaw", "/tmp/agentbox-work");
+        spec.network.mode = crate::runtime::types::NetworkMode::DenyByDefault;
+        let session = manager.create(&spec).await.unwrap();
+        let command = ExecCommand {
+            argv: vec!["curl".into(), "https://unknown.example.test".into()],
+            working_dir: Some("/workspace".into()),
+            env: Default::default(),
+            timeout_seconds: None,
+        };
+
+        let err = manager.exec(&session.id, &command).await.unwrap_err();
+
+        assert!(matches!(err, RuntimeError::PolicyDenied(_)));
+        let audit = manager.audit.recent(2).unwrap();
+        assert_eq!(audit[0].bucket, "network");
+        assert!(audit[0].decision.contains("blocked:"));
+        assert!(audit[0].decision.contains("network mode blocks unknown"));
+    }
+
+    #[tokio::test]
+    async fn exec_allows_unknown_http_in_open_with_guardrails_mode() {
+        let manager = manager("exec-network-open-guardrails");
+        let mut spec = MinipodSpec::for_agent_task("openclaw", "/tmp/agentbox-work");
+        spec.network.mode = crate::runtime::types::NetworkMode::OpenWithGuardrails;
+        let session = manager.create(&spec).await.unwrap();
+        let command = ExecCommand {
+            argv: vec!["curl".into(), "https://unknown.example.test".into()],
+            working_dir: Some("/workspace".into()),
+            env: Default::default(),
+            timeout_seconds: None,
+        };
+
+        let result = manager.exec(&session.id, &command).await.unwrap();
+
+        assert_eq!(result.exit_code, 0);
+        let audit = manager.audit.recent(3).unwrap();
+        assert_eq!(audit[1].bucket, "network");
+        assert!(audit[1].decision.contains("allowed:"));
+        assert!(audit[1].decision.contains("guardrail audit"));
     }
 
     #[tokio::test]
