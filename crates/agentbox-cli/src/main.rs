@@ -433,6 +433,32 @@ enum Commands {
         #[arg(long = "bundle-dir")]
         bundle_dir: PathBuf,
     },
+    /// Upload UTF-8 evidence stream chunks to a remote AgentPod worker
+    RemoteEvidenceStream {
+        /// Remote worker endpoint, e.g. https://worker.example.com/agentpod
+        #[arg(long)]
+        endpoint: String,
+
+        /// Agentbox session id
+        #[arg(long = "session")]
+        session_id: String,
+
+        /// Worker-side session id
+        #[arg(long = "worker-session")]
+        worker_session_id: String,
+
+        /// Evidence stream id, e.g. stdout, stderr, events
+        #[arg(long = "stream", default_value = "stdout")]
+        stream_id: String,
+
+        /// UTF-8 file to stream
+        #[arg(long = "file")]
+        file: PathBuf,
+
+        /// Maximum bytes per chunk
+        #[arg(long = "chunk-bytes", default_value_t = 65536)]
+        chunk_bytes: usize,
+    },
     /// Export a remote AgentPod worker workspace into a local review directory
     RemoteWorkspaceExport {
         /// Remote worker endpoint, e.g. https://worker.example.com/agentpod
@@ -3596,6 +3622,32 @@ fn sha256_hex(bytes: &[u8]) -> String {
     digest.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
+fn utf8_chunks(contents: &str, max_bytes: usize) -> Result<Vec<(u64, String)>, String> {
+    if max_bytes == 0 {
+        return Err("chunk size must be greater than zero".into());
+    }
+    let mut chunks = Vec::new();
+    let mut current = String::new();
+    let mut current_offset = 0_u64;
+    let mut next_offset = 0_u64;
+    for ch in contents.chars() {
+        let char_len = ch.len_utf8();
+        if current.is_empty() {
+            current_offset = next_offset;
+        }
+        if !current.is_empty() && current.len() + char_len > max_bytes {
+            next_offset = next_offset.saturating_add(current.len().try_into().unwrap_or(u64::MAX));
+            chunks.push((current_offset, std::mem::take(&mut current)));
+            current_offset = next_offset;
+        }
+        current.push(ch);
+    }
+    if !current.is_empty() {
+        chunks.push((current_offset, current));
+    }
+    Ok(chunks)
+}
+
 fn cmd_session_credentials_evidence(db_path: &PathBuf, session_id: &str, limit: usize) {
     let bundle = load_session_evidence_bundle(db_path, session_id, limit);
     for grant in bundle.credential_grants {
@@ -4410,6 +4462,92 @@ async fn cmd_remote_evidence_upload(
             "bundle_payload_sha256": payload.envelope_sha256,
         }))
         .expect("failed to serialize remote AgentPod evidence upload result")
+    );
+}
+
+async fn cmd_remote_evidence_stream(
+    endpoint: String,
+    session_id: String,
+    worker_session_id: String,
+    stream_id: String,
+    file: PathBuf,
+    chunk_bytes: usize,
+) {
+    use agentbox_daemon::runtime::providers::remote::{
+        HttpRemoteAgentPodTransport, RemoteAgentPodEvidenceStreamChunkRequest,
+        RemoteAgentPodTransport,
+    };
+
+    let contents = fs::read_to_string(&file).unwrap_or_else(|e| {
+        eprintln!(
+            "error: failed to read remote AgentPod evidence stream file {}: {}",
+            file.display(),
+            e
+        );
+        std::process::exit(1);
+    });
+    let chunks = utf8_chunks(&contents, chunk_bytes).unwrap_or_else(|e| {
+        eprintln!("error: failed to chunk remote AgentPod evidence stream: {e}");
+        std::process::exit(1);
+    });
+    if chunks.is_empty() {
+        eprintln!("error: remote AgentPod evidence stream file must not be empty");
+        std::process::exit(1);
+    }
+    let transport = HttpRemoteAgentPodTransport::new(endpoint).unwrap_or_else(|e| {
+        eprintln!(
+            "error: failed to build remote AgentPod evidence stream transport: {}",
+            e
+        );
+        std::process::exit(1);
+    });
+
+    let total_chunks = chunks.len();
+    let mut responses = Vec::with_capacity(total_chunks);
+    for (index, (offset, chunk)) in chunks.into_iter().enumerate() {
+        let request = RemoteAgentPodEvidenceStreamChunkRequest {
+            session_id: session_id.clone(),
+            worker_session_id: worker_session_id.clone(),
+            stream_id: stream_id.clone(),
+            sequence: index.try_into().unwrap_or(u64::MAX),
+            offset,
+            chunk_sha256: sha256_hex(chunk.as_bytes()),
+            chunk_bytes: chunk.len().try_into().unwrap_or(u64::MAX),
+            chunk_utf8: chunk,
+            final_chunk: index + 1 == total_chunks,
+            secret_material_included: false,
+        };
+        request.validate().unwrap_or_else(|e| {
+            eprintln!(
+                "error: failed to build remote AgentPod evidence stream chunk request: {}",
+                e
+            );
+            std::process::exit(1);
+        });
+        let response = transport
+            .upload_evidence_stream_chunk(request)
+            .await
+            .unwrap_or_else(|e| {
+                eprintln!(
+                    "error: failed to upload remote AgentPod evidence stream chunk: {}",
+                    e
+                );
+                std::process::exit(1);
+            });
+        responses.push(response);
+    }
+
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&serde_json::json!({
+            "session_id": session_id,
+            "worker_session_id": worker_session_id,
+            "stream_id": stream_id,
+            "chunk_count": responses.len(),
+            "stream_sha256": responses.last().and_then(|response| response.stream_sha256.clone()),
+            "chunks": responses,
+        }))
+        .expect("failed to serialize remote AgentPod evidence stream upload result")
     );
 }
 
@@ -5242,6 +5380,24 @@ async fn main() {
             worker_session_id,
             bundle_dir,
         } => cmd_remote_evidence_upload(endpoint, session_id, worker_session_id, bundle_dir).await,
+        Commands::RemoteEvidenceStream {
+            endpoint,
+            session_id,
+            worker_session_id,
+            stream_id,
+            file,
+            chunk_bytes,
+        } => {
+            cmd_remote_evidence_stream(
+                endpoint,
+                session_id,
+                worker_session_id,
+                stream_id,
+                file,
+                chunk_bytes,
+            )
+            .await
+        }
         Commands::RemoteWorkspaceExport {
             endpoint,
             session_id,
@@ -5302,6 +5458,25 @@ mod tests {
         RemoteAgentPodWorkspaceExportResponse, RemoteAgentPodWorkspaceFile,
     };
     use agentbox_daemon::runtime::types::{MinipodSpec, RuntimeSession, SessionEvidenceBundle};
+
+    #[test]
+    fn utf8_chunks_preserve_offsets_and_character_boundaries() {
+        let chunks = utf8_chunks("abcédef", 4).unwrap();
+
+        assert_eq!(
+            chunks,
+            vec![
+                (0, "abc".to_string()),
+                (3, "éde".to_string()),
+                (7, "f".to_string())
+            ]
+        );
+    }
+
+    #[test]
+    fn utf8_chunks_reject_zero_chunk_size() {
+        assert!(utf8_chunks("hello", 0).is_err());
+    }
 
     #[test]
     fn evidence_bundle_dir_writes_expected_files() {

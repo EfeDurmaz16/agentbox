@@ -144,6 +144,23 @@ agentbox remote-evidence-status \
 The command prints the validated worker response, including session status,
 evidence metadata receipts, and stored bundle payload references.
 
+For append-only stream evidence, the CLI can upload a UTF-8 file as ordered
+chunks:
+
+```sh
+agentbox remote-evidence-stream \
+  --endpoint https://worker.example.com/agentpod \
+  --session agentbox-session-id \
+  --worker-session worker-session-id \
+  --stream stdout \
+  --file ./stdout.txt \
+  --chunk-bytes 65536
+```
+
+The command splits on UTF-8 character boundaries, sends monotonically ordered
+chunks with byte offsets and per-chunk SHA-256 hashes, marks the final chunk,
+and prints the worker acknowledgements plus the sealed stream SHA-256.
+
 Workers can also export the current session workspace as a verified pullback
 bundle. The CLI validates the worker response, materializes the files into a
 local review directory, and writes `agentbox-workspace-export.json` with the
@@ -329,10 +346,10 @@ proves deny-by-default worker policy blocks an unknown `curl` before spawn,
 exports the worker workspace through both direct HTTP and the CLI pullback
 command, applies the pulled workspace to a local directory, uploads a bundle
 metadata receipt, verifies the returned lifecycle evidence, uploads and verifies
-a hash-bound bundle payload, uploads ordered evidence stream chunks and verifies
-the sealed stream hash, restarts the worker to prove persisted session reload,
-then starts a long-running command and proves destroy sends a kill signal that
-returns exit code `130` plus `KillSwitchAck`.
+a hash-bound bundle payload, uploads ordered evidence stream chunks through the
+CLI and verifies the sealed stream hash, restarts the worker to prove persisted
+session reload, then starts a long-running command and proves destroy sends a
+kill signal that returns exit code `130` plus `KillSwitchAck`.
 
 ## Lifecycle Contract
 

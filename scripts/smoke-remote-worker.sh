@@ -339,57 +339,39 @@ assert data["accepted_event_count"] == 2
 assert "EvidenceSealed" in data["lifecycle_events"]
 PY
 
-python3 - "$TMPDIR" "$SESSION_ID" "$WORKER_SESSION_ID" <<'PY'
+printf 'remote stream\n' >"$TMPDIR/stream.txt"
+python3 - "$TMPDIR" <<'PY'
 import hashlib
-import json
 import sys
 
-tmpdir, session_id, worker_session_id = sys.argv[1:4]
-chunks = [
-    ("stream-chunk-0.json", 0, 0, "remote "),
-    ("stream-chunk-1.json", 1, 7, "stream\n"),
-]
-for filename, sequence, offset, contents in chunks:
-    with open(f"{tmpdir}/{filename}", "w", encoding="utf-8") as fh:
-        json.dump(
-            {
-                "session_id": session_id,
-                "worker_session_id": worker_session_id,
-                "stream_id": "stdout",
-                "sequence": sequence,
-                "offset": offset,
-                "chunk_sha256": hashlib.sha256(contents.encode()).hexdigest(),
-                "chunk_bytes": len(contents.encode()),
-                "chunk_utf8": contents,
-                "final_chunk": sequence == 1,
-                "secret_material_included": False,
-            },
-            fh,
-        )
+tmpdir = sys.argv[1]
 with open(f"{tmpdir}/stream.expected", "w", encoding="utf-8") as fh:
     fh.write(hashlib.sha256("remote stream\n".encode()).hexdigest())
 PY
 
-curl -fsS "http://127.0.0.1:${PORT}/sessions/${WORKER_SESSION_ID}/evidence/stream" \
-  -H 'content-type: application/json' \
-  --data @"$TMPDIR/stream-chunk-0.json" \
-  >"$TMPDIR/stream-chunk-0-response.json"
-curl -fsS "http://127.0.0.1:${PORT}/sessions/${WORKER_SESSION_ID}/evidence/stream" \
-  -H 'content-type: application/json' \
-  --data @"$TMPDIR/stream-chunk-1.json" \
-  >"$TMPDIR/stream-chunk-1-response.json"
+AGENTBOX_REMOTE_AGENTPOD_ALLOW_HTTP_LOOPBACK=1 \
+"$ROOT/target/debug/agentbox-cli" remote-evidence-stream \
+  --endpoint "http://127.0.0.1:${PORT}" \
+  --session "$SESSION_ID" \
+  --worker-session "$WORKER_SESSION_ID" \
+  --stream stdout \
+  --file "$TMPDIR/stream.txt" \
+  --chunk-bytes 7 \
+  >"$TMPDIR/stream-response.json"
 
-python3 - "$TMPDIR/stream-chunk-0-response.json" "$TMPDIR/stream-chunk-1-response.json" "$TMPDIR/stream.expected" <<'PY'
+python3 - "$TMPDIR/stream-response.json" "$TMPDIR/stream.expected" <<'PY'
 import json
 import sys
 
 with open(sys.argv[1], "r", encoding="utf-8") as fh:
-    first = json.load(fh)
+    data = json.load(fh)
 with open(sys.argv[2], "r", encoding="utf-8") as fh:
-    second = json.load(fh)
-with open(sys.argv[3], "r", encoding="utf-8") as fh:
     expected_stream_hash = fh.read().strip()
 
+assert data["chunk_count"] == 2
+assert data["stream_sha256"] == expected_stream_hash
+first = data["chunks"][0]
+second = data["chunks"][1]
 assert first["accepted_sequence"] == 0
 assert first["accepted_offset"] == 0
 assert first["accepted_bytes"] == 7
