@@ -293,6 +293,9 @@ does not automatically rerun side-effecting commands from evidence bundles.
 ```sh
 # Export a portable evidence bundle directory for a persisted AgentPod session
 agentbox evidence --session <session-id> --bundle ./agentbox-evidence
+
+# Verify the bundle file manifest without requiring the original session store
+agentbox evidence --verify --bundle ./agentbox-evidence
 ```
 
 The generated `index.json` includes per-file SHA-256 digests and byte counts so

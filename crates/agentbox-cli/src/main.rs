@@ -12,7 +12,7 @@ use agentbox_policy::classify::{
 use chrono::{NaiveDateTime, Utc};
 use clap::{Parser, Subcommand};
 use rusqlite::Connection;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 // ---------------------------------------------------------------------------
@@ -2678,6 +2678,17 @@ fn cmd_evidence(
     network: bool,
     bundle_dir: Option<PathBuf>,
 ) {
+    if bundle_dir.is_some() && (credentials || network) {
+        eprintln!("error: --bundle cannot be combined with --credentials or --network");
+        std::process::exit(1);
+    }
+    if let Some(bundle_dir) = bundle_dir.as_deref() {
+        if verify {
+            cmd_verify_evidence_bundle_dir(bundle_dir);
+            return;
+        }
+    }
+
     let db_path = audit_db_path();
     if !db_path.exists() {
         eprintln!("no audit log found at {}", db_path.display());
@@ -2685,14 +2696,6 @@ fn cmd_evidence(
         std::process::exit(1);
     }
 
-    if bundle_dir.is_some() && verify {
-        eprintln!("error: --bundle cannot be combined with --verify");
-        std::process::exit(1);
-    }
-    if bundle_dir.is_some() && (credentials || network) {
-        eprintln!("error: --bundle cannot be combined with --credentials or --network");
-        std::process::exit(1);
-    }
     if let Some(bundle_dir) = bundle_dir {
         let Some(session_id) = session else {
             eprintln!("error: --bundle requires --session <id>");
@@ -2881,7 +2884,7 @@ fn cmd_session_evidence_bundle_dir(
     );
 }
 
-#[derive(Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 struct EvidenceBundleIndex {
     schema_version: i64,
     bundle_id: String,
@@ -2892,7 +2895,7 @@ struct EvidenceBundleIndex {
     files: Vec<EvidenceBundleFile>,
 }
 
-#[derive(Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 struct EvidenceBundleFile {
     path: String,
     media_type: String,
@@ -2964,6 +2967,85 @@ fn write_bundle_json_file<T: Serialize>(
         sha256: sha256_hex(&bytes),
         bytes: bytes.len(),
     })
+}
+
+fn cmd_verify_evidence_bundle_dir(bundle_dir: &Path) {
+    match verify_evidence_bundle_dir(bundle_dir) {
+        Ok(verified_files) => {
+            println!(
+                "evidence bundle: valid ({} files checked) at {}",
+                verified_files,
+                bundle_dir.display()
+            );
+        }
+        Err(e) => {
+            eprintln!(
+                "evidence bundle: invalid at {}: {}",
+                bundle_dir.display(),
+                e
+            );
+            std::process::exit(1);
+        }
+    }
+}
+
+fn verify_evidence_bundle_dir(bundle_dir: &Path) -> Result<usize, String> {
+    let index_path = bundle_dir.join("index.json");
+    let index_bytes = fs::read(&index_path)
+        .map_err(|e| format!("failed to read {}: {e}", index_path.display()))?;
+    let index: EvidenceBundleIndex = serde_json::from_slice(&index_bytes)
+        .map_err(|e| format!("failed to parse {}: {e}", index_path.display()))?;
+    if index.schema_version != 1 {
+        return Err(format!(
+            "unsupported evidence bundle index schema version {}",
+            index.schema_version
+        ));
+    }
+    if index.files.is_empty() {
+        return Err("evidence bundle index does not list any files".to_string());
+    }
+
+    for file in &index.files {
+        let relative_path = safe_bundle_relative_path(&file.path)?;
+        let path = bundle_dir.join(relative_path);
+        let bytes =
+            fs::read(&path).map_err(|e| format!("failed to read {}: {e}", path.display()))?;
+        if bytes.len() != file.bytes {
+            return Err(format!(
+                "{} byte count mismatch: expected {}, got {}",
+                file.path,
+                file.bytes,
+                bytes.len()
+            ));
+        }
+        let actual_sha256 = sha256_hex(&bytes);
+        if actual_sha256 != file.sha256 {
+            return Err(format!(
+                "{} sha256 mismatch: expected {}, got {}",
+                file.path, file.sha256, actual_sha256
+            ));
+        }
+    }
+
+    Ok(index.files.len())
+}
+
+fn safe_bundle_relative_path(path: &str) -> Result<PathBuf, String> {
+    let candidate = PathBuf::from(path);
+    if candidate.as_os_str().is_empty() || candidate.is_absolute() {
+        return Err(format!("invalid bundle file path `{path}`"));
+    }
+    if candidate.components().any(|component| {
+        matches!(
+            component,
+            std::path::Component::ParentDir
+                | std::path::Component::RootDir
+                | std::path::Component::Prefix(_)
+        )
+    }) {
+        return Err(format!("unsafe bundle file path `{path}`"));
+    }
+    Ok(candidate)
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
@@ -4380,6 +4462,32 @@ mod tests {
             assert_eq!(file["sha256"].as_str().unwrap().len(), 64);
             assert!(file["bytes"].as_u64().unwrap() > 0);
         }
+        assert_eq!(verify_evidence_bundle_dir(&output_dir).unwrap(), 4);
+
+        let _ = fs::remove_dir_all(output_dir);
+    }
+
+    #[test]
+    fn evidence_bundle_dir_verification_detects_tampering() {
+        let spec = MinipodSpec::for_agent_task("codex", "/tmp/agentbox-work");
+        let session = RuntimeSession::new(
+            spec.name.clone(),
+            "direct-host".into(),
+            "macos".into(),
+            spec,
+        );
+        let bundle = SessionEvidenceBundle::from_session_events(&session, &[]);
+        let output_dir = std::env::temp_dir().join(format!(
+            "agentbox-evidence-bundle-tamper-test-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&output_dir);
+        write_session_evidence_bundle_dir(&bundle, &output_dir).unwrap();
+
+        fs::write(output_dir.join("manifest.json"), b"{\"tampered\":true}").unwrap();
+
+        let err = verify_evidence_bundle_dir(&output_dir).unwrap_err();
+        assert!(err.contains("mismatch"), "{err}");
 
         let _ = fs::remove_dir_all(output_dir);
     }
