@@ -12,7 +12,8 @@ software runtime.
 ## Product Thesis
 
 An autonomous agent should not run directly in the user's real shell by default.
-It should run inside a task-scoped local minipod with an explicit boundary:
+It should run inside a task-scoped local AgentPod minipod with an explicit
+boundary:
 
 - what files it can read
 - what files it can write
@@ -52,15 +53,16 @@ The product-level contract is stable:
 ```text
 agent task
   -> minipod manifest
-  -> local execution cell
+  -> AgentPod execution cell
   -> governed host boundary
   -> policy / approval / evidence
 ```
 
 The platform implementation can vary:
 
-- macOS: Podman/Lima/Apple Virtualization backed Linux cells first, Endpoint
-  Security later for stronger host enforcement.
+- macOS: Apple Virtualization-backed AgentPod cells first, with Endpoint
+  Security later for stronger host enforcement. Podman can remain a temporary
+  compatibility backend.
 - Linux: native namespaces, cgroups v2, seccomp, Landlock, rootless runtime,
   and optional eBPF observability/enforcement.
 - Windows: Job Objects, AppContainer, Windows Sandbox, Hyper-V isolation, and
@@ -81,8 +83,9 @@ PATH shim -> daemon -> policy classifier -> ntfy approval -> SQLite audit log
 This is useful but incomplete. It provides a control boundary for selected shell
 commands, but it does not yet prove a full governed minipod runtime.
 
-The experimental Podman path exists, but the project should keep calling it
-experimental until it proves:
+The experimental Podman compatibility path exists, but the product should not
+be centered on Podman. Agentbox should keep that path experimental until it
+proves:
 
 - reliable minipod lifecycle management
 - explicit mount policy

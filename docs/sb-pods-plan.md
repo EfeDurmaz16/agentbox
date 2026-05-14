@@ -1,5 +1,10 @@
 # sb-pods: Local-First Governed Sandbox Runtime
 
+> Historical design input: this document predates the current Agentbox
+> `AgentPod`/minipod direction and still uses Switchboard-era `sb-*` naming.
+> It is retained as architecture history, not as the current public CLI or API
+> contract.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Add a pod-based sandbox runtime to Switchboard so AI agents execute tasks in isolated, governed, local-first Linux containers — with cloud fallback.

@@ -11,10 +11,10 @@ credentials, browser state, cloud CLIs, databases, deploys, or production
 repos. Agentbox aims to make that separation available locally as software.
 
 The validated core today is the control loop: **shim -> daemon -> policy ->
-approval -> audit**. The product direction is broader: **agent task -> local
-minipod -> governed host boundary -> policy / approval / evidence**. Local
-Podman minipods are currently experimental until isolation, network, credential,
-and evidence behavior are proven end to end.
+approval -> audit**. The product direction is broader: **agent task ->
+AgentPod minipod -> governed host boundary -> policy / approval / evidence**.
+Podman is only the current compatibility backend; the product target is an
+Agentbox-owned runtime with OS-native providers.
 
 ## Why
 
@@ -160,16 +160,16 @@ ntfy_server = "https://ntfy.sh"       # or self-host: https://your-server.com
 approval_timeout_secs = 120            # 30-600 seconds
 ```
 
-## Guarded Minipods (Experimental Pod Runtime)
+## Guarded Minipods (Experimental AgentPod Runtime)
 
-Run agents in local Podman-backed minipods while routing selected host-impacting
-actions through Agentbox policy. This path exists in the CLI and Podman provider
-and is the product direction, but it should be treated as experimental. The most
-mature validated path today remains the shim -> daemon -> policy -> approval ->
-audit loop.
+Run agents in local AgentPod minipods while routing selected host-impacting
+actions through Agentbox policy. Today, `agentbox run` uses the runtime manager
+with a Podman compatibility adapter because that gives a runnable backend while
+the native `agentpod-macos`, `agentpod-linux`, and `agentpod-windows` providers
+are being built. Podman is not the architecture; it is the bootstrap backend.
 
 ```bash
-# Run an agent in a sandbox
+# Run an agent in a governed local minipod
 agentbox run "openclaw start"
 
 # Generate the governed minipod manifest without starting a backend
@@ -178,14 +178,16 @@ agentbox minipod-spec hermes --workspace . --allow-domain api.openai.com
 # With specific runtime and services
 agentbox run --runtime node --with postgres "npm test"
 
-# List running sandboxes
+# List running minipods
 agentbox pods
 
-# Stop a sandbox
-agentbox stop-pod sb-a1b2c3
+# Stop a minipod session
+agentbox stop-pod 01hxyzagentpod
 ```
 
-**Requires:** [Podman](https://podman.io) (`brew install podman` on macOS)
+**Current compatibility backend:** [Podman](https://podman.io)
+(`brew install podman` on macOS). Native AgentPod providers are descriptor-only
+until enforcement lands.
 
 **How guarded minipods work:**
 - Agent runs inside a container with isolated filesystem and network
@@ -196,8 +198,8 @@ agentbox stop-pod sb-a1b2c3
 - Not bypass-proof yet; macOS Endpoint Security and protocol-level interception are roadmap items
 
 **What minipods still need before v0.2 is credible:**
-- real backend wiring through the new runtime manager
-- provider conformance tests for Podman and future native providers
+- native AgentPod provider execution beyond descriptors
+- live smoke proof for the current Podman compatibility backend
 - protected host path denial tests
 - smoke tests proving the shim and daemon socket work inside the minipod
 - honest platform-specific bypass documentation
@@ -229,8 +231,8 @@ agentbox evidence        # Export audit/evidence JSONL
 agentbox minipod-spec    # Generate and validate a governed minipod manifest
 
 agentbox run <command>   # Run agent in a guarded local minipod
-agentbox pods            # List running minipods
-agentbox stop-pod <id>   # Remove a minipod
+agentbox pods            # List running compatibility-backend minipods
+agentbox stop-pod <id>   # Remove a minipod session
 ```
 
 ## Policy Engine
@@ -315,7 +317,7 @@ Agentbox: **local-first, agent-aware, policy-bound, audit-first minipods.**
 - **DB:** SQLite (rusqlite, r2d2 pool, WAL mode)
 - **IPC:** Unix domain socket, JSON
 - **Notifications:** ntfy (free, self-hostable)
-- **Runtime:** Provider abstraction with experimental Podman path and planned native backends
+- **Runtime:** Provider abstraction with AgentPod-native descriptors and a Podman compatibility adapter
 - **Build:** Cargo workspace (5 crates)
 
 ## License

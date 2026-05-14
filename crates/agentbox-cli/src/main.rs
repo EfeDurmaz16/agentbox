@@ -70,7 +70,7 @@ enum Commands {
         #[arg(long = "with", num_args = 1..)]
         services: Vec<String>,
 
-        /// Mount current directory into pod (default: true)
+        /// Mount current directory into the minipod workspace (default: true)
         #[arg(long, default_value = "true")]
         mount_cwd: bool,
 
@@ -84,7 +84,7 @@ enum Commands {
     },
     /// Stop and remove a minipod
     StopPod {
-        /// Pod ID (e.g., sb-a1b2c3)
+        /// Minipod session id; legacy sb-* backend ids are still accepted
         pod_id: String,
     },
     /// List running minipods
@@ -141,9 +141,9 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
-    /// Show logs for a Podman-backed minipod workspace container
+    /// Show logs for a minipod session backed by the compatibility backend
     MinipodLogs {
-        /// Session id or legacy sb-* pod id
+        /// Minipod session id; legacy sb-* backend ids are still accepted
         session_id: String,
 
         /// Follow logs
@@ -776,14 +776,15 @@ async fn cmd_run(
     use agentbox_daemon::runtime::session::RuntimeSessionStore;
     use agentbox_daemon::runtime::types::{ExecCommand, MinipodSpec, ResourcePolicy};
 
-    // 1. Check if podman is available
+    // 1. Check whether the current compatibility backend is available.
     match Command::new("podman").arg("--version").output() {
         Ok(output) if output.status.success() => {
             let ver = String::from_utf8_lossy(&output.stdout);
             eprintln!("Using {}", ver.trim());
         }
         _ => {
-            eprintln!("Error: podman not found. Install it:");
+            eprintln!("Error: no runnable AgentPod backend is available yet.");
+            eprintln!("The current compatibility backend requires Podman:");
             eprintln!(
                 "  macOS: brew install podman && podman machine init && podman machine start"
             );
@@ -792,17 +793,17 @@ async fn cmd_run(
         }
     }
 
-    // 2. On macOS, ensure podman machine is running
+    // 2. On macOS, ensure the compatibility backend VM is running.
     let machine = MachineManager::new();
     if machine.needs_vm() {
-        eprintln!("Checking podman machine...");
+        eprintln!("Checking AgentPod compatibility VM...");
         if let Err(e) = machine.ensure_ready().await {
             eprintln!("Error: failed to start podman machine: {}", e);
             std::process::exit(1);
         }
     }
 
-    // 3. Create RuntimeManager with the Podman RuntimeProvider adapter
+    // 3. Create RuntimeManager with the compatibility RuntimeProvider adapter.
     let agentbox_sock = socket_path().to_string_lossy().to_string();
     let shim_binary = find_shim_binary()
         .map(|p| p.to_string_lossy().to_string())
@@ -818,7 +819,10 @@ async fn cmd_run(
     });
     let registry = RuntimeProviderRegistry::with_local_providers(agentbox_sock, shim_binary);
     let provider = registry.get("podman").unwrap_or_else(|e| {
-        eprintln!("Error: failed to resolve Podman runtime provider: {}", e);
+        eprintln!(
+            "Error: failed to resolve compatibility runtime provider: {}",
+            e
+        );
         std::process::exit(1);
     });
     let manager = RuntimeManager::new(
@@ -975,8 +979,13 @@ async fn cmd_run(
     } else {
         // 7. No command: print interactive instructions
         println!();
-        println!("Minipod running. Connect with:");
-        println!("  podman exec -it sb-{}-workspace bash", session.id);
+        println!("Minipod session running.");
+        println!("  Session id: {}", session.id);
+        println!("  Backend container: sb-{}-workspace", session.id);
+        println!(
+            "  Debug shell: podman exec -it sb-{}-workspace bash",
+            session.id
+        );
         println!();
         println!("Stop with:");
         println!("  agentbox stop-pod {}", session.id);
@@ -1751,21 +1760,6 @@ fn cmd_providers() {
         "shipped"
     );
 
-    let podman_status = if Command::new("podman")
-        .arg("--version")
-        .output()
-        .map(|output| output.status.success())
-        .unwrap_or(false)
-    {
-        "experimental"
-    } else {
-        "unavailable"
-    };
-    println!(
-        "{:<18} {:<10} {:<14} container isolation, shim bridge",
-        "podman", "linux-vm", podman_status
-    );
-
     let registry = RuntimeProviderRegistry::with_local_providers(
         socket_path().to_string_lossy().into_owned(),
         find_shim_binary()
@@ -1793,6 +1787,21 @@ fn cmd_providers() {
             capabilities
         );
     }
+
+    let podman_status = if Command::new("podman")
+        .arg("--version")
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
+    {
+        "experimental"
+    } else {
+        "unavailable"
+    };
+    println!(
+        "{:<18} {:<10} {:<14} container isolation, shim bridge",
+        "podman", "linux-vm", podman_status
+    );
 }
 
 fn cmd_minipod_inspect(session_id: Option<String>, json: bool) {

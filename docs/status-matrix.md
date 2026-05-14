@@ -21,20 +21,20 @@ implemented yet.
 | Runtime session store | Shipped | Runtime sessions persist to a local JSON store. |
 | Runtime manager | Shipped | Provider create, exec, status refresh, destroy, session persistence, and evidence events share one daemon-owned manager. |
 | Minipod manifest CLI | Shipped | `agentbox minipod-spec` generates and validates a deny-by-default manifest. |
-| Runtime provider registry | Shipped | `RuntimeProviderRegistry` can resolve local providers and native descriptors. |
+| Runtime provider registry | Shipped | `RuntimeProviderRegistry` can resolve AgentPod provider descriptors and compatibility providers. |
 | Runtime provider listing | Shipped | `agentbox providers` reports shipped, experimental, unavailable, and planned provider surfaces. |
-| Podman runtime adapter | Shipped | `agentbox run` now routes through `RuntimeManager` and the Podman `RuntimeProvider` adapter, creating governed runtime sessions and evidence events. |
-| Native provider descriptors | Shipped | macOS, Linux, and Windows provider candidates expose capability metadata while returning unavailable for execution. |
+| AgentPod provider descriptors | Shipped | `agentpod-macos`, `agentpod-linux`, and `agentpod-windows` expose capability metadata while returning unavailable for execution. |
+| Podman compatibility adapter | Shipped | `agentbox run` now routes through `RuntimeManager` and the Podman `RuntimeProvider` adapter, creating governed runtime sessions and evidence events. |
 
 ## Runtime Backends
 
 | Backend | Status | Notes |
 |---------|--------|-------|
 | Direct host with shims | Shipped | Strongest validated path today. It governs host-impacting shell commands but does not isolate all process behavior. |
-| Podman minipods | Experimental | `agentbox run` uses the daemon-owned runtime manager path. `agentbox pods` and `agentbox stop-pod` still use the older Podman CLI path, and live socket/shim smoke proof remains open. |
-| macOS native boundary | Descriptor only | Candidate surfaces include Apple Virtualization for Linux cells, Endpoint Security for host-event enforcement, and Network Extension for egress governance. Execution intentionally returns unavailable. |
-| Linux native boundary | Descriptor only | Candidate surfaces include namespaces, cgroups, Landlock, seccomp, eBPF, nftables, and overlayfs. Execution intentionally returns unavailable. |
-| Windows native boundary | Descriptor only | Candidate surfaces include Job Objects, AppContainer, WFP, ETW, and Windows sandbox primitives. Execution intentionally returns unavailable. |
+| AgentPod macOS | Descriptor only | Candidate surfaces include Apple Virtualization for local cells, Endpoint Security for host-event enforcement, and Network Extension for egress governance. Execution intentionally returns unavailable. |
+| AgentPod Linux | Descriptor only | Candidate surfaces include namespaces, cgroups, Landlock, seccomp, eBPF, nftables, and overlayfs. Execution intentionally returns unavailable. |
+| AgentPod Windows | Descriptor only | Candidate surfaces include Job Objects, AppContainer, WFP, ETW, and Windows sandbox primitives. Execution intentionally returns unavailable. |
+| Podman compatibility minipods | Experimental | `agentbox run` uses the daemon-owned runtime manager path. `agentbox pods` and `agentbox stop-pod` still use the older Podman CLI path, and live socket/shim smoke proof remains open. |
 
 ## Current Direction
 
@@ -49,8 +49,8 @@ agent intent
   -> tamper-evident evidence
 ```
 
-Podman is allowed to remain a compatibility backend, but the architecture should
-not depend on it as the only enforcement layer.
+Podman is allowed to remain a compatibility backend, but AgentPod providers are
+the product direction and should become the real enforcement layer.
 
 See [macOS minipod limitations](macos-minipod-limitations.md) for the current
 VM-backed boundary and native enforcement gap.
