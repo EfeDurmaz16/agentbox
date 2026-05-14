@@ -1362,10 +1362,72 @@ fn service_spec(service: &str) -> Option<agentbox_daemon::runtime::types::Servic
 
 async fn cmd_stop_pod(pod_id: String) {
     let raw_id = pod_id.strip_prefix("sb-").unwrap_or(&pod_id);
+
+    if stop_runtime_session(raw_id).await {
+        return;
+    }
+
+    stop_legacy_podman_pod(raw_id);
+}
+
+async fn stop_runtime_session(session_id: &str) -> bool {
+    use agentbox_daemon::audit::AuditStore;
+    use agentbox_daemon::config;
+    use agentbox_daemon::runtime::manager::RuntimeManager;
+    use agentbox_daemon::runtime::registry::RuntimeProviderRegistry;
+    use agentbox_daemon::runtime::session::RuntimeSessionStore;
+
+    let config = config::load().unwrap_or_else(|e| {
+        eprintln!("error: failed to load Agentbox config: {}", e);
+        std::process::exit(1);
+    });
+    let store = RuntimeSessionStore::new(config.session_store_path.clone());
+    let session = store.get(session_id).unwrap_or_else(|e| {
+        eprintln!("error: failed to read runtime session store: {}", e);
+        std::process::exit(1);
+    });
+    let Some(session) = session else {
+        return false;
+    };
+
+    let registry = RuntimeProviderRegistry::with_local_providers(
+        socket_path().to_string_lossy().into_owned(),
+        find_shim_binary()
+            .map(|path| path.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+    );
+    let provider = registry.get(&session.provider).unwrap_or_else(|e| {
+        eprintln!(
+            "error: failed to resolve session provider `{}` for stop: {}",
+            session.provider, e
+        );
+        std::process::exit(1);
+    });
+    let manager = RuntimeManager::new(
+        provider,
+        RuntimeSessionStore::new(config.session_store_path),
+        AuditStore::new(&config.db_path).unwrap_or_else(|e| {
+            eprintln!("error: failed to open audit store: {}", e);
+            std::process::exit(1);
+        }),
+    );
+
+    eprintln!("Stopping AgentPod session {}...", session.id);
+    manager.destroy(&session.id).await.unwrap_or_else(|e| {
+        eprintln!(
+            "error: failed to stop AgentPod session {}: {}",
+            session.id, e
+        );
+        std::process::exit(1);
+    });
+    println!("AgentPod session {} stopped.", session.id);
+    true
+}
+
+fn stop_legacy_podman_pod(raw_id: &str) {
     let pod_name = format!("sb-{}", raw_id);
 
-    eprintln!("Stopping pod {}...", pod_name);
-
+    eprintln!("Stopping legacy pod {}...", pod_name);
     match Command::new("podman")
         .args(["pod", "rm", "-f", &pod_name])
         .output()
