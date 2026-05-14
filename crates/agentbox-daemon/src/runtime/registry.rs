@@ -4,6 +4,7 @@ use std::sync::Arc;
 use crate::runtime::provider::{RuntimeError, RuntimeProvider};
 use crate::runtime::providers::agentpod::{AgentPodProvider, AgentPodProviderKind};
 use crate::runtime::providers::podman::PodmanRuntimeProvider;
+use crate::runtime::providers::remote::RemoteAgentPodProvider;
 use crate::runtime::types::AgentPodRiskLevel;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -150,6 +151,7 @@ impl RuntimeProviderRegistry {
         registry.register(Arc::new(AgentPodProvider::new(
             AgentPodProviderKind::Windows,
         )));
+        registry.register(Arc::new(RemoteAgentPodProvider));
         registry
     }
 
@@ -164,6 +166,7 @@ impl RuntimeProviderRegistry {
         registry.register(Arc::new(AgentPodProvider::new(
             AgentPodProviderKind::Windows,
         )));
+        registry.register(Arc::new(RemoteAgentPodProvider));
         registry
     }
 }
@@ -288,9 +291,18 @@ mod tests {
 
         assert_eq!(
             registry.names(),
-            vec!["agentpod-linux", "agentpod-macos", "agentpod-windows"]
+            vec![
+                "agentpod-linux",
+                "agentpod-macos",
+                "agentpod-windows",
+                "remote-agentpod"
+            ]
         );
         assert_eq!(registry.get("agentpod-macos").unwrap().platform(), "macos");
+        assert_eq!(
+            registry.get("remote-agentpod").unwrap().platform(),
+            "remote"
+        );
     }
 
     #[test]
@@ -307,7 +319,8 @@ mod tests {
                 "agentpod-linux",
                 "agentpod-macos",
                 "agentpod-windows",
-                "podman"
+                "podman",
+                "remote-agentpod"
             ]
         );
     }
@@ -324,7 +337,25 @@ mod tests {
 
         assert_eq!(explanation.selected_provider, "agentpod-linux");
         assert_eq!(explanation.reason, "explicit provider requested");
-        assert_eq!(explanation.candidates.len(), 3);
+        assert_eq!(explanation.candidates.len(), 4);
+    }
+
+    #[test]
+    fn explicit_remote_provider_selection_is_visible_as_a_candidate() {
+        let registry = RuntimeProviderRegistry::with_agentpod_descriptors();
+        let explanation = registry
+            .explain_selection(&ProviderSelectionRequest {
+                preferred_provider: Some("remote-agentpod".into()),
+                risk: AgentPodRiskLevel::VeryHigh,
+            })
+            .unwrap();
+
+        assert_eq!(explanation.selected_provider, "remote-agentpod");
+        assert_eq!(explanation.reason, "explicit provider requested");
+        assert!(explanation
+            .candidates
+            .iter()
+            .any(|candidate| candidate.name == "remote-agentpod"));
     }
 
     #[test]
