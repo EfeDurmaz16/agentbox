@@ -65,6 +65,9 @@ CI, run them manually and record the reason.
 - [ ] Native AgentPod providers remain unavailable until live enforcement lands.
 - [ ] Podman compatibility is marked experimental or unavailable honestly.
 - [ ] Podman live smoke is run only on hosts where Podman is installed.
+- [ ] `scripts/smoke-podman-bridge.sh` proves daemon socket visibility and shim
+      execution inside a Podman minipod, or skips with code 77 when Podman is
+      absent.
 - [ ] Linux benchmark and native primitive scripts skip honestly on non-Linux
       hosts.
 - [ ] Windows and macOS native provider docs match provider status.

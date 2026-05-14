@@ -183,6 +183,9 @@ agentbox minipod-spec hermes --workspace . --workspace-overlay-dir /tmp/agentbox
 # Run a safe OpenClaw/Hermes-style manifest demo
 scripts/demo-autonomous-agent.sh
 
+# Live compatibility smoke for daemon socket + shim bridge when Podman exists
+scripts/smoke-podman-bridge.sh
+
 # Block high-risk destinations for the task
 agentbox minipod-spec hermes --workspace . --deny-domain metadata.google.internal
 
