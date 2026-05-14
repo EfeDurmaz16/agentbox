@@ -259,6 +259,90 @@ pub fn check_approve(ctx: &CommandContext, config: &PolicyConfig) -> Option<Clas
                 )),
             });
         }
+        "aws" | "gcloud" | "az" => {
+            let subcommand = ctx.args.first().map(|s| s.as_str()).unwrap_or("");
+            let service = if subcommand.is_empty() {
+                "cloud account".to_string()
+            } else {
+                format!("cloud account via {subcommand}")
+            };
+            return Some(Classification {
+                bucket: Bucket::Approve,
+                reason: format!("{} — cloud account access", ctx.binary),
+                notification_summary: Some(format!(
+                    "Agent wants to access {}: {} {}",
+                    service,
+                    ctx.binary,
+                    ctx.args.join(" ")
+                )),
+            });
+        }
+        "terraform" | "pulumi" => {
+            let subcommand = ctx.args.first().map(|s| s.as_str()).unwrap_or("");
+            if matches!(
+                subcommand,
+                "apply" | "destroy" | "import" | "refresh" | "up" | "preview"
+            ) {
+                return Some(Classification {
+                    bucket: Bucket::Approve,
+                    reason: format!(
+                        "{} {} — infrastructure state mutation",
+                        ctx.binary, subcommand
+                    ),
+                    notification_summary: Some(format!(
+                        "Agent wants to change infrastructure state: {} {}",
+                        ctx.binary,
+                        ctx.args.join(" ")
+                    )),
+                });
+            }
+        }
+        "vercel" | "netlify" | "fly" | "railway" | "firebase" => {
+            let subcommand = ctx.args.first().map(|s| s.as_str()).unwrap_or("");
+            if matches!(subcommand, "deploy" | "up" | "release" | "rollback") {
+                return Some(Classification {
+                    bucket: Bucket::Approve,
+                    reason: format!("{} {} — deploy action", ctx.binary, subcommand),
+                    notification_summary: Some(format!(
+                        "Agent wants to deploy or change a live service: {} {}",
+                        ctx.binary,
+                        ctx.args.join(" ")
+                    )),
+                });
+            }
+        }
+        "stripe" => {
+            return Some(Classification {
+                bucket: Bucket::Approve,
+                reason: "stripe — payment account operation".into(),
+                notification_summary: Some(format!(
+                    "Agent wants to access Stripe/payment account state: stripe {}",
+                    ctx.args.join(" ")
+                )),
+            });
+        }
+        "slack" | "twilio" => {
+            return Some(Classification {
+                bucket: Bucket::Approve,
+                reason: format!("{} — external messaging operation", ctx.binary),
+                notification_summary: Some(format!(
+                    "Agent wants to send or modify external communications: {} {}",
+                    ctx.binary,
+                    ctx.args.join(" ")
+                )),
+            });
+        }
+        "open" | "xdg-open" => {
+            return Some(Classification {
+                bucket: Bucket::Approve,
+                reason: format!("{} — opens a local app or browser profile", ctx.binary),
+                notification_summary: Some(format!(
+                    "Agent wants to open a local app or browser target: {} {}",
+                    ctx.binary,
+                    ctx.args.join(" ")
+                )),
+            });
+        }
         "curl" | "wget" => {
             // Network egress — if we reach here, domain was NOT in allowlist
             let url = ctx
@@ -681,6 +765,91 @@ mod tests {
     fn test_code_env_local_needs_approval() {
         let c = classify_default(&ctx("code", &[".env.local"]));
         assert_eq!(c.bucket, Bucket::Approve);
+    }
+
+    #[test]
+    fn test_cloud_cli_actions_need_approval() {
+        for (binary, args) in [
+            ("aws", vec!["s3", "rm", "s3://prod-bucket/key"]),
+            ("gcloud", vec!["run", "deploy", "api"]),
+            ("az", vec!["deployment", "group", "create"]),
+        ] {
+            let c = classify_default(&ctx(binary, &args));
+            assert_eq!(
+                c.bucket,
+                Bucket::Approve,
+                "{binary} should require approval"
+            );
+            assert!(c.reason.contains("cloud account"));
+        }
+    }
+
+    #[test]
+    fn test_deploy_actions_need_approval() {
+        for (binary, args) in [
+            ("vercel", vec!["deploy", "--prod"]),
+            ("netlify", vec!["deploy", "--prod"]),
+            ("fly", vec!["deploy"]),
+            ("railway", vec!["up"]),
+            ("firebase", vec!["deploy"]),
+        ] {
+            let c = classify_default(&ctx(binary, &args));
+            assert_eq!(
+                c.bucket,
+                Bucket::Approve,
+                "{binary} should require approval"
+            );
+            assert!(c.reason.contains("deploy action"));
+        }
+    }
+
+    #[test]
+    fn test_infrastructure_state_actions_need_approval() {
+        for (binary, args) in [
+            ("terraform", vec!["apply", "-auto-approve"]),
+            ("terraform", vec!["destroy"]),
+            ("pulumi", vec!["up"]),
+        ] {
+            let c = classify_default(&ctx(binary, &args));
+            assert_eq!(
+                c.bucket,
+                Bucket::Approve,
+                "{binary} should require approval"
+            );
+            assert!(c.reason.contains("infrastructure state"));
+        }
+    }
+
+    #[test]
+    fn test_payment_and_messaging_actions_need_approval() {
+        for (binary, args) in [
+            ("stripe", vec!["refunds", "create", "--charge", "ch_123"]),
+            ("slack", vec!["chat", "send", "#ops", "deploying"]),
+            ("twilio", vec!["api:core:messages:create"]),
+        ] {
+            let c = classify_default(&ctx(binary, &args));
+            assert_eq!(
+                c.bucket,
+                Bucket::Approve,
+                "{binary} should require approval"
+            );
+        }
+    }
+
+    #[test]
+    fn test_browser_or_app_open_needs_approval() {
+        for (binary, args) in [
+            ("open", vec!["https://console.cloud.google.com"]),
+            ("xdg-open", vec!["https://dashboard.stripe.com"]),
+        ] {
+            let c = classify_default(&ctx(binary, &args));
+            assert_eq!(
+                c.bucket,
+                Bucket::Approve,
+                "{binary} should require approval"
+            );
+            assert!(c.reason.contains("browser"));
+        }
     }
 
     #[test]
