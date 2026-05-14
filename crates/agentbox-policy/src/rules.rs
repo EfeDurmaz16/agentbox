@@ -135,6 +135,20 @@ pub fn check_config_overrides(
     if matches!(ctx.binary.as_str(), "curl" | "wget") {
         if let Some(url) = ctx.args.iter().find(|a| a.starts_with("http")) {
             if let Some(domain) = extract_domain(url) {
+                if matches!(
+                    config.network_mode,
+                    PolicyNetworkMode::None | PolicyNetworkMode::DenyByDefault
+                ) {
+                    return Some(Classification {
+                        bucket: Bucket::Block,
+                        reason: format!(
+                            "{} to {} — network mode denies external HTTP by default",
+                            ctx.binary, domain
+                        ),
+                        notification_summary: None,
+                    });
+                }
+
                 if config.allowed_domains.iter().any(|d| {
                     let d_lower = d.to_lowercase();
                     domain == d_lower || domain.ends_with(&format!(".{}", d_lower))
@@ -147,13 +161,14 @@ pub fn check_config_overrides(
                 }
 
                 match config.network_mode {
-                    PolicyNetworkMode::None
-                    | PolicyNetworkMode::DenyByDefault
-                    | PolicyNetworkMode::AllowListed => {
+                    PolicyNetworkMode::None | PolicyNetworkMode::DenyByDefault => {
+                        unreachable!("handled before domain allowlist")
+                    }
+                    PolicyNetworkMode::AllowListed => {
                         return Some(Classification {
                             bucket: Bucket::Block,
                             reason: format!(
-                                "{} to {} — network mode blocks unknown external domains",
+                                "{} to {} — allowlisted network mode blocks unknown external domains",
                                 ctx.binary, domain
                             ),
                             notification_summary: None,
@@ -784,7 +799,20 @@ mod tests {
         let c = classify(&ctx("curl", &["https://unknown.example.com"]), &config);
 
         assert_eq!(c.bucket, Bucket::Block);
-        assert!(c.reason.contains("network mode blocks unknown"));
+        assert!(c.reason.contains("denies external HTTP"));
+    }
+
+    #[test]
+    fn test_curl_allowed_domain_blocked_by_deny_by_default_mode() {
+        let config = PolicyConfig {
+            network_mode: PolicyNetworkMode::DenyByDefault,
+            allowed_domains: vec!["api.github.com".into()],
+            ..Default::default()
+        };
+        let c = classify(&ctx("curl", &["https://api.github.com/repos"]), &config);
+
+        assert_eq!(c.bucket, Bucket::Block);
+        assert!(c.reason.contains("denies external HTTP"));
     }
 
     #[test]
@@ -797,6 +825,7 @@ mod tests {
         let c = classify(&ctx("curl", &["https://unknown.example.com"]), &config);
 
         assert_eq!(c.bucket, Bucket::Block);
+        assert!(c.reason.contains("allowlisted network mode"));
     }
 
     #[test]

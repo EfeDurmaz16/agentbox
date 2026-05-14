@@ -1398,7 +1398,53 @@ mod tests {
         let audit = manager.audit.recent(2).unwrap();
         assert_eq!(audit[0].bucket, "network");
         assert!(audit[0].decision.contains("blocked:"));
-        assert!(audit[0].decision.contains("network mode blocks unknown"));
+        assert!(audit[0].decision.contains("denies external HTTP"));
+    }
+
+    #[tokio::test]
+    async fn exec_blocks_allowlisted_http_in_deny_by_default_mode() {
+        let manager = manager("exec-network-deny-by-default-allowlisted");
+        let mut spec = MinipodSpec::for_agent_task("openclaw", "/tmp/agentbox-work");
+        spec.network.mode = crate::runtime::types::NetworkMode::DenyByDefault;
+        spec.network.allowed_domains = vec!["api.github.com".into()];
+        let session = manager.create(&spec).await.unwrap();
+        let command = ExecCommand {
+            argv: vec!["curl".into(), "https://api.github.com/repos".into()],
+            working_dir: Some("/workspace".into()),
+            env: Default::default(),
+            timeout_seconds: None,
+        };
+
+        let err = manager.exec(&session.id, &command).await.unwrap_err();
+
+        assert!(matches!(err, RuntimeError::PolicyDenied(_)));
+        let audit = manager.audit.recent(2).unwrap();
+        assert_eq!(audit[0].bucket, "network");
+        assert!(audit[0].decision.contains("blocked:"));
+        assert!(audit[0].decision.contains("denies external HTTP"));
+    }
+
+    #[tokio::test]
+    async fn exec_blocks_unknown_http_in_allowlisted_mode() {
+        let manager = manager("exec-network-allowlisted-unknown");
+        let mut spec = MinipodSpec::for_agent_task("openclaw", "/tmp/agentbox-work");
+        spec.network.mode = crate::runtime::types::NetworkMode::AllowListed;
+        spec.network.allowed_domains = vec!["api.github.com".into()];
+        let session = manager.create(&spec).await.unwrap();
+        let command = ExecCommand {
+            argv: vec!["curl".into(), "https://unknown.example.test".into()],
+            working_dir: Some("/workspace".into()),
+            env: Default::default(),
+            timeout_seconds: None,
+        };
+
+        let err = manager.exec(&session.id, &command).await.unwrap_err();
+
+        assert!(matches!(err, RuntimeError::PolicyDenied(_)));
+        let audit = manager.audit.recent(2).unwrap();
+        assert_eq!(audit[0].bucket, "network");
+        assert!(audit[0].decision.contains("blocked:"));
+        assert!(audit[0].decision.contains("allowlisted network mode"));
     }
 
     #[tokio::test]
