@@ -178,6 +178,9 @@ agentbox run --plan --risk high --workspace-mode overlay-review "codex"
 # The preview includes provider selection, candidates, backend actions,
 # network enforcement metadata, warnings, and the full AgentPod manifest.
 
+# Emit machine-readable run output for automation when a backend is runnable
+agentbox run --json --provider podman "npm test"
+
 # Generate the governed minipod manifest without starting a backend
 agentbox minipod-spec hermes --workspace . --allow-domain api.openai.com
 
