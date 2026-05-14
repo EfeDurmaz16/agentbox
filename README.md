@@ -179,7 +179,14 @@ agentbox minipod-spec hermes --workspace . --allow-domain api.openai.com
 # Generate a manifest where writes go to a reviewable overlay instead of being
 # modeled as direct host workspace writes. Provider execution support is still
 # separate from this manifest contract.
-agentbox minipod-spec hermes --workspace . --workspace-overlay-dir /tmp/agentbox-overlay-demo
+agentbox minipod-spec hermes --workspace . --workspace-mode overlay-review
+
+# Generate a higher-risk manifest that recommends the platform AgentPod provider
+# while staying honest if that provider is descriptor-only.
+agentbox minipod-spec codex --workspace . --risk high --provider auto
+
+# Force the current compatibility backend in the manifest.
+agentbox minipod-spec codex --workspace . --provider podman
 
 # Run a safe OpenClaw/Hermes-style manifest demo
 scripts/demo-autonomous-agent.sh
@@ -192,6 +199,9 @@ agentbox minipod-spec hermes --workspace . --deny-domain metadata.google.interna
 
 # Require approval on first contact for unknown external destinations
 agentbox minipod-spec hermes --workspace . --network-mode first-contact
+
+# Use normal internet access with guardrails for dangerous destinations.
+agentbox minipod-spec hermes --workspace . --network-mode open-with-guardrails
 
 # Disable localhost/loopback service access for a task
 agentbox minipod-spec hermes --workspace . --deny-localhost
@@ -243,7 +253,10 @@ loader wiring are verified.
 
 See [docs/product-direction.md](docs/product-direction.md) and
 [docs/status-matrix.md](docs/status-matrix.md) for current shipped status, and
-[docs/roadmap-100-issues.md](docs/roadmap-100-issues.md) for the current sprint direction.
+[docs/roadmap-250-commits.md](docs/roadmap-250-commits.md) for the current
+250+ atomic-commit product sprint. The older
+[docs/roadmap-100-issues.md](docs/roadmap-100-issues.md) is kept as historical
+planning context.
 See [docs/agentpod-contract.md](docs/agentpod-contract.md) for the final
 AgentPod product contract: adaptive providers, workspace modes, credential
 grants, network policy, host bridge, approval, and evidence.

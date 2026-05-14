@@ -16,9 +16,10 @@ Not every provider boundary is implemented yet.
 | Hash-chained evidence | Shipped | New audit rows include `schema_version`, `prev_hash`, and `event_hash`. |
 | Evidence export | Shipped | `agentbox evidence --limit N` exports audit rows as JSONL. |
 | Doctor command | Shipped | `agentbox doctor` reports daemon, shim, audit, PATH, and provider readiness. |
-| Minipod manifest model | Shipped | `MinipodSpec` models filesystem, network, credentials, resources, services, labels, agent profile, approvals, and task policy bundles. |
+| AgentPod manifest model | Shipped | `MinipodSpec` is now the compatibility type behind the AgentPod manifest surface. New manifests carry `schema_version`, `kind: AgentPod`, risk, workspace mode, filesystem, network, credentials, resources, services, labels, approvals, and task policy bundles. |
 | Manifest policy validation | Shipped | Unsafe host env inheritance, host network mode, and protected mounts are rejected before provider create. |
-| Writable workspace overlay policy | Shipped model | `MinipodSpec` can model direct writes or a review-required workspace overlay, and validation rejects missing, protected, or workspace-internal overlay paths. Provider execution wiring is not claimed. |
+| AgentPod workspace modes | Shipped model | Manifests can declare `direct`, `overlay-review`, `ephemeral`, and `commit-gated` workspace modes. Non-direct modes map to writable overlay policy with validated upper/work paths; provider execution wiring is not fully claimed. |
+| AgentPod risk model | Shipped model | Manifests carry `low`, `medium`, `high`, or `very-high` risk intent for provider selection and evidence. |
 | One-time credential file grants | Shipped | `--credential-file` creates read-only credential mounts and one-time file grants; provider mount metadata distinguishes them from ordinary read-only host mounts. |
 | Credential revocation evidence | Shipped | Destroying a runtime session records hash-chained credential revocation audit events for one-time grants. |
 | Per-agent policy profiles | Shipped | `general`, `coding`, `research`, `deploy`, and custom profile ids can set policy defaults without hardcoding specific agent products. |
@@ -29,6 +30,7 @@ Not every provider boundary is implemented yet.
 | Approval scope enforcement | Shipped | Runtime manager exec enforces once, command, path, domain, and session approval grants for approve-bucket commands. Expired grants are ignored and block-bucket commands cannot be grant-bypassed. |
 | Signed approval model | Shipped | Approval grants can be represented as signed approval records with evidence refs and optional FIDES-style signatures; no fake signing provider is shipped. |
 | First-contact network mode | Shipped | `ApprovalOnFirstContact` is a first-class minipod network mode exposed through `--network-mode first-contact`. |
+| Open-with-guardrails network mode | Shipped model | General AgentPod manifests default to usable internet with metadata endpoints denied. Provider packet/domain enforcement is still reported separately. |
 | Network denylist | Shipped | Minipod network policy and daemon policy config carry denied domains; denied network destinations are blocked before allowlists or approval grants. |
 | Localhost service policy | Shipped | Minipod manifests model localhost/loopback access and `--deny-localhost` makes runtime exec policy block loopback HTTP commands. |
 | Network boundary evidence | Shipped | Runtime exec records network-specific audit events for allowed, blocked, and approval-required HTTP boundary decisions. |
@@ -36,8 +38,8 @@ Not every provider boundary is implemented yet.
 | Command transcript export | Shipped | Runtime exec stores redacted stdout/stderr transcripts in the session evidence bundle with size metadata and truncation limits. |
 | Session replay metadata | Shipped | Session evidence bundles include ordered replay metadata with audit ids, hash links, policy buckets, decisions, and explicit metadata-only limitations. |
 | Minipod manifest CLI | Shipped | `agentbox minipod-spec` generates and validates a deny-by-default manifest, including `--policy-bundle` task policy JSON files. |
-| Runtime provider registry | Shipped | `RuntimeProviderRegistry` can resolve AgentPod provider descriptors and compatibility providers. |
-| Runtime provider listing | Shipped | `agentbox providers` reports shipped, experimental, unavailable, and planned provider surfaces. |
+| Runtime provider registry | Shipped | `RuntimeProviderRegistry` can resolve AgentPod provider descriptors and compatibility providers, and can explain provider selection by risk and explicit provider hints. |
+| Runtime provider listing | Shipped | `agentbox providers` reports family, platform, shipped/experimental/descriptor-only status, and network enforcement claims. |
 | Network enforcement capability flags | Shipped | Runtime providers separately report active network enforcement strength, so planned policy support is not confused with packet/domain enforcement. |
 | AgentPod provider descriptors | Shipped | `agentpod-macos`, `agentpod-linux`, and `agentpod-windows` expose capability metadata while returning unavailable for execution. |
 | Podman compatibility adapter | Shipped | `agentbox run` now routes through `RuntimeManager` and the Podman `RuntimeProvider` adapter, creating governed runtime sessions and evidence events. |
@@ -84,6 +86,8 @@ adaptive providers, workspace modes, credential grants, network policy, host
 bridge, approval, and evidence.
 See [Mac mini replacement wedge](mac-mini-replacement-wedge.md) for the local
 software-boundary positioning and its limits.
+See [250+ commit product sprint](roadmap-250-commits.md) for the current
+execution queue that supersedes the original 100-issue planning cut.
 See [release readiness](release-readiness.md) for the checklist before tagging
 public builds.
 See [installer packaging](installer-packaging.md) for the packaging path and the
