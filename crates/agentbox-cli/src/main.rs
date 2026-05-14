@@ -310,6 +310,11 @@ enum Commands {
         #[arg(long)]
         patch: bool,
     },
+    /// Discard projected workspace output for an AgentPod session
+    ReviewDiscard {
+        /// Session id whose projected review workspace should be discarded
+        session_id: String,
+    },
     /// Show logs for a minipod session backed by the compatibility backend
     MinipodLogs {
         /// Minipod session id; legacy sb-* backend ids are still accepted
@@ -3011,6 +3016,84 @@ fn cmd_review(session_id: String, json: bool, patch: bool) {
     }
 }
 
+fn cmd_review_discard(session_id: String) {
+    let (manager, _session) = runtime_manager_for_session(&session_id, "discard");
+    let discard = manager
+        .discard_workspace_projection(&session_id)
+        .unwrap_or_else(|e| {
+            eprintln!("error: failed to discard workspace projection: {}", e);
+            std::process::exit(1);
+        });
+
+    let Some(discard) = discard else {
+        println!(
+            "No projected review workspace recorded for session {}.",
+            session_id
+        );
+        return;
+    };
+
+    println!("Discarded projected workspace output.");
+    println!("session:   {}", session_id);
+    println!("projected: {}", discard.projected_host_path.display());
+    if let Some(work) = discard.work_host_path {
+        println!("work:      {}", work.display());
+    }
+    if let Some(lower) = discard.lower_host_path {
+        println!("lower:     {} (left untouched)", lower.display());
+    }
+}
+
+fn runtime_manager_for_session(
+    session_id: &str,
+    action: &str,
+) -> (
+    agentbox_daemon::runtime::manager::RuntimeManager,
+    agentbox_daemon::runtime::types::RuntimeSession,
+) {
+    use agentbox_daemon::audit::AuditStore;
+    use agentbox_daemon::config;
+    use agentbox_daemon::runtime::manager::RuntimeManager;
+    use agentbox_daemon::runtime::registry::RuntimeProviderRegistry;
+    use agentbox_daemon::runtime::session::RuntimeSessionStore;
+
+    let config = config::load().unwrap_or_else(|e| {
+        eprintln!("error: failed to load Agentbox config: {}", e);
+        std::process::exit(1);
+    });
+    let store = RuntimeSessionStore::new(config.session_store_path.clone());
+    let session = store.get(session_id).unwrap_or_else(|e| {
+        eprintln!("error: failed to read runtime session store: {}", e);
+        std::process::exit(1);
+    });
+    let Some(session) = session else {
+        eprintln!("error: AgentPod session not found: {}", session_id);
+        std::process::exit(1);
+    };
+    let registry = RuntimeProviderRegistry::with_local_providers(
+        socket_path().to_string_lossy().into_owned(),
+        find_shim_binary()
+            .map(|path| path.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+    );
+    let provider = registry.get(&session.provider).unwrap_or_else(|e| {
+        eprintln!(
+            "error: failed to resolve session provider `{}` for {}: {}",
+            session.provider, action, e
+        );
+        std::process::exit(1);
+    });
+    let manager = RuntimeManager::new(
+        provider,
+        RuntimeSessionStore::new(config.session_store_path),
+        AuditStore::new(&config.db_path).unwrap_or_else(|e| {
+            eprintln!("error: failed to open audit store: {}", e);
+            std::process::exit(1);
+        }),
+    );
+    (manager, session)
+}
+
 fn print_minipod_session(session: &agentbox_daemon::runtime::types::RuntimeSession) {
     println!("session:   {}", session.id);
     println!("name:      {}", session.name);
@@ -3216,6 +3299,7 @@ async fn main() {
             json,
             patch,
         } => cmd_review(session_id, json, patch),
+        Commands::ReviewDiscard { session_id } => cmd_review_discard(session_id),
         Commands::MinipodLogs {
             session_id,
             follow,

@@ -134,10 +134,12 @@ fn validate_workspace_overlay(spec: &MinipodSpec) -> Result<(), RuntimeError> {
         if upper.as_os_str().is_empty() {
             return reject("workspace overlay upper path cannot be empty");
         }
-        if is_inside_workspace(spec, upper) {
+        if is_inside_workspace(spec, upper) && !is_materialized_projection_path(spec, upper) {
             return reject("workspace overlay upper path cannot sit inside the workspace");
         }
-        if escapes_workspace_via_symlink(spec, upper) {
+        if escapes_workspace_via_symlink(spec, upper)
+            && !is_materialized_projection_path(spec, upper)
+        {
             return reject("workspace overlay upper path escapes workspace through symlink");
         }
         if is_protected_path(spec, upper) {
@@ -198,6 +200,20 @@ fn is_protected_path(spec: &MinipodSpec, path: &Path) -> bool {
 fn is_inside_workspace(spec: &MinipodSpec, path: &Path) -> bool {
     let workspace = normalize_path(&spec.filesystem.workspace_host_path);
     !workspace.as_os_str().is_empty() && normalize_path(path).starts_with(workspace)
+}
+
+fn is_materialized_projection_path(spec: &MinipodSpec, path: &Path) -> bool {
+    let Some(projected) = spec.labels.get("agentbox.workspace.projected") else {
+        return false;
+    };
+    let Some(lower) = spec.labels.get("agentbox.workspace.lower") else {
+        return false;
+    };
+
+    normalize_path(path) == normalize_path(Path::new(projected))
+        && normalize_path(&spec.filesystem.workspace_host_path)
+            == normalize_path(Path::new(projected))
+        && normalize_path(Path::new(lower)) != normalize_path(Path::new(projected))
 }
 
 fn has_matching_file_grant(spec: &MinipodSpec, path: &Path) -> bool {

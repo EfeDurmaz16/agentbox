@@ -168,6 +168,60 @@ impl WorkspaceProjectionMaterializer {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceProjectionDiscard {
+    pub lower_host_path: Option<PathBuf>,
+    pub projected_host_path: PathBuf,
+    pub work_host_path: Option<PathBuf>,
+}
+
+pub struct WorkspaceProjectionDiscarder;
+
+impl WorkspaceProjectionDiscarder {
+    pub fn discard(
+        session: &RuntimeSession,
+    ) -> Result<Option<WorkspaceProjectionDiscard>, WorkspaceOverlayError> {
+        let Some(projected) = session.spec.labels.get("agentbox.workspace.projected") else {
+            return Ok(None);
+        };
+
+        let projected_host_path = PathBuf::from(projected);
+        let lower_host_path = session
+            .spec
+            .labels
+            .get("agentbox.workspace.lower")
+            .map(PathBuf::from);
+        let work_host_path = session
+            .spec
+            .filesystem
+            .workspace_overlay
+            .work_host_path
+            .clone();
+
+        if let Some(lower) = &lower_host_path {
+            let lower = canonicalize_existing(lower)?;
+            let projected = canonicalize_for_delete(&projected_host_path)?;
+            if projected == lower || projected.starts_with(&lower) {
+                return Err(WorkspaceOverlayError::OverlayInsideWorkspace {
+                    overlay_path: projected,
+                    workspace_path: lower,
+                });
+            }
+        }
+
+        remove_dir_if_exists(&projected_host_path)?;
+        if let Some(work) = &work_host_path {
+            remove_dir_if_exists(work)?;
+        }
+
+        Ok(Some(WorkspaceProjectionDiscard {
+            lower_host_path,
+            projected_host_path,
+            work_host_path,
+        }))
+    }
+}
+
 fn canonicalize_existing(path: &Path) -> Result<PathBuf, WorkspaceOverlayError> {
     path.canonicalize().map_err(|err| {
         WorkspaceOverlayError::Io(format!(
@@ -212,6 +266,37 @@ fn canonicalize_for_create(path: &Path) -> Result<PathBuf, WorkspaceOverlayError
         ))
     })?;
     Ok(parent.join(file_name))
+}
+
+fn canonicalize_for_delete(path: &Path) -> Result<PathBuf, WorkspaceOverlayError> {
+    if path.exists() {
+        path.canonicalize().map_err(|err| {
+            WorkspaceOverlayError::Io(format!(
+                "failed to canonicalize workspace overlay path {}: {err}",
+                path.display()
+            ))
+        })
+    } else {
+        canonicalize_for_create(path)
+    }
+}
+
+fn remove_dir_if_exists(path: &Path) -> Result<(), WorkspaceOverlayError> {
+    if !path.exists() {
+        return Ok(());
+    }
+    if !path.is_dir() {
+        return Err(WorkspaceOverlayError::Io(format!(
+            "workspace projection path {} is not a directory",
+            path.display()
+        )));
+    }
+    fs::remove_dir_all(path).map_err(|err| {
+        WorkspaceOverlayError::Io(format!(
+            "failed to remove workspace projection path {}: {err}",
+            path.display()
+        ))
+    })
 }
 
 fn ensure_empty_dir(path: &Path) -> Result<(), WorkspaceOverlayError> {
@@ -659,6 +744,53 @@ mod tests {
             err,
             WorkspaceOverlayError::OverlayUpperNotEmpty(_)
         ));
+        let _ = fs::remove_dir_all(&workspace);
+        let _ = fs::remove_dir_all(&overlay);
+    }
+
+    #[test]
+    fn projection_discarder_removes_projected_workspace_without_touching_lower() {
+        let workspace = unique_dir("discard-workspace");
+        let overlay = unique_dir("discard-overlay");
+        let _ = fs::remove_dir_all(&workspace);
+        let _ = fs::remove_dir_all(&overlay);
+        fs::create_dir_all(&workspace).unwrap();
+        fs::write(workspace.join("README.md"), "lower\n").unwrap();
+        let mut spec = MinipodSpec::for_agent_task("hermes", &workspace);
+        spec.workspace_mode = AgentPodWorkspaceMode::OverlayReview;
+        spec.filesystem.workspace_overlay =
+            WorkspaceOverlayPolicy::review_required(Some(overlay.clone()));
+        let projection = WorkspaceProjectionMaterializer::materialize(&mut spec)
+            .unwrap()
+            .expect("workspace should be projected");
+        fs::write(
+            projection.projected_host_path.join("README.md"),
+            "projected\n",
+        )
+        .unwrap();
+        let session = RuntimeSession {
+            id: "01agentboxsession".into(),
+            name: spec.name.clone(),
+            provider: "podman".into(),
+            platform: "linux-vm".into(),
+            status: RuntimeStatus::Stopped,
+            spec,
+            approval_grants: vec![],
+            transcripts: vec![],
+            started_at: Utc::now(),
+            stopped_at: Some(Utc::now()),
+        };
+
+        let discard = WorkspaceProjectionDiscarder::discard(&session)
+            .unwrap()
+            .expect("projection should be discarded");
+
+        assert_eq!(
+            fs::read_to_string(workspace.join("README.md")).unwrap(),
+            "lower\n"
+        );
+        assert!(!discard.projected_host_path.exists());
+        assert!(!discard.work_host_path.unwrap().exists());
         let _ = fs::remove_dir_all(&workspace);
         let _ = fs::remove_dir_all(&overlay);
     }

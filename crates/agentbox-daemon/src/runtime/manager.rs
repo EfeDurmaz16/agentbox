@@ -14,7 +14,10 @@ use crate::runtime::types::{
     ApprovalGrant, CommandResult, CommandTranscript, ExecCommand, MinipodSpec, RuntimeSession,
     RuntimeStatus,
 };
-use crate::runtime::workspace::{WorkspaceDiffSnapshot, WorkspaceDiffSnapshotter};
+use crate::runtime::workspace::{
+    WorkspaceDiffSnapshot, WorkspaceDiffSnapshotter, WorkspaceProjectionDiscard,
+    WorkspaceProjectionDiscarder,
+};
 
 pub struct RuntimeManager {
     provider: Arc<dyn RuntimeProvider>,
@@ -254,6 +257,32 @@ impl RuntimeManager {
         }
 
         Ok(snapshot)
+    }
+
+    pub fn discard_workspace_projection(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<WorkspaceProjectionDiscard>, RuntimeError> {
+        let session = self
+            .sessions
+            .get(session_id)
+            .map_err(|e| RuntimeError::Internal(e.to_string()))?
+            .ok_or_else(|| RuntimeError::NotFound(session_id.to_string()))?;
+        let discard = WorkspaceProjectionDiscarder::discard(&session)
+            .map_err(|e| RuntimeError::Internal(e.to_string()))?;
+
+        if let Some(discard) = &discard {
+            self.audit_runtime_event(
+                "workspace.projection_discard",
+                &session,
+                "workspace",
+                &format!("discarded:{}", discard.projected_host_path.display()),
+                None,
+                Some(self.provider.name().to_string()),
+            )?;
+        }
+
+        Ok(discard)
     }
 
     fn enforce_exec_policy(
@@ -982,6 +1011,51 @@ mod tests {
         assert_eq!(audit[0].decision, "changed_files:1");
 
         let _ = fs::remove_dir_all(&workspace);
+    }
+
+    #[tokio::test]
+    async fn discard_workspace_projection_records_workspace_evidence() {
+        let workspace = std::env::temp_dir().join(format!(
+            "agentbox-manager-discard-workspace-{}",
+            std::process::id()
+        ));
+        let overlay = std::env::temp_dir().join(format!(
+            "agentbox-manager-discard-overlay-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&workspace);
+        let _ = fs::remove_dir_all(&overlay);
+        fs::create_dir_all(&workspace).unwrap();
+        fs::write(workspace.join("README.md"), "lower\n").unwrap();
+        let manager = manager("workspace-discard");
+        let mut spec = MinipodSpec::for_agent_task("openclaw", &workspace);
+        spec.workspace_mode = crate::runtime::types::AgentPodWorkspaceMode::OverlayReview;
+        spec.filesystem.workspace_write_policy =
+            crate::runtime::types::WorkspaceWritePolicy::WritableOverlay;
+        spec.filesystem.workspace_overlay =
+            crate::runtime::types::WorkspaceOverlayPolicy::review_required(Some(overlay.clone()));
+        crate::runtime::workspace::WorkspaceProjectionMaterializer::materialize(&mut spec)
+            .unwrap()
+            .expect("workspace projection should be prepared");
+        let session = manager.create(&spec).await.unwrap();
+
+        let discard = manager
+            .discard_workspace_projection(&session.id)
+            .unwrap()
+            .expect("projection should exist");
+
+        assert!(!discard.projected_host_path.exists());
+        assert_eq!(
+            fs::read_to_string(workspace.join("README.md")).unwrap(),
+            "lower\n"
+        );
+        let audit = manager.audit.recent(1).unwrap();
+        assert_eq!(audit[0].bucket, "workspace");
+        assert!(audit[0].command.contains("workspace.projection_discard"));
+        assert!(audit[0].decision.contains("discarded:"));
+
+        let _ = fs::remove_dir_all(&workspace);
+        let _ = fs::remove_dir_all(&overlay);
     }
 
     #[tokio::test]
