@@ -13,6 +13,7 @@ use chrono::{NaiveDateTime, Utc};
 use clap::{Parser, Subcommand};
 use rusqlite::Connection;
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 
 // ---------------------------------------------------------------------------
 // CLI definition
@@ -2896,6 +2897,8 @@ struct EvidenceBundleFile {
     path: String,
     media_type: String,
     description: String,
+    sha256: String,
+    bytes: usize,
 }
 
 fn write_session_evidence_bundle_dir(
@@ -2903,22 +2906,32 @@ fn write_session_evidence_bundle_dir(
     output_dir: &Path,
 ) -> io::Result<()> {
     fs::create_dir_all(output_dir)?;
-    fs::write(
-        output_dir.join("bundle.json"),
-        serde_json::to_vec_pretty(bundle).expect("failed to serialize evidence bundle"),
-    )?;
-    fs::write(
-        output_dir.join("manifest.json"),
-        serde_json::to_vec_pretty(&bundle.manifest).expect("failed to serialize manifest"),
-    )?;
-    fs::write(
-        output_dir.join("replay.json"),
-        serde_json::to_vec_pretty(&bundle.replay).expect("failed to serialize replay metadata"),
-    )?;
-    fs::write(
-        output_dir.join("transcripts.json"),
-        serde_json::to_vec_pretty(&bundle.transcripts).expect("failed to serialize transcripts"),
-    )?;
+    let files = vec![
+        write_bundle_json_file(
+            output_dir,
+            "bundle.json",
+            "Full redacted AgentPod session evidence bundle",
+            bundle,
+        )?,
+        write_bundle_json_file(
+            output_dir,
+            "manifest.json",
+            "AgentPod manifest captured for this session",
+            &bundle.manifest,
+        )?,
+        write_bundle_json_file(
+            output_dir,
+            "replay.json",
+            "Metadata-only replay plan and limitations",
+            &bundle.replay,
+        )?,
+        write_bundle_json_file(
+            output_dir,
+            "transcripts.json",
+            "Redacted command transcripts captured by RuntimeManager",
+            &bundle.transcripts,
+        )?,
+    ];
 
     let index = EvidenceBundleIndex {
         schema_version: 1,
@@ -2927,34 +2940,35 @@ fn write_session_evidence_bundle_dir(
         provider: bundle.provider.clone(),
         status: format!("{:?}", bundle.status),
         generated_at: bundle.generated_at,
-        files: vec![
-            EvidenceBundleFile {
-                path: "bundle.json".to_string(),
-                media_type: "application/json".to_string(),
-                description: "Full redacted AgentPod session evidence bundle".to_string(),
-            },
-            EvidenceBundleFile {
-                path: "manifest.json".to_string(),
-                media_type: "application/json".to_string(),
-                description: "AgentPod manifest captured for this session".to_string(),
-            },
-            EvidenceBundleFile {
-                path: "replay.json".to_string(),
-                media_type: "application/json".to_string(),
-                description: "Metadata-only replay plan and limitations".to_string(),
-            },
-            EvidenceBundleFile {
-                path: "transcripts.json".to_string(),
-                media_type: "application/json".to_string(),
-                description: "Redacted command transcripts captured by RuntimeManager".to_string(),
-            },
-        ],
+        files,
     };
     fs::write(
         output_dir.join("index.json"),
         serde_json::to_vec_pretty(&index).expect("failed to serialize evidence bundle index"),
     )?;
     Ok(())
+}
+
+fn write_bundle_json_file<T: Serialize>(
+    output_dir: &Path,
+    path: &str,
+    description: &str,
+    value: &T,
+) -> io::Result<EvidenceBundleFile> {
+    let bytes = serde_json::to_vec_pretty(value).expect("failed to serialize evidence bundle file");
+    fs::write(output_dir.join(path), &bytes)?;
+    Ok(EvidenceBundleFile {
+        path: path.to_string(),
+        media_type: "application/json".to_string(),
+        description: description.to_string(),
+        sha256: sha256_hex(&bytes),
+        bytes: bytes.len(),
+    })
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 fn cmd_session_credentials_evidence(db_path: &PathBuf, session_id: &str, limit: usize) {
@@ -4362,6 +4376,10 @@ mod tests {
         assert_eq!(index["schema_version"], 1);
         assert_eq!(index["session_id"], bundle.session_id);
         assert_eq!(index["files"].as_array().unwrap().len(), 4);
+        for file in index["files"].as_array().unwrap() {
+            assert_eq!(file["sha256"].as_str().unwrap().len(), 64);
+            assert!(file["bytes"].as_u64().unwrap() > 0);
+        }
 
         let _ = fs::remove_dir_all(output_dir);
     }

@@ -14,7 +14,7 @@ Not every provider boundary is implemented yet.
 | Out-of-band approval | Shipped | The daemon can send ntfy approvals and waits for approve, deny, or timeout. |
 | SQLite audit log | Shipped | The daemon records command, cwd, bucket, decision, parent process, and timing. |
 | Hash-chained evidence | Shipped | New audit rows include `schema_version`, `prev_hash`, and `event_hash`. |
-| Evidence export | Shipped | `agentbox evidence --limit N` exports audit rows as JSONL. `agentbox evidence --session <id> --bundle <dir>` writes a session evidence bundle directory with `index.json`, `bundle.json`, `manifest.json`, `replay.json`, and `transcripts.json`. |
+| Evidence export | Shipped | `agentbox evidence --limit N` exports audit rows as JSONL. `agentbox evidence --session <id> --bundle <dir>` writes a session evidence bundle directory with `index.json`, `bundle.json`, `manifest.json`, `replay.json`, and `transcripts.json`; `index.json` includes per-file SHA-256 digests and byte counts for sealed-bundle handoff. |
 | Doctor command | Shipped | `agentbox doctor` reports daemon, shim, audit, PATH, and provider readiness. |
 | AgentPod manifest model | Shipped | `MinipodSpec` is now the compatibility type behind the AgentPod manifest surface. New manifests carry `schema_version`, `kind: AgentPod`, risk, workspace mode, filesystem, network, credentials, resources, services, labels, approvals, and task policy bundles. |
 | Manifest policy validation | Shipped | Unsafe host env inheritance, host network mode, and protected mounts are rejected before provider create. |
