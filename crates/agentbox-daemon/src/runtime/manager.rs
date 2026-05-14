@@ -11,8 +11,8 @@ use crate::runtime::policy::validate_minipod_spec;
 use crate::runtime::provider::{RuntimeError, RuntimeProvider};
 use crate::runtime::session::RuntimeSessionStore;
 use crate::runtime::types::{
-    ApprovalGrant, CommandResult, CommandTranscript, CredentialGrantKind, ExecCommand, MinipodSpec,
-    RuntimeSession, RuntimeStatus,
+    ApprovalGrant, CommandResult, CommandTranscript, CredentialGrant, CredentialGrantKind,
+    ExecCommand, MinipodSpec, RuntimeSession, RuntimeStatus,
 };
 use crate::runtime::workspace::{
     WorkspaceDiffSnapshot, WorkspaceDiffSnapshotter, WorkspaceProjectionApplier,
@@ -229,6 +229,49 @@ impl RuntimeManager {
             .into_iter()
             .filter(|grant| !grant.is_expired_at(now))
             .collect())
+    }
+
+    pub fn list_credential_grants(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<CredentialGrant>, RuntimeError> {
+        let session = self
+            .sessions
+            .get(session_id)
+            .map_err(|e| RuntimeError::Internal(e.to_string()))?
+            .ok_or_else(|| RuntimeError::NotFound(session_id.to_string()))?;
+
+        Ok(session.spec.credentials.grants.clone())
+    }
+
+    pub fn revoke_credential_grant(
+        &self,
+        session_id: &str,
+        grant_name: &str,
+    ) -> Result<Option<CredentialGrant>, RuntimeError> {
+        let mut session = self
+            .sessions
+            .get(session_id)
+            .map_err(|e| RuntimeError::Internal(e.to_string()))?
+            .ok_or_else(|| RuntimeError::NotFound(session_id.to_string()))?;
+
+        let Some(index) = session
+            .spec
+            .credentials
+            .grants
+            .iter()
+            .position(|grant| grant.name == grant_name)
+        else {
+            return Ok(None);
+        };
+
+        let grant = session.spec.credentials.grants.remove(index);
+        self.audit_credential_revocation(&session, &grant, "operator")?;
+        self.sessions
+            .upsert(session)
+            .map_err(|e| RuntimeError::Internal(e.to_string()))?;
+
+        Ok(Some(grant))
     }
 
     pub fn list_sessions(&self) -> Result<Vec<RuntimeSession>, RuntimeError> {
@@ -517,27 +560,36 @@ impl RuntimeManager {
             .iter()
             .filter(|grant| grant.one_time)
         {
-            let event = AuditEvent::new(
-                0,
-                Some(session.spec.agent.name.clone()),
-                format!("credential.revoke {} {}", grant.name, session.id),
-                session
-                    .spec
-                    .filesystem
-                    .workspace_host_path
-                    .display()
-                    .to_string(),
-                "credential".to_string(),
-                format!("revoked:one_time:{:?}", grant.kind),
-                None,
-                Some(self.provider.name().to_string()),
-            );
-            self.audit
-                .log_event(&event)
-                .map_err(|e| RuntimeError::Internal(e.to_string()))?;
+            self.audit_credential_revocation(session, grant, "one_time")?;
         }
 
         Ok(())
+    }
+
+    fn audit_credential_revocation(
+        &self,
+        session: &RuntimeSession,
+        grant: &CredentialGrant,
+        reason: &str,
+    ) -> Result<(), RuntimeError> {
+        let event = AuditEvent::new(
+            0,
+            Some(session.spec.agent.name.clone()),
+            format!("credential.revoke {} {}", grant.name, session.id),
+            session
+                .spec
+                .filesystem
+                .workspace_host_path
+                .display()
+                .to_string(),
+            "credential".to_string(),
+            format!("revoked:{reason}:{:?}", grant.kind),
+            None,
+            Some(self.provider.name().to_string()),
+        );
+        self.audit
+            .log_event(&event)
+            .map_err(|e| RuntimeError::Internal(e.to_string()))
     }
 }
 
@@ -834,6 +886,71 @@ mod tests {
             assert!(err.to_string().contains("missing host env var"));
         })
         .await;
+    }
+
+    #[tokio::test]
+    async fn list_credential_grants_returns_session_manifest_grants() {
+        let manager = manager("credential-list");
+        let mut spec = MinipodSpec::for_agent_task("openclaw", "/tmp/agentbox-work");
+        spec.credentials.grants.push(CredentialGrant {
+            name: "OPENAI_API_KEY".into(),
+            kind: CredentialGrantKind::EnvVar,
+            target: "AGENTBOX_TEST_SECRET".into(),
+            one_time: true,
+            requires_approval: true,
+        });
+        let session = manager.create(&spec).await.unwrap();
+
+        let grants = manager.list_credential_grants(&session.id).unwrap();
+
+        assert_eq!(grants.len(), 1);
+        assert_eq!(grants[0].name, "OPENAI_API_KEY");
+        assert!(matches!(grants[0].kind, CredentialGrantKind::EnvVar));
+    }
+
+    #[tokio::test]
+    async fn revoke_credential_grant_removes_grant_and_records_evidence() {
+        let manager = manager("credential-revoke");
+        let mut spec = MinipodSpec::for_agent_task("openclaw", "/tmp/agentbox-work");
+        spec.credentials.grants.push(CredentialGrant {
+            name: "OPENAI_API_KEY".into(),
+            kind: CredentialGrantKind::EnvVar,
+            target: "AGENTBOX_TEST_SECRET".into(),
+            one_time: true,
+            requires_approval: true,
+        });
+        let session = manager.create(&spec).await.unwrap();
+
+        let revoked = manager
+            .revoke_credential_grant(&session.id, "OPENAI_API_KEY")
+            .unwrap()
+            .expect("grant should be revoked");
+
+        assert_eq!(revoked.name, "OPENAI_API_KEY");
+        assert!(manager
+            .list_credential_grants(&session.id)
+            .unwrap()
+            .is_empty());
+        let audit = manager.audit.recent(4).unwrap();
+        assert_eq!(audit[0].bucket, "credential");
+        assert!(audit[0]
+            .command
+            .contains("credential.revoke OPENAI_API_KEY"));
+        assert!(audit[0].decision.contains("revoked:operator"));
+    }
+
+    #[tokio::test]
+    async fn revoke_credential_grant_returns_none_for_unknown_grant() {
+        let manager = manager("credential-revoke-missing");
+        let spec = MinipodSpec::for_agent_task("openclaw", "/tmp/agentbox-work");
+        let session = manager.create(&spec).await.unwrap();
+
+        let revoked = manager
+            .revoke_credential_grant(&session.id, "OPENAI_API_KEY")
+            .unwrap();
+
+        assert!(revoked.is_none());
+        assert_eq!(manager.audit.recent(4).unwrap()[0].bucket, "runtime");
     }
 
     #[tokio::test]
