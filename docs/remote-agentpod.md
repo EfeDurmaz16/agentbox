@@ -167,18 +167,21 @@ engine. The `exec` route runs the provided argv directly, without invoking a
 shell, and returns exit code, stdout, stderr, duration, and lifecycle evidence.
 Exec now requires a created, running worker session, so the worker will not
 accept an arbitrary `worker_session_id` before `/sessions` has allocated it.
+Evidence upload validates the evidence metadata and records an in-memory receipt
+on the matching worker session before acknowledging the bundle hash and event
+count.
 When the daemon-side provider creates a remote session, it persists the worker
 endpoint, worker session id, worker identity, and worker evidence endpoint in
 session labels so later exec/destroy calls can route back to the same worker.
 Workspace materialization, policy enforcement, credential handoff, evidence
-storage, and durable worker supervision remain future work.
+durability, and durable worker supervision remain future work.
 
 `scripts/smoke-remote-worker.sh` starts this worker on a random loopback port,
 posts a handshake descriptor, checks the Ed25519 acknowledgement shape, creates
 worker sessions from generated AgentPod specs, runs a direct `printf` exec
-request, verifies the returned lifecycle evidence, then starts a long-running
-command and proves destroy sends a kill signal that returns exit code `130` plus
-`KillSwitchAck`.
+request, uploads a bundle metadata receipt, verifies the returned lifecycle
+evidence, then starts a long-running command and proves destroy sends a kill
+signal that returns exit code `130` plus `KillSwitchAck`.
 
 ## Lifecycle Contract
 

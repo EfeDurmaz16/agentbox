@@ -55,6 +55,13 @@ struct WorkerSession {
     session_id: String,
     status: RuntimeStatus,
     kill_tx: watch::Sender<bool>,
+    evidence_receipts: Vec<WorkerEvidenceReceipt>,
+}
+
+#[derive(Clone)]
+struct WorkerEvidenceReceipt {
+    bundle_sha256: String,
+    event_count: u64,
 }
 
 impl WorkerSession {
@@ -64,6 +71,7 @@ impl WorkerSession {
             session_id,
             status: RuntimeStatus::Running,
             kill_tx,
+            evidence_receipts: Vec::new(),
         }
     }
 
@@ -311,15 +319,43 @@ fn elapsed_ms(started: Instant) -> u64 {
 }
 
 async fn upload_evidence(
+    State(state): State<Arc<RemoteWorkerState>>,
     Json(request): Json<RemoteAgentPodEvidenceUploadRequest>,
 ) -> Json<RemoteAgentPodEvidenceUploadResponse> {
+    let accepted = accept_evidence(&state, &request).await;
     Json(RemoteAgentPodEvidenceUploadResponse {
         session_id: request.session_id,
         worker_session_id: request.worker_session_id,
-        accepted_bundle_sha256: request.bundle_sha256,
-        accepted_event_count: request.event_count,
+        accepted_bundle_sha256: accepted
+            .as_ref()
+            .map(|receipt| receipt.bundle_sha256.clone())
+            .unwrap_or_else(|| request.bundle_sha256.clone()),
+        accepted_event_count: accepted
+            .as_ref()
+            .map(|receipt| receipt.event_count)
+            .unwrap_or(0),
         lifecycle_events: vec![RemoteAgentPodLifecycleEvent::EvidenceSealed],
     })
+}
+
+async fn accept_evidence(
+    state: &Arc<RemoteWorkerState>,
+    request: &RemoteAgentPodEvidenceUploadRequest,
+) -> Option<WorkerEvidenceReceipt> {
+    if request.validate().is_err() {
+        return None;
+    }
+    let mut sessions = state.sessions.lock().await;
+    let session = sessions.get_mut(&request.worker_session_id)?;
+    if session.session_id != request.session_id {
+        return None;
+    }
+    let receipt = WorkerEvidenceReceipt {
+        bundle_sha256: request.bundle_sha256.clone(),
+        event_count: request.event_count,
+    };
+    session.evidence_receipts.push(receipt.clone());
+    Some(receipt)
 }
 
 async fn destroy_session(
@@ -382,7 +418,7 @@ mod tests {
     use super::*;
     use agentbox_daemon::runtime::providers::remote::{
         Ed25519HandshakeVerifier, RemoteAgentPodAuthKind, RemoteAgentPodDestroySessionRequest,
-        RemoteAgentPodHandshakeVerifier,
+        RemoteAgentPodEvidenceMode, RemoteAgentPodHandshakeVerifier,
     };
     use agentbox_daemon::runtime::types::ExecCommand;
     use std::collections::HashMap;
@@ -558,5 +594,40 @@ mod tests {
         assert_eq!(destroy.status, RuntimeStatus::Stopped);
         assert_eq!(response.result.exit_code, 130);
         assert!(response.result.stderr.contains("killed"));
+    }
+
+    #[tokio::test]
+    async fn upload_evidence_records_session_receipt() {
+        let config = RemoteWorkerConfig::new(
+            "worker.local/dev",
+            "https://worker.example.com/agentpod/evidence",
+            SigningKey::from_bytes(&[26_u8; 32]),
+        );
+        let state = test_state(config);
+        state.sessions.lock().await.insert(
+            "worker-session-1".into(),
+            WorkerSession::new("session-1".into()),
+        );
+        let request = RemoteAgentPodEvidenceUploadRequest {
+            session_id: "session-1".into(),
+            worker_session_id: "worker-session-1".into(),
+            evidence_mode: RemoteAgentPodEvidenceMode::BundleUpload,
+            bundle_sha256: "a".repeat(64),
+            derived_from_bundle: false,
+            bundle_id: None,
+            bundle_root_sha256: None,
+            event_count: 7,
+            sealed_at: chrono::Utc::now(),
+            secret_material_included: false,
+        };
+
+        let response = upload_evidence(State(state.clone()), Json(request)).await.0;
+
+        assert_eq!(response.accepted_event_count, 7);
+        let sessions = state.sessions.lock().await;
+        let session = sessions.get("worker-session-1").unwrap();
+        assert_eq!(session.evidence_receipts.len(), 1);
+        assert_eq!(session.evidence_receipts[0].bundle_sha256, "a".repeat(64));
+        assert_eq!(session.evidence_receipts[0].event_count, 7);
     }
 }

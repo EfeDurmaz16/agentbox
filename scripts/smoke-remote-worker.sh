@@ -121,6 +121,28 @@ assert data["result"]["stdout"] == "remote-worker-smoke"
 assert "EvidenceSealed" in data["lifecycle_events"]
 PY
 
+SEALED_AT="$(python3 - <<'PY'
+from datetime import datetime, timezone
+print(datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"))
+PY
+)"
+curl -fsS "http://127.0.0.1:${PORT}/sessions/${WORKER_SESSION_ID}/evidence" \
+  -H 'content-type: application/json' \
+  --data "{\"session_id\":\"${SESSION_ID}\",\"worker_session_id\":\"${WORKER_SESSION_ID}\",\"evidence_mode\":\"BundleUpload\",\"bundle_sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\",\"derived_from_bundle\":false,\"bundle_id\":null,\"bundle_root_sha256\":null,\"event_count\":2,\"sealed_at\":\"${SEALED_AT}\",\"secret_material_included\":false}" \
+  >"$TMPDIR/evidence-response.json"
+
+python3 - "$TMPDIR/evidence-response.json" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], "r", encoding="utf-8") as fh:
+    data = json.load(fh)
+
+assert data["accepted_bundle_sha256"] == "f" * 64
+assert data["accepted_event_count"] == 2
+assert "EvidenceSealed" in data["lifecycle_events"]
+PY
+
 cargo run --locked -q -p agentbox-cli -- minipod-spec remote-smoke-long --risk medium --workspace "$TMPDIR/workspace" \
   >"$TMPDIR/spec-long.json"
 python3 - "$TMPDIR/spec-long.json" "$TMPDIR/handshake-ack.json" >"$TMPDIR/create-long-request.json" <<'PY'
