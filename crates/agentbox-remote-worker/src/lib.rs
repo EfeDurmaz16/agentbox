@@ -47,12 +47,34 @@ impl RemoteWorkerConfig {
 
 struct RemoteWorkerState {
     config: RemoteWorkerConfig,
-    sessions: Mutex<HashMap<String, WorkerSessionControl>>,
+    sessions: Mutex<HashMap<String, WorkerSession>>,
 }
 
 #[derive(Clone)]
-struct WorkerSessionControl {
+struct WorkerSession {
+    session_id: String,
+    status: RuntimeStatus,
     kill_tx: watch::Sender<bool>,
+}
+
+impl WorkerSession {
+    fn new(session_id: String) -> Self {
+        let (kill_tx, _kill_rx) = watch::channel(false);
+        Self {
+            session_id,
+            status: RuntimeStatus::Running,
+            kill_tx,
+        }
+    }
+
+    fn kill_receiver(&self) -> watch::Receiver<bool> {
+        self.kill_tx.subscribe()
+    }
+
+    fn mark_stopped(&mut self) {
+        self.status = RuntimeStatus::Stopped;
+        let _ = self.kill_tx.send(true);
+    }
 }
 
 pub fn router(config: RemoteWorkerConfig) -> Router {
@@ -114,12 +136,12 @@ async fn create_session(
     Json(request): Json<RemoteAgentPodCreateSessionRequest>,
 ) -> Json<RemoteAgentPodCreateSessionResponse> {
     let worker_session_id = format!("worker-{}", request.spec.id);
-    let (kill_tx, _kill_rx) = watch::channel(false);
+    let session = WorkerSession::new(request.spec.id.clone());
     state
         .sessions
         .lock()
         .await
-        .insert(worker_session_id.clone(), WorkerSessionControl { kill_tx });
+        .insert(worker_session_id.clone(), session);
     Json(RemoteAgentPodCreateSessionResponse {
         session_id: request.spec.id.clone(),
         worker_session_id,
@@ -136,7 +158,15 @@ async fn exec_command(
     Json(request): Json<RemoteAgentPodExecRequest>,
 ) -> Json<RemoteAgentPodExecResponse> {
     let started = Instant::now();
-    let kill_rx = session_kill_receiver(&state, &request.worker_session_id).await;
+    let kill_rx = match session_kill_receiver(&state, &request).await {
+        Ok(kill_rx) => kill_rx,
+        Err(result) => {
+            return Json(RemoteAgentPodExecResponse {
+                result,
+                lifecycle_events: vec![RemoteAgentPodLifecycleEvent::CommandFinished],
+            });
+        }
+    };
     let result = execute_command(request, started, kill_rx).await;
     Json(RemoteAgentPodExecResponse {
         result,
@@ -150,18 +180,40 @@ async fn exec_command(
 
 async fn session_kill_receiver(
     state: &Arc<RemoteWorkerState>,
-    worker_session_id: &str,
-) -> watch::Receiver<bool> {
+    request: &RemoteAgentPodExecRequest,
+) -> Result<watch::Receiver<bool>, CommandResult> {
     let mut sessions = state.sessions.lock().await;
-    if let Some(control) = sessions.get(worker_session_id).cloned() {
-        return control.kill_tx.subscribe();
+    let Some(session) = sessions.get_mut(&request.worker_session_id) else {
+        return Err(CommandResult {
+            exit_code: 128,
+            stdout: String::new(),
+            stderr: format!(
+                "agentbox remote worker session {} has not been created",
+                request.worker_session_id
+            ),
+            duration_ms: 0,
+        });
+    };
+    if session.session_id != request.session_id {
+        return Err(CommandResult {
+            exit_code: 128,
+            stdout: String::new(),
+            stderr: "agentbox remote worker session id does not match worker session".to_string(),
+            duration_ms: 0,
+        });
     }
-    let (kill_tx, kill_rx) = watch::channel(false);
-    sessions.insert(
-        worker_session_id.to_string(),
-        WorkerSessionControl { kill_tx },
-    );
-    kill_rx
+    if !matches!(session.status, RuntimeStatus::Running) {
+        return Err(CommandResult {
+            exit_code: 130,
+            stdout: String::new(),
+            stderr: format!(
+                "agentbox remote worker session {} is not running",
+                request.worker_session_id
+            ),
+            duration_ms: 0,
+        });
+    }
+    Ok(session.kill_receiver())
 }
 
 async fn execute_command(
@@ -274,13 +326,13 @@ async fn destroy_session(
     State(state): State<Arc<RemoteWorkerState>>,
     Json(request): Json<RemoteAgentPodDestroySessionRequest>,
 ) -> Json<RemoteAgentPodDestroySessionResponse> {
-    if let Some(control) = state
+    if let Some(session) = state
         .sessions
         .lock()
         .await
-        .remove(&request.worker_session_id)
+        .get_mut(&request.worker_session_id)
     {
-        let _ = control.kill_tx.send(true);
+        session.mark_stopped();
     }
     Json(RemoteAgentPodDestroySessionResponse {
         session_id: request.session_id,
@@ -375,6 +427,16 @@ mod tests {
 
     #[tokio::test]
     async fn exec_command_runs_argv_without_shell() {
+        let config = RemoteWorkerConfig::new(
+            "worker.local/dev",
+            "https://worker.example.com/agentpod/evidence",
+            SigningKey::from_bytes(&[22_u8; 32]),
+        );
+        let state = test_state(config);
+        state.sessions.lock().await.insert(
+            "worker-session-1".into(),
+            WorkerSession::new("session-1".into()),
+        );
         let request = RemoteAgentPodExecRequest {
             session_id: "session-1".into(),
             worker_session_id: "worker-session-1".into(),
@@ -386,14 +448,7 @@ mod tests {
             },
         };
 
-        let config = RemoteWorkerConfig::new(
-            "worker.local/dev",
-            "https://worker.example.com/agentpod/evidence",
-            SigningKey::from_bytes(&[22_u8; 32]),
-        );
-        let response = exec_command(State(test_state(config)), Json(request))
-            .await
-            .0;
+        let response = exec_command(State(state), Json(request)).await.0;
 
         assert_eq!(response.result.exit_code, 0);
         assert_eq!(response.result.stdout, "hello-agentbox");
@@ -405,6 +460,16 @@ mod tests {
 
     #[tokio::test]
     async fn exec_command_rejects_empty_argv() {
+        let config = RemoteWorkerConfig::new(
+            "worker.local/dev",
+            "https://worker.example.com/agentpod/evidence",
+            SigningKey::from_bytes(&[23_u8; 32]),
+        );
+        let state = test_state(config);
+        state.sessions.lock().await.insert(
+            "worker-session-1".into(),
+            WorkerSession::new("session-1".into()),
+        );
         let request = RemoteAgentPodExecRequest {
             session_id: "session-1".into(),
             worker_session_id: "worker-session-1".into(),
@@ -416,17 +481,38 @@ mod tests {
             },
         };
 
-        let config = RemoteWorkerConfig::new(
-            "worker.local/dev",
-            "https://worker.example.com/agentpod/evidence",
-            SigningKey::from_bytes(&[23_u8; 32]),
-        );
-        let response = exec_command(State(test_state(config)), Json(request))
-            .await
-            .0;
+        let response = exec_command(State(state), Json(request)).await.0;
 
         assert_eq!(response.result.exit_code, 127);
         assert!(response.result.stderr.contains("empty argv"));
+    }
+
+    #[tokio::test]
+    async fn exec_command_requires_created_running_session() {
+        let config = RemoteWorkerConfig::new(
+            "worker.local/dev",
+            "https://worker.example.com/agentpod/evidence",
+            SigningKey::from_bytes(&[25_u8; 32]),
+        );
+        let state = test_state(config);
+        let request = RemoteAgentPodExecRequest {
+            session_id: "session-1".into(),
+            worker_session_id: "worker-session-1".into(),
+            command: ExecCommand {
+                argv: vec!["printf".into(), "hello".into()],
+                working_dir: None,
+                env: HashMap::new(),
+                timeout_seconds: Some(5),
+            },
+        };
+
+        let response = exec_command(State(state), Json(request)).await.0;
+
+        assert_eq!(response.result.exit_code, 128);
+        assert!(response.result.stderr.contains("has not been created"));
+        assert!(!response
+            .lifecycle_events
+            .contains(&RemoteAgentPodLifecycleEvent::CommandStarted));
     }
 
     #[tokio::test]
@@ -437,12 +523,10 @@ mod tests {
             SigningKey::from_bytes(&[24_u8; 32]),
         );
         let state = test_state(config);
-        let (kill_tx, _kill_rx) = watch::channel(false);
-        state
-            .sessions
-            .lock()
-            .await
-            .insert("worker-session-1".into(), WorkerSessionControl { kill_tx });
+        state.sessions.lock().await.insert(
+            "worker-session-1".into(),
+            WorkerSession::new("session-1".into()),
+        );
         let request = RemoteAgentPodExecRequest {
             session_id: "session-1".into(),
             worker_session_id: "worker-session-1".into(),

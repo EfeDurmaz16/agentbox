@@ -165,17 +165,20 @@ acknowledgements using the Ed25519 format described above and exposes the same
 This is still a contract worker, not the final sandboxed remote execution
 engine. The `exec` route runs the provided argv directly, without invoking a
 shell, and returns exit code, stdout, stderr, duration, and lifecycle evidence.
+Exec now requires a created, running worker session, so the worker will not
+accept an arbitrary `worker_session_id` before `/sessions` has allocated it.
 When the daemon-side provider creates a remote session, it persists the worker
 endpoint, worker session id, worker identity, and worker evidence endpoint in
 session labels so later exec/destroy calls can route back to the same worker.
 Workspace materialization, policy enforcement, credential handoff, evidence
-storage, and kill-switch process control remain future work.
+storage, and durable worker supervision remain future work.
 
 `scripts/smoke-remote-worker.sh` starts this worker on a random loopback port,
-posts a handshake descriptor, checks the Ed25519 acknowledgement shape, runs a
-direct `printf` exec request, verifies the returned lifecycle evidence, then
-starts a long-running command and proves destroy sends a kill signal that returns
-exit code `130` plus `KillSwitchAck`.
+posts a handshake descriptor, checks the Ed25519 acknowledgement shape, creates
+worker sessions from generated AgentPod specs, runs a direct `printf` exec
+request, verifies the returned lifecycle evidence, then starts a long-running
+command and proves destroy sends a kill signal that returns exit code `130` plus
+`KillSwitchAck`.
 
 ## Lifecycle Contract
 

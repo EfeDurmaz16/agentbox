@@ -50,9 +50,63 @@ assert data["lifecycle_ack"] is True
 assert data["secret_material_included"] is False
 PY
 
-curl -fsS "http://127.0.0.1:${PORT}/sessions/worker-smoke/exec" \
+mkdir -p "$TMPDIR/workspace"
+cargo run --locked -q -p agentbox-cli -- minipod-spec remote-smoke --risk medium --workspace "$TMPDIR/workspace" \
+  >"$TMPDIR/spec.json"
+python3 - "$TMPDIR/spec.json" "$TMPDIR/handshake-ack.json" >"$TMPDIR/create-request.json" <<'PY'
+import json
+import sys
+from datetime import datetime, timezone
+
+with open(sys.argv[1], "r", encoding="utf-8") as fh:
+    spec = json.load(fh)
+with open(sys.argv[2], "r", encoding="utf-8") as fh:
+    handshake_ack = json.load(fh)
+
+now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+json.dump({
+    "transport": {
+        "schema_version": 1,
+        "provider": "remote-agentpod",
+        "endpoint": "https://worker.example.com/agentpod",
+        "auth_kind": "SignedChallenge",
+        "evidence_mode": "BundleUpload",
+        "kill_switch_required": True,
+        "secret_material_included": False,
+        "lifecycle": {
+            "schema_version": 1,
+            "create_timeout_seconds": 120,
+            "command_timeout_seconds": 3600,
+            "idle_timeout_seconds": 300,
+            "destroy_timeout_seconds": 60,
+            "required_events": [
+                "WorkerAllocated",
+                "SessionCreated",
+                "CommandStarted",
+                "CommandFinished",
+                "EvidenceSealed",
+                "KillSwitchAck",
+                "WorkerDestroyed",
+            ],
+            "kill_switch_required": True,
+        },
+        "created_at": now,
+    },
+    "handshake_ack": handshake_ack,
+    "spec": spec,
+}, sys.stdout)
+PY
+
+curl -fsS "http://127.0.0.1:${PORT}/sessions" \
   -H 'content-type: application/json' \
-  --data '{"session_id":"session-smoke","worker_session_id":"worker-smoke","command":{"argv":["printf","remote-worker-smoke"],"working_dir":null,"env":{},"timeout_seconds":5}}' \
+  --data @"$TMPDIR/create-request.json" \
+  >"$TMPDIR/create-response.json"
+SESSION_ID="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["session_id"])' "$TMPDIR/create-response.json")"
+WORKER_SESSION_ID="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["worker_session_id"])' "$TMPDIR/create-response.json")"
+
+curl -fsS "http://127.0.0.1:${PORT}/sessions/${WORKER_SESSION_ID}/exec" \
+  -H 'content-type: application/json' \
+  --data "{\"session_id\":\"${SESSION_ID}\",\"worker_session_id\":\"${WORKER_SESSION_ID}\",\"command\":{\"argv\":[\"printf\",\"remote-worker-smoke\"],\"working_dir\":null,\"env\":{},\"timeout_seconds\":5}}" \
   >"$TMPDIR/exec-response.json"
 
 python3 - "$TMPDIR/exec-response.json" <<'PY'
@@ -67,15 +121,67 @@ assert data["result"]["stdout"] == "remote-worker-smoke"
 assert "EvidenceSealed" in data["lifecycle_events"]
 PY
 
-curl -fsS "http://127.0.0.1:${PORT}/sessions/worker-smoke-long/exec" \
+cargo run --locked -q -p agentbox-cli -- minipod-spec remote-smoke-long --risk medium --workspace "$TMPDIR/workspace" \
+  >"$TMPDIR/spec-long.json"
+python3 - "$TMPDIR/spec-long.json" "$TMPDIR/handshake-ack.json" >"$TMPDIR/create-long-request.json" <<'PY'
+import json
+import sys
+from datetime import datetime, timezone
+
+with open(sys.argv[1], "r", encoding="utf-8") as fh:
+    spec = json.load(fh)
+with open(sys.argv[2], "r", encoding="utf-8") as fh:
+    handshake_ack = json.load(fh)
+
+now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+json.dump({
+    "transport": {
+        "schema_version": 1,
+        "provider": "remote-agentpod",
+        "endpoint": "https://worker.example.com/agentpod",
+        "auth_kind": "SignedChallenge",
+        "evidence_mode": "BundleUpload",
+        "kill_switch_required": True,
+        "secret_material_included": False,
+        "lifecycle": {
+            "schema_version": 1,
+            "create_timeout_seconds": 120,
+            "command_timeout_seconds": 3600,
+            "idle_timeout_seconds": 300,
+            "destroy_timeout_seconds": 60,
+            "required_events": [
+                "WorkerAllocated",
+                "SessionCreated",
+                "CommandStarted",
+                "CommandFinished",
+                "EvidenceSealed",
+                "KillSwitchAck",
+                "WorkerDestroyed",
+            ],
+            "kill_switch_required": True,
+        },
+        "created_at": now,
+    },
+    "handshake_ack": handshake_ack,
+    "spec": spec,
+}, sys.stdout)
+PY
+curl -fsS "http://127.0.0.1:${PORT}/sessions" \
   -H 'content-type: application/json' \
-  --data '{"session_id":"session-smoke-long","worker_session_id":"worker-smoke-long","command":{"argv":["sleep","5"],"working_dir":null,"env":{},"timeout_seconds":30}}' \
+  --data @"$TMPDIR/create-long-request.json" \
+  >"$TMPDIR/create-long-response.json"
+LONG_SESSION_ID="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["session_id"])' "$TMPDIR/create-long-response.json")"
+LONG_WORKER_SESSION_ID="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["worker_session_id"])' "$TMPDIR/create-long-response.json")"
+
+curl -fsS "http://127.0.0.1:${PORT}/sessions/${LONG_WORKER_SESSION_ID}/exec" \
+  -H 'content-type: application/json' \
+  --data "{\"session_id\":\"${LONG_SESSION_ID}\",\"worker_session_id\":\"${LONG_WORKER_SESSION_ID}\",\"command\":{\"argv\":[\"sleep\",\"5\"],\"working_dir\":null,\"env\":{},\"timeout_seconds\":30}}" \
   >"$TMPDIR/killed-exec-response.json" &
 EXEC_CURL_PID="$!"
 sleep 0.2
-curl -fsS "http://127.0.0.1:${PORT}/sessions/worker-smoke-long/destroy" \
+curl -fsS "http://127.0.0.1:${PORT}/sessions/${LONG_WORKER_SESSION_ID}/destroy" \
   -H 'content-type: application/json' \
-  --data '{"session_id":"session-smoke-long","worker_session_id":"worker-smoke-long","reason":"smoke kill","kill_switch_required":true}' \
+  --data "{\"session_id\":\"${LONG_SESSION_ID}\",\"worker_session_id\":\"${LONG_WORKER_SESSION_ID}\",\"reason\":\"smoke kill\",\"kill_switch_required\":true}" \
   >"$TMPDIR/destroy-response.json"
 wait "$EXEC_CURL_PID"
 
