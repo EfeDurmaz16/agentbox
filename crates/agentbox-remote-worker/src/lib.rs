@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -63,6 +63,7 @@ struct RemoteWorkerState {
 #[derive(Clone)]
 struct WorkerSession {
     session_id: String,
+    workspace_host_path: PathBuf,
     status: RuntimeStatus,
     kill_tx: watch::Sender<bool>,
     evidence_receipts: Vec<WorkerEvidenceReceipt>,
@@ -78,6 +79,8 @@ struct WorkerEvidenceReceipt {
 struct WorkerSessionSnapshot {
     session_id: String,
     worker_session_id: String,
+    #[serde(default = "default_worker_workspace")]
+    workspace_host_path: PathBuf,
     status: RuntimeStatus,
     evidence_receipts: Vec<WorkerEvidenceReceiptSnapshot>,
 }
@@ -105,10 +108,11 @@ fn worker_error(status: StatusCode, message: impl Into<String>) -> (StatusCode, 
 }
 
 impl WorkerSession {
-    fn new(session_id: String) -> Self {
+    fn new(session_id: String, workspace_host_path: PathBuf) -> Self {
         let (kill_tx, _kill_rx) = watch::channel(false);
         Self {
             session_id,
+            workspace_host_path,
             status: RuntimeStatus::Running,
             kill_tx,
             evidence_receipts: Vec::new(),
@@ -128,6 +132,7 @@ impl WorkerSession {
         let (kill_tx, _kill_rx) = watch::channel(matches!(snapshot.status, RuntimeStatus::Stopped));
         Self {
             session_id: snapshot.session_id,
+            workspace_host_path: snapshot.workspace_host_path,
             status: snapshot.status,
             kill_tx,
             evidence_receipts: snapshot
@@ -145,6 +150,7 @@ impl WorkerSession {
         WorkerSessionSnapshot {
             session_id: self.session_id.clone(),
             worker_session_id,
+            workspace_host_path: self.workspace_host_path.clone(),
             status: self.status.clone(),
             evidence_receipts: self
                 .evidence_receipts
@@ -156,6 +162,10 @@ impl WorkerSession {
                 .collect(),
         }
     }
+}
+
+fn default_worker_workspace() -> PathBuf {
+    PathBuf::from(".")
 }
 
 pub fn router(config: RemoteWorkerConfig) -> Router {
@@ -218,7 +228,9 @@ async fn create_session(
     Json(request): Json<RemoteAgentPodCreateSessionRequest>,
 ) -> Json<RemoteAgentPodCreateSessionResponse> {
     let worker_session_id = format!("worker-{}", request.spec.id);
-    let session = WorkerSession::new(request.spec.id.clone());
+    let workspace_host_path = request.spec.filesystem.workspace_host_path.clone();
+    let _ = tokio::fs::create_dir_all(&workspace_host_path).await;
+    let session = WorkerSession::new(request.spec.id.clone(), workspace_host_path);
     state
         .sessions
         .lock()
@@ -241,8 +253,8 @@ async fn exec_command(
     Json(request): Json<RemoteAgentPodExecRequest>,
 ) -> WorkerRouteResult<RemoteAgentPodExecResponse> {
     let started = Instant::now();
-    let kill_rx = session_kill_receiver(&state, &request).await?;
-    let result = execute_command(request, started, kill_rx).await;
+    let context = session_exec_context(&state, &request).await?;
+    let result = execute_command(request, started, context).await;
     Ok(Json(RemoteAgentPodExecResponse {
         result,
         lifecycle_events: vec![
@@ -253,10 +265,15 @@ async fn exec_command(
     }))
 }
 
-async fn session_kill_receiver(
+struct WorkerExecContext {
+    kill_rx: watch::Receiver<bool>,
+    workspace_host_path: PathBuf,
+}
+
+async fn session_exec_context(
     state: &Arc<RemoteWorkerState>,
     request: &RemoteAgentPodExecRequest,
-) -> Result<watch::Receiver<bool>, (StatusCode, Json<WorkerError>)> {
+) -> Result<WorkerExecContext, (StatusCode, Json<WorkerError>)> {
     let mut sessions = state.sessions.lock().await;
     let Some(session) = sessions.get_mut(&request.worker_session_id) else {
         return Err(worker_error(
@@ -282,13 +299,16 @@ async fn session_kill_receiver(
             ),
         ));
     }
-    Ok(session.kill_receiver())
+    Ok(WorkerExecContext {
+        kill_rx: session.kill_receiver(),
+        workspace_host_path: session.workspace_host_path.clone(),
+    })
 }
 
 async fn execute_command(
     request: RemoteAgentPodExecRequest,
     started: Instant,
-    mut kill_rx: watch::Receiver<bool>,
+    mut context: WorkerExecContext,
 ) -> CommandResult {
     let Some(program) = request.command.argv.first() else {
         return CommandResult {
@@ -302,12 +322,28 @@ async fn execute_command(
     command.args(request.command.argv.iter().skip(1));
     command.env_clear();
     command.envs(&request.command.env);
-    if let Some(working_dir) = &request.command.working_dir {
-        command.current_dir(working_dir);
+    let working_dir = request
+        .command
+        .working_dir
+        .as_ref()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| context.workspace_host_path.clone());
+    let working_dir = resolve_worker_path(&context.workspace_host_path, &working_dir);
+    if !path_is_within(&working_dir, &context.workspace_host_path) {
+        return CommandResult {
+            exit_code: 126,
+            stdout: String::new(),
+            stderr: format!(
+                "agentbox remote worker refused working directory outside workspace: {}",
+                working_dir.display()
+            ),
+            duration_ms: elapsed_ms(started),
+        };
     }
+    command.current_dir(&working_dir);
     command.kill_on_drop(true);
 
-    if *kill_rx.borrow() {
+    if *context.kill_rx.borrow() {
         return CommandResult {
             exit_code: 130,
             stdout: String::new(),
@@ -326,7 +362,7 @@ async fn execute_command(
 
     let output = tokio::select! {
         output = &mut output_future => output,
-        killed = wait_for_kill(&mut kill_rx) => {
+        killed = wait_for_kill(&mut context.kill_rx) => {
             if killed {
                 return CommandResult {
                     exit_code: 130,
@@ -377,6 +413,35 @@ async fn wait_for_kill(kill_rx: &mut watch::Receiver<bool>) -> bool {
 
 fn elapsed_ms(started: Instant) -> u64 {
     started.elapsed().as_millis().try_into().unwrap_or(u64::MAX)
+}
+
+fn resolve_worker_path(workspace: &Path, requested: &Path) -> PathBuf {
+    let path = if requested.is_absolute() {
+        requested.to_path_buf()
+    } else {
+        workspace.join(requested)
+    };
+    normalize_path(path)
+}
+
+fn path_is_within(path: &Path, workspace: &Path) -> bool {
+    let path = normalize_path(path.to_path_buf());
+    let workspace = normalize_path(workspace.to_path_buf());
+    path == workspace || path.starts_with(workspace)
+}
+
+fn normalize_path(path: PathBuf) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                normalized.pop();
+            }
+            other => normalized.push(other.as_os_str()),
+        }
+    }
+    normalized
 }
 
 async fn upload_evidence(
@@ -616,7 +681,7 @@ mod tests {
         let state = test_state(config);
         state.sessions.lock().await.insert(
             "worker-session-1".into(),
-            WorkerSession::new("session-1".into()),
+            WorkerSession::new("session-1".into(), std::env::temp_dir()),
         );
         let request = RemoteAgentPodExecRequest {
             session_id: "session-1".into(),
@@ -649,7 +714,7 @@ mod tests {
         let state = test_state(config);
         state.sessions.lock().await.insert(
             "worker-session-1".into(),
-            WorkerSession::new("session-1".into()),
+            WorkerSession::new("session-1".into(), std::env::temp_dir()),
         );
         let request = RemoteAgentPodExecRequest {
             session_id: "session-1".into(),
@@ -694,6 +759,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn exec_command_refuses_working_dir_outside_workspace() {
+        let config = RemoteWorkerConfig::new(
+            "worker.local/dev",
+            "https://worker.example.com/agentpod/evidence",
+            SigningKey::from_bytes(&[30_u8; 32]),
+        );
+        let state = test_state(config);
+        let workspace = std::env::temp_dir().join(format!(
+            "agentbox-remote-worker-workspace-{}",
+            std::process::id()
+        ));
+        state.sessions.lock().await.insert(
+            "worker-session-1".into(),
+            WorkerSession::new("session-1".into(), workspace),
+        );
+        let request = RemoteAgentPodExecRequest {
+            session_id: "session-1".into(),
+            worker_session_id: "worker-session-1".into(),
+            command: ExecCommand {
+                argv: vec!["printf".into(), "hello".into()],
+                working_dir: Some("/".into()),
+                env: HashMap::new(),
+                timeout_seconds: Some(5),
+            },
+        };
+
+        let response = exec_command(State(state), Json(request)).await.unwrap().0;
+
+        assert_eq!(response.result.exit_code, 126);
+        assert!(response.result.stderr.contains("outside workspace"));
+    }
+
+    #[tokio::test]
     async fn destroy_session_kills_running_command() {
         let config = RemoteWorkerConfig::new(
             "worker.local/dev",
@@ -703,7 +801,7 @@ mod tests {
         let state = test_state(config);
         state.sessions.lock().await.insert(
             "worker-session-1".into(),
-            WorkerSession::new("session-1".into()),
+            WorkerSession::new("session-1".into(), std::env::temp_dir()),
         );
         let request = RemoteAgentPodExecRequest {
             session_id: "session-1".into(),
@@ -749,7 +847,7 @@ mod tests {
         let state = test_state(config);
         state.sessions.lock().await.insert(
             "worker-session-1".into(),
-            WorkerSession::new("session-1".into()),
+            WorkerSession::new("session-1".into(), std::env::temp_dir()),
         );
         let request = RemoteAgentPodEvidenceUploadRequest {
             session_id: "session-1".into(),
@@ -841,7 +939,7 @@ mod tests {
         )
         .with_state_dir(&path);
         let state = test_state(config.clone());
-        let mut session = WorkerSession::new("session-1".into());
+        let mut session = WorkerSession::new("session-1".into(), std::env::temp_dir());
         session.evidence_receipts.push(WorkerEvidenceReceipt {
             bundle_sha256: "b".repeat(64),
             event_count: 5,
