@@ -164,7 +164,9 @@ acknowledgements using the Ed25519 format described above and exposes the same
 `/sessions/{worker_session_id}/destroy` routes expected by the HTTPS adapter.
 When `--state-dir` is set, created sessions, stopped status, and evidence
 receipt metadata are written to `worker-sessions.json` and loaded again when the
-worker starts.
+worker starts. The smoke test restarts the worker process with the same state
+directory and verifies that a previously created running session can execute
+again after reload.
 Worker contract violations such as unknown worker sessions, mismatched session
 ids, unpreparable workspace paths, stopped-session exec, or invalid evidence
 metadata return HTTP error statuses so the daemon-side transport treats them as
@@ -193,8 +195,9 @@ bundle storage, and supervised worker restarts remain future work.
 posts a handshake descriptor, checks the Ed25519 acknowledgement shape, creates
 worker sessions from generated AgentPod specs, runs a direct `printf` exec
 request, uploads a bundle metadata receipt, verifies the returned lifecycle
-evidence, then starts a long-running command and proves destroy sends a kill
-signal that returns exit code `130` plus `KillSwitchAck`.
+evidence, restarts the worker to prove persisted session reload, then starts a
+long-running command and proves destroy sends a kill signal that returns exit
+code `130` plus `KillSwitchAck`.
 
 ## Lifecycle Contract
 

@@ -162,6 +162,45 @@ assert matches[0]["evidence_receipts"][0]["bundle_sha256"] == "f" * 64
 assert matches[0]["evidence_receipts"][0]["event_count"] == 2
 PY
 
+kill "$WORKER_PID"
+wait "$WORKER_PID" 2>/dev/null || true
+WORKER_PID=""
+
+cargo run --locked -q -p agentbox-remote-worker -- \
+  --listen "127.0.0.1:${PORT}" \
+  --worker worker.local/smoke \
+  --evidence-endpoint https://worker.example.com/agentpod/evidence \
+  --state-dir "$TMPDIR/worker-state" \
+  --signing-key-hex "$SIGNING_KEY_HEX" >"$TMPDIR/worker-restarted.out" 2>"$TMPDIR/worker-restarted.err" &
+WORKER_PID="$!"
+
+for _ in $(seq 1 50); do
+  if curl -fsS "http://127.0.0.1:${PORT}/handshake" \
+    -H 'content-type: application/json' \
+    --data '{"schema_version":1,"provider":"remote-agentpod","endpoint":"https://worker.example.com/agentpod","auth_kind":"SignedChallenge","challenge_id":"agentpod-challenge-smoke-restarted","challenge_nonce_sha256":"1123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","expires_at":"2026-05-14T23:59:59Z","required_response_fields":["WorkerIdentity","WorkerPublicKey","SignedChallenge","Capabilities","EvidenceEndpoint","LifecycleAck"],"secret_material_included":false,"created_at":"2026-05-14T00:00:00Z"}' \
+    >"$TMPDIR/restarted-handshake-ack.json" 2>/dev/null; then
+    break
+  fi
+  sleep 0.2
+done
+
+curl -fsS "http://127.0.0.1:${PORT}/sessions/${WORKER_SESSION_ID}/exec" \
+  -H 'content-type: application/json' \
+  --data "{\"session_id\":\"${SESSION_ID}\",\"worker_session_id\":\"${WORKER_SESSION_ID}\",\"command\":{\"argv\":[\"printf\",\"remote-worker-restored\"],\"working_dir\":null,\"env\":{},\"timeout_seconds\":5}}" \
+  >"$TMPDIR/restarted-exec-response.json"
+
+python3 - "$TMPDIR/restarted-exec-response.json" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], "r", encoding="utf-8") as fh:
+    data = json.load(fh)
+
+assert data["result"]["exit_code"] == 0
+assert data["result"]["stdout"] == "remote-worker-restored"
+assert "EvidenceSealed" in data["lifecycle_events"]
+PY
+
 cargo run --locked -q -p agentbox-cli -- minipod-spec remote-smoke-long --risk medium --workspace "$TMPDIR/workspace" \
   >"$TMPDIR/spec-long.json"
 python3 - "$TMPDIR/spec-long.json" "$TMPDIR/handshake-ack.json" >"$TMPDIR/create-long-request.json" <<'PY'
