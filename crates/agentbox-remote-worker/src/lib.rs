@@ -146,6 +146,32 @@ struct WorkerEvidenceBundleUploadResponse {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+struct WorkerEvidenceBundleEnvelope {
+    schema_version: i64,
+    kind: String,
+    session_id: String,
+    worker_session_id: String,
+    index: WorkerEvidenceBundleIndex,
+    files: HashMap<String, String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct WorkerEvidenceBundleIndex {
+    schema_version: i64,
+    session_id: String,
+    root_sha256: String,
+    files: Vec<WorkerEvidenceBundleFile>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct WorkerEvidenceBundleFile {
+    path: String,
+    media_type: String,
+    sha256: String,
+    bytes: usize,
+}
+
+#[derive(Debug, Clone, Deserialize)]
 struct WorkerEvidenceStatusQuery {
     session_id: String,
 }
@@ -710,6 +736,126 @@ fn validate_evidence_bundle_upload(
             "agentbox remote worker evidence bundle hash does not match payload",
         ));
     }
+    validate_evidence_bundle_envelope(request)?;
+    Ok(())
+}
+
+fn validate_evidence_bundle_envelope(
+    request: &WorkerEvidenceBundleUploadRequest,
+) -> Result<(), (StatusCode, Json<WorkerError>)> {
+    let envelope: WorkerEvidenceBundleEnvelope = serde_json::from_str(&request.bundle_json)
+        .map_err(|err| {
+            worker_error(
+                StatusCode::BAD_REQUEST,
+                format!("agentbox remote worker evidence bundle payload is not valid JSON: {err}"),
+            )
+        })?;
+    if envelope.schema_version != 1 || envelope.kind != "AgentboxEvidenceBundleUpload" {
+        return Err(worker_error(
+            StatusCode::BAD_REQUEST,
+            "agentbox remote worker evidence bundle payload must be an AgentboxEvidenceBundleUpload v1 envelope",
+        ));
+    }
+    if envelope.session_id != request.session_id
+        || envelope.worker_session_id != request.worker_session_id
+        || envelope.index.session_id != request.session_id
+    {
+        return Err(worker_error(
+            StatusCode::BAD_REQUEST,
+            "agentbox remote worker evidence bundle envelope session ids do not match request",
+        ));
+    }
+    if envelope.index.schema_version != 1 {
+        return Err(worker_error(
+            StatusCode::BAD_REQUEST,
+            "agentbox remote worker evidence bundle index schema version is unsupported",
+        ));
+    }
+    if envelope.index.files.is_empty() {
+        return Err(worker_error(
+            StatusCode::BAD_REQUEST,
+            "agentbox remote worker evidence bundle envelope must include indexed files",
+        ));
+    }
+    let computed_root = evidence_bundle_root_sha256(&envelope.index.files)?;
+    if envelope.index.root_sha256 != computed_root {
+        return Err(worker_error(
+            StatusCode::BAD_REQUEST,
+            "agentbox remote worker evidence bundle root hash does not match index",
+        ));
+    }
+    for file in &envelope.index.files {
+        validate_bundle_file_path(&file.path)?;
+        if !is_sha256_hex(&file.sha256) {
+            return Err(worker_error(
+                StatusCode::BAD_REQUEST,
+                "agentbox remote worker evidence bundle file hash must be 64 lowercase hex characters",
+            ));
+        }
+        let Some(contents) = envelope.files.get(&file.path) else {
+            return Err(worker_error(
+                StatusCode::BAD_REQUEST,
+                format!(
+                    "agentbox remote worker evidence bundle payload is missing indexed file {}",
+                    file.path
+                ),
+            ));
+        };
+        let bytes = contents.as_bytes();
+        if bytes.len() != file.bytes || sha256_hex(bytes) != file.sha256 {
+            return Err(worker_error(
+                StatusCode::BAD_REQUEST,
+                format!(
+                    "agentbox remote worker evidence bundle file {} does not match indexed bytes or hash",
+                    file.path
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn evidence_bundle_root_sha256(
+    files: &[WorkerEvidenceBundleFile],
+) -> Result<String, (StatusCode, Json<WorkerError>)> {
+    let mut entries = Vec::with_capacity(files.len());
+    for file in files {
+        validate_bundle_file_path(&file.path)?;
+        if file.media_type.trim().is_empty() {
+            return Err(worker_error(
+                StatusCode::BAD_REQUEST,
+                "agentbox remote worker evidence bundle file media type cannot be empty",
+            ));
+        }
+        entries.push(format!(
+            "{}\0{}\0{}\0{}",
+            file.path, file.sha256, file.bytes, file.media_type
+        ));
+    }
+    entries.sort();
+    Ok(sha256_hex(
+        format!("agentbox-evidence-root-v1\n{}", entries.join("\n")).as_bytes(),
+    ))
+}
+
+fn validate_bundle_file_path(path: &str) -> Result<(), (StatusCode, Json<WorkerError>)> {
+    let candidate = PathBuf::from(path);
+    if candidate.as_os_str().is_empty()
+        || candidate.is_absolute()
+        || candidate.components().any(|component| {
+            matches!(
+                component,
+                std::path::Component::ParentDir
+                    | std::path::Component::RootDir
+                    | std::path::Component::Prefix(_)
+            )
+        })
+    {
+        return Err(worker_error(
+            StatusCode::BAD_REQUEST,
+            "agentbox remote worker evidence bundle file path is unsafe",
+        ));
+    }
     Ok(())
 }
 
@@ -1072,6 +1218,63 @@ mod tests {
         }
     }
 
+    fn test_evidence_bundle_upload_json(
+        session_id: &str,
+        worker_session_id: &str,
+    ) -> (String, String) {
+        let bundle_json = format!(
+            r#"{{"schema_version":1,"session_id":"{session_id}","commands":[{{"audit_event_id":"evt_1"}}],"approvals":[],"lifecycle_events":[],"boundary_events":[],"credential_events":[]}}"#
+        );
+        let manifest_json = r#"{"schema_version":1,"kind":"AgentPod"}"#.to_string();
+        let files = vec![
+            WorkerEvidenceBundleFile {
+                path: "bundle.json".into(),
+                media_type: "application/json".into(),
+                sha256: sha256_hex(bundle_json.as_bytes()),
+                bytes: bundle_json.len(),
+            },
+            WorkerEvidenceBundleFile {
+                path: "manifest.json".into(),
+                media_type: "application/json".into(),
+                sha256: sha256_hex(manifest_json.as_bytes()),
+                bytes: manifest_json.len(),
+            },
+        ];
+        let root_sha256 = evidence_bundle_root_sha256(&files).unwrap();
+        let envelope = serde_json::json!({
+            "schema_version": 1,
+            "kind": "AgentboxEvidenceBundleUpload",
+            "session_id": session_id,
+            "worker_session_id": worker_session_id,
+            "index": {
+                "schema_version": 1,
+                "bundle_id": "bundle-test",
+                "session_id": session_id,
+                "provider": "direct-host",
+                "status": "Stopped",
+                "root_sha256": root_sha256,
+                "files": files
+                    .iter()
+                    .map(|file| serde_json::json!({
+                        "path": file.path,
+                        "media_type": file.media_type,
+                        "description": "test evidence file",
+                        "sha256": file.sha256,
+                        "bytes": file.bytes,
+                    }))
+                    .collect::<Vec<_>>(),
+            },
+            "files": {
+                "bundle.json": bundle_json,
+                "manifest.json": manifest_json,
+            },
+        });
+        let envelope_json =
+            serde_json::to_string(&envelope).expect("failed to serialize test envelope");
+        let envelope_sha256 = sha256_hex(envelope_json.as_bytes());
+        (envelope_json, envelope_sha256)
+    }
+
     #[tokio::test]
     async fn handshake_response_is_ed25519_verifiable() {
         let signing_key = SigningKey::from_bytes(&[21_u8; 32]);
@@ -1419,8 +1622,8 @@ mod tests {
             "worker-session-1".into(),
             WorkerSession::new("session-1".into(), std::env::temp_dir()),
         );
-        let bundle_json = r#"{"session_id":"session-1","events":[]}"#.to_string();
-        let bundle_sha256 = sha256_hex(bundle_json.as_bytes());
+        let (bundle_json, bundle_sha256) =
+            test_evidence_bundle_upload_json("session-1", "worker-session-1");
         let request = WorkerEvidenceBundleUploadRequest {
             session_id: "session-1".into(),
             worker_session_id: "worker-session-1".into(),
@@ -1562,6 +1765,36 @@ mod tests {
 
         assert_eq!(err.0, StatusCode::BAD_REQUEST);
         assert!(err.1 .0.error.contains("hash does not match"));
+    }
+
+    #[tokio::test]
+    async fn upload_evidence_bundle_rejects_non_envelope_payload() {
+        let config = RemoteWorkerConfig::new(
+            "worker.local/dev",
+            "https://worker.example.com/agentpod/evidence",
+            SigningKey::from_bytes(&[40_u8; 32]),
+        )
+        .with_state_dir(std::env::temp_dir());
+        let state = test_state(config);
+        state.sessions.lock().await.insert(
+            "worker-session-1".into(),
+            WorkerSession::new("session-1".into(), std::env::temp_dir()),
+        );
+        let bundle_json = "{}".to_string();
+        let request = WorkerEvidenceBundleUploadRequest {
+            session_id: "session-1".into(),
+            worker_session_id: "worker-session-1".into(),
+            bundle_sha256: sha256_hex(bundle_json.as_bytes()),
+            bundle_json,
+            secret_material_included: false,
+        };
+
+        let err = upload_evidence_bundle(State(state), Json(request))
+            .await
+            .unwrap_err();
+
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+        assert!(err.1 .0.error.contains("not valid JSON"));
     }
 
     #[tokio::test]

@@ -211,9 +211,13 @@ snapshot, including bundle provenance fields such as `bundle_id`,
 `bundle_root_sha256`, `derived_from_bundle`, and `sealed_at` when provided.
 The separate evidence bundle payload route verifies the submitted bundle JSON
 against its SHA-256 and stores it under `evidence/<worker_session_id>/` inside
-the worker state directory. Successful payload storage is also recorded on the
-matching worker session snapshot with the stored bundle hash, byte count, and
-storage path so a restarted worker can prove which bundle payloads it accepted.
+the worker state directory. The payload must be an
+`AgentboxEvidenceBundleUpload` v1 envelope containing the verified bundle index
+and indexed JSON file contents; the worker recomputes every file hash, byte
+count, and the bundle root before accepting it. Successful payload storage is
+also recorded on the matching worker session snapshot with the stored bundle
+hash, byte count, and storage path so a restarted worker can prove which bundle
+payloads it accepted.
 Worker routes that mutate session state fail the request if the configured
 state file cannot be serialized, prepared, or written; they do not acknowledge
 state-changing operations as durable when persistence fails.

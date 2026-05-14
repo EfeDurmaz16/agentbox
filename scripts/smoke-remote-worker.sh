@@ -150,8 +150,63 @@ import json
 import sys
 
 tmpdir, session_id, worker_session_id = sys.argv[1:4]
+bundle_file = json.dumps(
+    {
+        "schema_version": 1,
+        "session_id": session_id,
+        "commands": [{"audit_event_id": "evt_1"}],
+        "approvals": [],
+        "lifecycle_events": [],
+        "boundary_events": [],
+        "credential_events": [],
+    },
+    separators=(",", ":"),
+)
+manifest_file = json.dumps(
+    {"schema_version": 1, "kind": "AgentPod"},
+    separators=(",", ":"),
+)
+files = []
+for path, contents in [
+    ("bundle.json", bundle_file),
+    ("manifest.json", manifest_file),
+]:
+    files.append(
+        {
+            "path": path,
+            "media_type": "application/json",
+            "description": "remote worker smoke evidence file",
+            "sha256": hashlib.sha256(contents.encode()).hexdigest(),
+            "bytes": len(contents.encode()),
+        }
+    )
+root_entries = [
+    f"{entry['path']}\0{entry['sha256']}\0{entry['bytes']}\0{entry['media_type']}"
+    for entry in sorted(files, key=lambda value: value["path"])
+]
+root_sha256 = hashlib.sha256(
+    ("agentbox-evidence-root-v1\n" + "\n".join(root_entries)).encode()
+).hexdigest()
 bundle_json = json.dumps(
-    {"session_id": session_id, "worker_session_id": worker_session_id, "events": []},
+    {
+        "schema_version": 1,
+        "kind": "AgentboxEvidenceBundleUpload",
+        "session_id": session_id,
+        "worker_session_id": worker_session_id,
+        "index": {
+            "schema_version": 1,
+            "bundle_id": "smoke-bundle",
+            "session_id": session_id,
+            "provider": "direct-host",
+            "status": "Stopped",
+            "root_sha256": root_sha256,
+            "files": files,
+        },
+        "files": {
+            "bundle.json": bundle_file,
+            "manifest.json": manifest_file,
+        },
+    },
     separators=(",", ":"),
 )
 bundle_sha256 = hashlib.sha256(bundle_json.encode()).hexdigest()
