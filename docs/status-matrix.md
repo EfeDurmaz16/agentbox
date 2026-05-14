@@ -81,6 +81,8 @@ See [Mac mini replacement wedge](mac-mini-replacement-wedge.md) for the local
 software-boundary positioning and its limits.
 See [release readiness](release-readiness.md) for the checklist before tagging
 public builds.
+See [installer packaging](installer-packaging.md) for the packaging path and the
+rule against shipping unverified installers.
 See [macOS minipod limitations](macos-minipod-limitations.md) for the current
 VM-backed boundary and native enforcement gap.
 See [safe file sharing](safe-file-sharing.md) for current workspace, read-only

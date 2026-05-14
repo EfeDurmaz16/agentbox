@@ -36,6 +36,9 @@ CI, run them manually and record the reason.
 ## Install And CLI
 
 - [ ] `cargo build --release` succeeds.
+- [ ] Any installer or package follows
+      [installer packaging](installer-packaging.md) and was tested on a clean
+      host for that platform.
 - [ ] `agentbox install` creates shims in `~/.agentbox/shims`.
 - [ ] `agentbox doctor` reports daemon, socket, PATH, shims, audit, and provider
       readiness clearly.
@@ -96,6 +99,7 @@ CI, run them manually and record the reason.
 - [ ] `docs/safe-credential-patterns.md` explains credential grants and
       redaction limits.
 - [ ] `docs/glossary.md` defines public vocabulary.
+- [ ] `docs/installer-packaging.md` matches the actual package state.
 - [ ] Release notes say what is shipped, experimental, prototype, and planned.
 
 ## Public Claim Check
