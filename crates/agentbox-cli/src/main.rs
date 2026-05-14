@@ -116,6 +116,10 @@ enum Commands {
         /// Number of events to export
         #[arg(long, default_value_t = 100)]
         limit: usize,
+
+        /// Verify the audit hash chain instead of exporting rows
+        #[arg(long)]
+        verify: bool,
     },
     /// Generate a governed minipod manifest for an agent task
     MinipodSpec {
@@ -1645,11 +1649,41 @@ fn cmd_history(show_all: bool, bucket_filter: Option<String>, json_output: bool)
     }
 }
 
-fn cmd_evidence(limit: usize) {
+fn cmd_evidence(limit: usize, verify: bool) {
     let db_path = audit_db_path();
     if !db_path.exists() {
         eprintln!("no audit log found at {}", db_path.display());
         eprintln!("hint: start the daemon first with `agentbox start`");
+        std::process::exit(1);
+    }
+
+    if verify {
+        let store = agentbox_daemon::audit::AuditStore::new(&db_path.to_string_lossy())
+            .unwrap_or_else(|e| {
+                eprintln!("failed to open audit store: {}", e);
+                std::process::exit(1);
+            });
+        let verification = store.verify_hash_chain().unwrap_or_else(|e| {
+            eprintln!("failed to verify audit hash chain: {}", e);
+            std::process::exit(1);
+        });
+
+        if verification.valid {
+            println!(
+                "evidence hash chain: valid ({} events checked)",
+                verification.checked_events
+            );
+            return;
+        }
+
+        eprintln!(
+            "evidence hash chain: invalid ({} events checked, {} violations)",
+            verification.checked_events,
+            verification.violations.len()
+        );
+        for violation in verification.violations {
+            eprintln!("- {}: {}", violation.event_id, violation.reason);
+        }
         std::process::exit(1);
     }
 
@@ -1997,7 +2031,7 @@ async fn main() {
         Commands::Why => cmd_why(),
         Commands::Policy => cmd_policy(),
         Commands::History { all, bucket, json } => cmd_history(all, bucket, json),
-        Commands::Evidence { limit } => cmd_evidence(limit),
+        Commands::Evidence { limit, verify } => cmd_evidence(limit, verify),
         Commands::MinipodSpec {
             agent,
             workspace,

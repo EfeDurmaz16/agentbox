@@ -35,6 +35,19 @@ pub struct AuditEvent {
     pub event_hash: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuditVerification {
+    pub checked_events: usize,
+    pub valid: bool,
+    pub violations: Vec<AuditViolation>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuditViolation {
+    pub event_id: String,
+    pub reason: String,
+}
+
 impl AuditEvent {
     /// Create a new AuditEvent with auto-generated ULID and timestamp.
     #[allow(clippy::too_many_arguments)]
@@ -189,6 +202,47 @@ impl AuditStore {
         let rows = stmt.query_map(params![bucket, limit as i64], row_to_event)?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(AuditError::from)
+    }
+
+    pub fn verify_hash_chain(&self) -> Result<AuditVerification> {
+        let conn = self.pool.get()?;
+        let mut stmt = conn.prepare(
+            "SELECT id, schema_version, timestamp, agent_pid, agent_name, command, cwd, bucket, decision, user_response_ms, parent_process, prev_hash, event_hash
+             FROM audit_log
+             ORDER BY rowid ASC",
+        )?;
+        let rows = stmt.query_map([], row_to_event)?;
+        let events = rows
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(AuditError::from)?;
+
+        let mut violations = Vec::new();
+        let mut previous_hash: Option<String> = None;
+
+        for event in &events {
+            if event.prev_hash != previous_hash {
+                violations.push(AuditViolation {
+                    event_id: event.id.clone(),
+                    reason: "prev_hash does not match previous event hash".to_string(),
+                });
+            }
+
+            let expected_hash = compute_event_hash(event);
+            if event.event_hash.as_deref() != Some(expected_hash.as_str()) {
+                violations.push(AuditViolation {
+                    event_id: event.id.clone(),
+                    reason: "event_hash does not match event contents".to_string(),
+                });
+            }
+
+            previous_hash = event.event_hash.clone();
+        }
+
+        Ok(AuditVerification {
+            checked_events: events.len(),
+            valid: violations.is_empty(),
+            violations,
+        })
     }
 }
 
@@ -444,5 +498,50 @@ mod tests {
         assert_eq!(newest.prev_hash, oldest.event_hash);
         assert!(newest.event_hash.is_some());
         assert_ne!(newest.event_hash, oldest.event_hash);
+    }
+
+    #[test]
+    fn verifies_hash_chain_integrity() {
+        let store = AuditStore::in_memory().unwrap();
+
+        store
+            .log_event(&make_event("allow", "allowed", "ls"))
+            .unwrap();
+        store
+            .log_event(&make_event("approve", "approved", "git push"))
+            .unwrap();
+
+        let verification = store.verify_hash_chain().unwrap();
+
+        assert!(verification.valid);
+        assert_eq!(verification.checked_events, 2);
+        assert!(verification.violations.is_empty());
+    }
+
+    #[test]
+    fn detects_tampered_audit_rows() {
+        let store = AuditStore::in_memory().unwrap();
+        store
+            .log_event(&make_event("allow", "allowed", "ls"))
+            .unwrap();
+
+        {
+            let conn = store.pool.get().unwrap();
+            conn.execute(
+                "UPDATE audit_log SET decision = 'tampered' WHERE command = 'ls'",
+                [],
+            )
+            .unwrap();
+        }
+
+        let verification = store.verify_hash_chain().unwrap();
+
+        assert!(!verification.valid);
+        assert_eq!(verification.checked_events, 1);
+        assert_eq!(verification.violations.len(), 1);
+        assert_eq!(
+            verification.violations[0].reason,
+            "event_hash does not match event contents"
+        );
     }
 }
