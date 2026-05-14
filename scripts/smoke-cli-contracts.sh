@@ -72,7 +72,7 @@ validate_json "$TMPDIR/remote-evidence.json" \
 
 log "checking remote evidence status command surface"
 "${CLI[@]}" remote-evidence-status --help >"$TMPDIR/remote-evidence-status-help.txt"
-rg --fixed-strings "Query a remote AgentPod worker for accepted evidence state" \
+grep -F "Query a remote AgentPod worker for accepted evidence state" \
   "$TMPDIR/remote-evidence-status-help.txt" >/dev/null
 
 log "checking evidence bundle verification"
