@@ -972,6 +972,7 @@ fn cmd_doctor() {
             machine.detail,
             machine.fix,
         ));
+        checks.extend(macos_native_doctor_checks());
     }
 
     println!("Agentbox doctor");
@@ -1098,6 +1099,79 @@ fn podman_machine_status() -> PodmanMachineDoctor {
         },
         fix: "run `podman machine start`",
     }
+}
+
+fn macos_native_doctor_checks() -> Vec<DoctorCheck> {
+    let virtualization_framework =
+        Path::new("/System/Library/Frameworks/Virtualization.framework").exists();
+    vec![
+        doctor_check(
+            "macOS native plan",
+            true,
+            "compiler available; provider execution remains unavailable".to_string(),
+            "no action needed for planning; native execution still needs runner wiring",
+        ),
+        doctor_check(
+            "Apple Virtualization",
+            virtualization_framework,
+            "/System/Library/Frameworks/Virtualization.framework".to_string(),
+            "use macOS 11+ with Apple Virtualization framework available",
+        ),
+        doctor_check(
+            "Endpoint Security entitlement",
+            current_executable_has_entitlement("com.apple.developer.endpoint-security.client"),
+            current_executable_entitlement_detail("com.apple.developer.endpoint-security.client"),
+            "sign the future system extension with the Endpoint Security entitlement",
+        ),
+        doctor_check(
+            "Network Extension entitlement",
+            current_executable_has_entitlement("com.apple.developer.networking.networkextension"),
+            current_executable_entitlement_detail(
+                "com.apple.developer.networking.networkextension",
+            ),
+            "sign the future network extension with the required Network Extension entitlement",
+        ),
+    ]
+}
+
+fn current_executable_has_entitlement(entitlement: &str) -> bool {
+    current_executable_entitlements()
+        .as_deref()
+        .is_some_and(|entitlements| entitlements_contain_key(entitlements, entitlement))
+}
+
+fn current_executable_entitlement_detail(entitlement: &str) -> String {
+    match current_executable_entitlements() {
+        Some(entitlements) if entitlements_contain_key(&entitlements, entitlement) => {
+            format!("{entitlement} present on current executable")
+        }
+        Some(_) => format!("{entitlement} not present on current executable"),
+        None => "codesign entitlements unavailable for current executable".to_string(),
+    }
+}
+
+fn current_executable_entitlements() -> Option<String> {
+    let executable = std::env::current_exe().ok()?;
+    let output = Command::new("codesign")
+        .args(["-d", "--entitlements", ":-"])
+        .arg(executable)
+        .output()
+        .ok()?;
+    let mut combined = String::new();
+    combined.push_str(&String::from_utf8_lossy(&output.stdout));
+    combined.push_str(&String::from_utf8_lossy(&output.stderr));
+    if combined.trim().is_empty() {
+        None
+    } else {
+        Some(combined)
+    }
+}
+
+fn entitlements_contain_key(entitlements: &str, entitlement: &str) -> bool {
+    entitlements.contains(&format!("<key>{entitlement}</key>"))
+        || entitlements
+            .lines()
+            .any(|line| line.trim() == entitlement || line.trim().starts_with(entitlement))
 }
 
 fn cmd_audit(limit: usize, bucket: Option<String>, tail: bool) {
@@ -5608,6 +5682,30 @@ mod tests {
         RemoteAgentPodWorkspaceExportResponse, RemoteAgentPodWorkspaceFile,
     };
     use agentbox_daemon::runtime::types::{MinipodSpec, RuntimeSession, SessionEvidenceBundle};
+
+    #[test]
+    fn entitlement_parser_detects_xml_and_plain_keys() {
+        let plist = r#"
+        <dict>
+          <key>com.apple.developer.endpoint-security.client</key>
+          <true/>
+        </dict>
+        "#;
+        let plain = "com.apple.developer.networking.networkextension: packet-tunnel-provider";
+
+        assert!(entitlements_contain_key(
+            plist,
+            "com.apple.developer.endpoint-security.client"
+        ));
+        assert!(entitlements_contain_key(
+            plain,
+            "com.apple.developer.networking.networkextension"
+        ));
+        assert!(!entitlements_contain_key(
+            plist,
+            "com.apple.developer.networking.networkextension"
+        ));
+    }
 
     #[test]
     fn utf8_chunks_preserve_offsets_and_character_boundaries() {
