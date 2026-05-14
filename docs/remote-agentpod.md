@@ -294,7 +294,10 @@ session manifest already carries a matching, non-expired approval grant for the
 command, path, domain, or session. `Once` approval grants are deliberately not
 honored by the worker yet because the worker cannot safely synchronize one-time
 grant consumption back to the daemon. Dynamic worker-side approval prompts are
-still future work.
+still future work, but approval-required commands without a matching grant now
+record pending approval metadata on the worker session so the operator can see
+the blocked command and policy reason through status instead of losing that
+intent.
 Evidence upload validates the evidence metadata and records an in-memory receipt
 on the matching worker session before acknowledging the bundle hash and event
 count. With `--state-dir`, those receipts are also persisted in the worker state
@@ -320,11 +323,11 @@ state file cannot be serialized, prepared, or written; they do not acknowledge
 state-changing operations as durable when persistence fails.
 The status route returns the matching session status, command supervision
 counters, the last command exit code/timestamp, evidence metadata receipts, and
-stored bundle payload references, and evidence stream status after binding the
-caller-provided `session_id` to the allocated `worker_session_id`. If a worker
-restarts from persisted state, running command counters are reset to zero
-because the current contract worker does not yet reattach to orphaned OS
-processes.
+stored bundle payload references, evidence stream status, and pending approval
+requests after binding the caller-provided `session_id` to the allocated
+`worker_session_id`. If a worker restarts from persisted state, running command
+counters are reset to zero because the current contract worker does not yet
+reattach to orphaned OS processes.
 When the daemon-side provider creates a remote session, it persists the worker
 endpoint, worker session id, worker identity, and worker evidence endpoint in
 session labels so later exec/destroy calls can route back to the same worker.
@@ -333,10 +336,10 @@ worker evidence-status route instead of treating remote status as unavailable.
 Workspace materialization, workspace export, local apply, worker-side command
 policy, manifest-bound worker approval grants, command supervision counters, and
 session-bound env credential handoff now exist as governed flows. Ordered
-evidence stream chunks also exist at the worker contract layer. Dynamic
-approval prompts, file/socket/provider-token credential handoff, full evidence
-event streaming, supervised worker restarts, and merge/conflict UX beyond
-overwrite protection remain future work.
+evidence stream chunks and pending approval status also exist at the worker
+contract layer. Dynamic approval resolution prompts, file/socket/provider-token
+credential handoff, full evidence event streaming, supervised worker restarts,
+and merge/conflict UX beyond overwrite protection remain future work.
 
 `scripts/smoke-remote-worker.sh` starts this worker on a random loopback port,
 posts a handshake descriptor, checks the Ed25519 acknowledgement shape, creates

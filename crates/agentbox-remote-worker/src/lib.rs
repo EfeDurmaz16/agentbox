@@ -11,7 +11,8 @@ use agentbox_daemon::runtime::providers::remote::{
     RemoteAgentPodEvidenceStreamChunkResponse, RemoteAgentPodEvidenceStreamStatus,
     RemoteAgentPodEvidenceUploadRequest, RemoteAgentPodEvidenceUploadResponse,
     RemoteAgentPodExecRequest, RemoteAgentPodExecResponse, RemoteAgentPodHandshakeAck,
-    RemoteAgentPodHandshakeDescriptor, RemoteAgentPodLifecycleEvent, RemoteAgentPodWorkspaceBundle,
+    RemoteAgentPodHandshakeDescriptor, RemoteAgentPodLifecycleEvent,
+    RemoteAgentPodPendingApprovalStatus, RemoteAgentPodWorkspaceBundle,
     RemoteAgentPodWorkspaceExportResponse, RemoteAgentPodWorkspaceFile,
 };
 use agentbox_daemon::runtime::types::{
@@ -85,6 +86,7 @@ struct WorkerSession {
     evidence_receipts: Vec<WorkerEvidenceReceipt>,
     stored_evidence_bundles: Vec<WorkerStoredEvidenceBundle>,
     evidence_streams: HashMap<String, WorkerEvidenceStream>,
+    pending_approvals: Vec<WorkerPendingApproval>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -142,6 +144,14 @@ struct WorkerEvidenceStream {
     contents_utf8: String,
 }
 
+#[derive(Clone)]
+struct WorkerPendingApproval {
+    request_id: String,
+    command_argv: Vec<String>,
+    reason: String,
+    created_at: DateTime<Utc>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct WorkerSessionSnapshot {
     session_id: String,
@@ -170,6 +180,8 @@ struct WorkerSessionSnapshot {
     stored_evidence_bundles: Vec<WorkerStoredEvidenceBundleSnapshot>,
     #[serde(default)]
     evidence_streams: Vec<WorkerEvidenceStreamSnapshot>,
+    #[serde(default)]
+    pending_approvals: Vec<WorkerPendingApprovalSnapshot>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -207,6 +219,14 @@ struct WorkerEvidenceStreamSnapshot {
     updated_at: Option<DateTime<Utc>>,
     #[serde(default)]
     contents_utf8: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct WorkerPendingApprovalSnapshot {
+    request_id: String,
+    command_argv: Vec<String>,
+    reason: String,
+    created_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -277,6 +297,7 @@ struct WorkerEvidenceStatusResponse {
     evidence_receipts: Vec<WorkerEvidenceReceiptSnapshot>,
     stored_evidence_bundles: Vec<WorkerStoredEvidenceBundleSnapshot>,
     evidence_streams: Vec<RemoteAgentPodEvidenceStreamStatus>,
+    pending_approvals: Vec<RemoteAgentPodPendingApprovalStatus>,
 }
 
 type WorkerRouteResult<T> = Result<Json<T>, (StatusCode, Json<WorkerError>)>;
@@ -386,6 +407,7 @@ impl WorkerSession {
             evidence_receipts: Vec::new(),
             stored_evidence_bundles: Vec::new(),
             evidence_streams: HashMap::new(),
+            pending_approvals: Vec::new(),
         }
     }
 
@@ -454,6 +476,16 @@ impl WorkerSession {
                     )
                 })
                 .collect(),
+            pending_approvals: snapshot
+                .pending_approvals
+                .into_iter()
+                .map(|approval| WorkerPendingApproval {
+                    request_id: approval.request_id,
+                    command_argv: approval.command_argv,
+                    reason: approval.reason,
+                    created_at: approval.created_at,
+                })
+                .collect(),
         }
     }
 
@@ -505,6 +537,16 @@ impl WorkerSession {
                     stream_sha256: stream.stream_sha256.clone(),
                     updated_at: stream.updated_at,
                     contents_utf8: stream.contents_utf8.clone(),
+                })
+                .collect(),
+            pending_approvals: self
+                .pending_approvals
+                .iter()
+                .map(|approval| WorkerPendingApprovalSnapshot {
+                    request_id: approval.request_id.clone(),
+                    command_argv: approval.command_argv.clone(),
+                    reason: approval.reason.clone(),
+                    created_at: approval.created_at,
                 })
                 .collect(),
         }
@@ -786,7 +828,7 @@ async fn exec_command(
     record_command_started(&state, &request.worker_session_id, &request.session_id).await?;
     let worker_session_id = request.worker_session_id.clone();
     let session_id = request.session_id.clone();
-    let result = execute_command(request, started, context).await;
+    let result = execute_command(state.clone(), request, started, context).await;
     record_command_finished(&state, &worker_session_id, &session_id, &result).await?;
     Ok(Json(RemoteAgentPodExecResponse {
         result,
@@ -865,6 +907,46 @@ async fn record_command_finished(
     persist_sessions(state).await.map_err(worker_state_error)
 }
 
+async fn record_pending_approval(
+    state: &Arc<RemoteWorkerState>,
+    worker_session_id: &str,
+    session_id: &str,
+    command_argv: &[String],
+    reason: &str,
+) -> Result<(), (StatusCode, Json<WorkerError>)> {
+    {
+        let mut sessions = state.sessions.lock().await;
+        let session = get_matching_session_mut(&mut sessions, worker_session_id, session_id)?;
+        let request_id = pending_approval_id(worker_session_id, command_argv, reason);
+        if !session
+            .pending_approvals
+            .iter()
+            .any(|approval| approval.request_id == request_id)
+        {
+            session.pending_approvals.push(WorkerPendingApproval {
+                request_id,
+                command_argv: command_argv.to_vec(),
+                reason: reason.to_string(),
+                created_at: Utc::now(),
+            });
+        }
+    }
+    persist_sessions(state).await.map_err(worker_state_error)
+}
+
+fn pending_approval_id(worker_session_id: &str, command_argv: &[String], reason: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(worker_session_id.as_bytes());
+    hasher.update(b"\0");
+    for arg in command_argv {
+        hasher.update(arg.as_bytes());
+        hasher.update(b"\0");
+    }
+    hasher.update(reason.as_bytes());
+    let digest = hex_encode(&hasher.finalize());
+    format!("approval-{}", &digest[..16])
+}
+
 struct WorkerExecContext {
     kill_rx: watch::Receiver<bool>,
     session_id: String,
@@ -914,6 +996,7 @@ async fn session_exec_context(
 }
 
 async fn execute_command(
+    state: Arc<RemoteWorkerState>,
     request: RemoteAgentPodExecRequest,
     started: Instant,
     mut context: WorkerExecContext,
@@ -948,7 +1031,9 @@ async fn execute_command(
             duration_ms: elapsed_ms(started),
         };
     }
-    if let Some(result) = enforce_worker_policy(&request, &context, &working_dir, started) {
+    if let Some(result) =
+        enforce_worker_policy(&state, &request, &context, &working_dir, started).await
+    {
         return result;
     }
     command.current_dir(&working_dir);
@@ -1013,7 +1098,8 @@ async fn execute_command(
     }
 }
 
-fn enforce_worker_policy(
+async fn enforce_worker_policy(
+    state: &Arc<RemoteWorkerState>,
     request: &RemoteAgentPodExecRequest,
     context: &WorkerExecContext,
     working_dir: &Path,
@@ -1033,14 +1119,33 @@ fn enforce_worker_policy(
             .policy
             .to_policy_config(&context.workspace_host_path),
     );
-    if matches!(classification.bucket, Bucket::Allow)
-        || (matches!(classification.bucket, Bucket::Approve)
-            && context
-                .approval_grants
-                .iter()
-                .any(|grant| worker_approval_grant_matches(grant, request, context, working_dir)))
-    {
+    if matches!(classification.bucket, Bucket::Allow) {
         return None;
+    }
+    if matches!(classification.bucket, Bucket::Approve) {
+        if context
+            .approval_grants
+            .iter()
+            .any(|grant| worker_approval_grant_matches(grant, request, context, working_dir))
+        {
+            return None;
+        }
+        if let Err(err) = record_pending_approval(
+            state,
+            &request.worker_session_id,
+            &request.session_id,
+            &request.command.argv,
+            &classification.reason,
+        )
+        .await
+        {
+            return Some(CommandResult {
+                exit_code: 126,
+                stdout: String::new(),
+                stderr: err.1 .0.error,
+                duration_ms: elapsed_ms(started),
+            });
+        }
     }
 
     Some(CommandResult {
@@ -1305,6 +1410,11 @@ async fn evidence_status(
             .evidence_streams
             .values()
             .map(worker_evidence_stream_status)
+            .collect(),
+        pending_approvals: session
+            .pending_approvals
+            .iter()
+            .map(worker_pending_approval_status)
             .collect(),
     }))
 }
@@ -1823,6 +1933,17 @@ fn worker_evidence_stream_status(
         sealed: stream.sealed,
         stream_sha256: stream.stream_sha256.clone(),
         updated_at: stream.updated_at,
+    }
+}
+
+fn worker_pending_approval_status(
+    approval: &WorkerPendingApproval,
+) -> RemoteAgentPodPendingApprovalStatus {
+    RemoteAgentPodPendingApprovalStatus {
+        request_id: approval.request_id.clone(),
+        command_argv: approval.command_argv.clone(),
+        reason: approval.reason.clone(),
+        created_at: approval.created_at,
     }
 }
 
@@ -2574,6 +2695,53 @@ mod tests {
         assert!(response.result.stderr.contains("unknown.example.com"));
     }
 
+    #[tokio::test]
+    async fn exec_command_records_pending_approval_for_approval_bucket() {
+        let config = RemoteWorkerConfig::new(
+            "worker.local/dev",
+            "https://worker.example.com/agentpod/evidence",
+            SigningKey::from_bytes(&[48_u8; 32]),
+        );
+        let state = test_state(config);
+        state.sessions.lock().await.insert(
+            "worker-session-1".into(),
+            WorkerSession::new(
+                "session-1".into(),
+                std::env::temp_dir(),
+                WorkerPolicy {
+                    network_mode: WorkerPolicyNetworkMode::ApprovalOnFirstContact,
+                    ..WorkerPolicy::default()
+                },
+            ),
+        );
+        let request = RemoteAgentPodExecRequest {
+            session_id: "session-1".into(),
+            worker_session_id: "worker-session-1".into(),
+            command: ExecCommand {
+                argv: vec!["curl".into(), "https://approval.example.com".into()],
+                working_dir: None,
+                env: HashMap::new(),
+                timeout_seconds: Some(5),
+            },
+        };
+
+        let response = exec_command(State(state.clone()), worker_session_path(), Json(request))
+            .await
+            .unwrap()
+            .0;
+
+        assert_eq!(response.result.exit_code, 126);
+        assert!(response.result.stderr.contains("policy denied"));
+        let sessions = state.sessions.lock().await;
+        let approvals = &sessions.get("worker-session-1").unwrap().pending_approvals;
+        assert_eq!(approvals.len(), 1);
+        assert_eq!(
+            approvals[0].command_argv,
+            vec!["curl", "https://approval.example.com"]
+        );
+        assert!(!approvals[0].reason.is_empty());
+    }
+
     #[test]
     fn worker_approval_grant_matches_command_scope() {
         let context = WorkerExecContext {
@@ -3183,6 +3351,12 @@ mod tests {
                 contents_utf8: "hello world\n".into(),
             },
         );
+        session.pending_approvals.push(WorkerPendingApproval {
+            request_id: "approval-status".into(),
+            command_argv: vec!["curl".into(), "https://approval.example.com".into()],
+            reason: "first contact requires approval".into(),
+            created_at: sealed_at,
+        });
         state
             .sessions
             .lock()
@@ -3225,6 +3399,12 @@ mod tests {
         assert_eq!(
             response.evidence_streams[0].stream_sha256.as_deref(),
             Some(sha256_hex(b"hello world\n").as_str())
+        );
+        assert_eq!(response.pending_approvals.len(), 1);
+        assert_eq!(response.pending_approvals[0].request_id, "approval-status");
+        assert_eq!(
+            response.pending_approvals[0].command_argv,
+            vec!["curl", "https://approval.example.com"]
         );
     }
 

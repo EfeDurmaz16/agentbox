@@ -902,6 +902,8 @@ pub struct RemoteAgentPodEvidenceStatusResponse {
     pub stored_evidence_bundles: Vec<RemoteAgentPodStoredEvidenceBundleStatus>,
     #[serde(default)]
     pub evidence_streams: Vec<RemoteAgentPodEvidenceStreamStatus>,
+    #[serde(default)]
+    pub pending_approvals: Vec<RemoteAgentPodPendingApprovalStatus>,
 }
 
 impl RemoteAgentPodEvidenceStatusResponse {
@@ -952,6 +954,38 @@ impl RemoteAgentPodEvidenceStatusResponse {
         }
         for stream in &self.evidence_streams {
             stream.validate()?;
+        }
+        for approval in &self.pending_approvals {
+            approval.validate()?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteAgentPodPendingApprovalStatus {
+    pub request_id: String,
+    pub command_argv: Vec<String>,
+    pub reason: String,
+    pub created_at: DateTime<Utc>,
+}
+
+impl RemoteAgentPodPendingApprovalStatus {
+    pub fn validate(&self) -> Result<(), RuntimeError> {
+        if self.request_id.trim().is_empty() {
+            return Err(RuntimeError::ManifestRejected(
+                "remote pending approval status must include request id".into(),
+            ));
+        }
+        if self.command_argv.is_empty() {
+            return Err(RuntimeError::ManifestRejected(
+                "remote pending approval status must include command argv".into(),
+            ));
+        }
+        if self.reason.trim().is_empty() {
+            return Err(RuntimeError::ManifestRejected(
+                "remote pending approval status must include reason".into(),
+            ));
         }
         Ok(())
     }
@@ -2413,6 +2447,12 @@ mod tests {
                     stream_sha256: Some("a".repeat(64)),
                     updated_at: Some(Utc::now()),
                 }],
+                pending_approvals: vec![RemoteAgentPodPendingApprovalStatus {
+                    request_id: "approval-1".into(),
+                    command_argv: vec!["curl".into(), "https://example.com".into()],
+                    reason: "network first contact requires approval".into(),
+                    created_at: Utc::now(),
+                }],
             };
             response.validate_for(&request)?;
             Ok(response)
@@ -3347,6 +3387,12 @@ mod tests {
                 stream_sha256: Some(sha256_hex(b"hello")),
                 updated_at: Some(Utc::now()),
             }],
+            pending_approvals: vec![RemoteAgentPodPendingApprovalStatus {
+                request_id: "approval-1".into(),
+                command_argv: vec!["curl".into(), "https://example.com".into()],
+                reason: "network first contact requires approval".into(),
+                created_at: Utc::now(),
+            }],
         };
 
         response.validate_for(&request).unwrap();
@@ -3374,6 +3420,7 @@ mod tests {
                 storage_path: String::new(),
             }],
             evidence_streams: Vec::new(),
+            pending_approvals: Vec::new(),
         };
 
         let err = response.validate_for(&request).unwrap_err();
