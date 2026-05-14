@@ -56,3 +56,5 @@ See [macOS minipod limitations](macos-minipod-limitations.md) for the current
 VM-backed boundary and native enforcement gap.
 See [safe file sharing](safe-file-sharing.md) for current workspace, read-only
 mount, credential, and system bridge guidance.
+See [threat model](threat-model.md), [platform isolation strategy](platform-isolation.md),
+and [public limitations](limitations.md) for the current public boundary.

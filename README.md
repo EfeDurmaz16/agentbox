@@ -211,6 +211,10 @@ For macOS specifically, see
 [docs/macos-minipod-limitations.md](docs/macos-minipod-limitations.md).
 For file boundaries, see
 [docs/safe-file-sharing.md](docs/safe-file-sharing.md).
+For the public security boundary, see
+[docs/threat-model.md](docs/threat-model.md),
+[docs/platform-isolation.md](docs/platform-isolation.md), and
+[docs/limitations.md](docs/limitations.md).
 
 ## CLI Commands
 
