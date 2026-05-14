@@ -111,7 +111,22 @@ extension:
    Security, Network Extension, entitlement, host bridge, and evidence
    requirements without executing them.
 3. Add a local event schema for file and exec authorization requests.
-4. Add tests that unknown macOS enforcement returns unavailable.
-5. Add `agentbox doctor` rows for macOS entitlement/extension readiness.
+4. Add `agentbox doctor` rows for macOS entitlement/extension readiness.
+5. Add tests that unknown macOS enforcement returns unavailable.
 
 Only after that should a separate macOS system extension target be added.
+
+## Current Event Schema
+
+The daemon now models the future Endpoint Security authorization boundary in
+code without installing a system extension:
+
+- exec requests carry session id, ES event id, process subject, argv, target
+  executable, requested execute access, and observation time.
+- file requests carry session id, ES event id, process subject, target path,
+  requested access such as read/write/delete, and observation time.
+- decisions carry allow/approve/block, reason, optional evidence reference, and
+  decision time.
+
+This is protocol shape only. There is still no privileged ES client, no kernel
+authorization callback, and no live allow/deny enforcement on macOS.

@@ -1,6 +1,7 @@
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::runtime::bridge::HostBridgeTransportKind;
+use crate::runtime::bridge::{HostBridgeDecision, HostBridgeTransportKind};
 use crate::runtime::provider::RuntimeError;
 use crate::runtime::types::{ExecCommand, MinipodSpec, MountKind, MountMode, NetworkMode};
 
@@ -208,6 +209,186 @@ pub fn macos_native_execution_enabled() -> bool {
     matches!(std::env::var("AGENTBOX_MACOS_NATIVE").as_deref(), Ok("1"))
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MacOsEndpointSecurityEventKind {
+    Exec,
+    Open,
+    Create,
+    Rename,
+    Unlink,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MacOsFileAccess {
+    Read,
+    Write,
+    Execute,
+    Create,
+    Delete,
+    Rename,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MacOsEndpointSecuritySubject {
+    pub pid: u32,
+    pub ppid: Option<u32>,
+    pub executable_path: String,
+    pub signing_id: Option<String>,
+    pub team_id: Option<String>,
+}
+
+impl MacOsEndpointSecuritySubject {
+    pub fn unsigned(pid: u32, executable_path: impl Into<String>) -> Self {
+        Self {
+            pid,
+            ppid: None,
+            executable_path: executable_path.into(),
+            signing_id: None,
+            team_id: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MacOsEndpointSecurityAuthorizationRequest {
+    pub schema_version: i64,
+    pub session_id: String,
+    pub event_id: String,
+    pub event_kind: MacOsEndpointSecurityEventKind,
+    pub subject: MacOsEndpointSecuritySubject,
+    pub command_argv: Vec<String>,
+    pub target_path: Option<String>,
+    pub target_new_path: Option<String>,
+    pub requested_access: Vec<MacOsFileAccess>,
+    pub observed_at: DateTime<Utc>,
+}
+
+impl MacOsEndpointSecurityAuthorizationRequest {
+    pub fn exec(
+        session_id: impl Into<String>,
+        event_id: impl Into<String>,
+        subject: MacOsEndpointSecuritySubject,
+        command_argv: Vec<String>,
+    ) -> Result<Self, RuntimeError> {
+        if command_argv.is_empty() {
+            return Err(RuntimeError::ManifestRejected(
+                "macOS Endpoint Security exec request cannot have empty argv".into(),
+            ));
+        }
+        let target_path = command_argv.first().cloned();
+        Self::new(
+            session_id,
+            event_id,
+            MacOsEndpointSecurityEventKind::Exec,
+            subject,
+            command_argv,
+            target_path,
+            None,
+            vec![MacOsFileAccess::Execute],
+        )
+    }
+
+    pub fn file(
+        session_id: impl Into<String>,
+        event_id: impl Into<String>,
+        event_kind: MacOsEndpointSecurityEventKind,
+        subject: MacOsEndpointSecuritySubject,
+        target_path: impl Into<String>,
+        requested_access: Vec<MacOsFileAccess>,
+    ) -> Result<Self, RuntimeError> {
+        Self::new(
+            session_id,
+            event_id,
+            event_kind,
+            subject,
+            vec![],
+            Some(target_path.into()),
+            None,
+            requested_access,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        session_id: impl Into<String>,
+        event_id: impl Into<String>,
+        event_kind: MacOsEndpointSecurityEventKind,
+        subject: MacOsEndpointSecuritySubject,
+        command_argv: Vec<String>,
+        target_path: Option<String>,
+        target_new_path: Option<String>,
+        requested_access: Vec<MacOsFileAccess>,
+    ) -> Result<Self, RuntimeError> {
+        let session_id = session_id.into();
+        if session_id.trim().is_empty() {
+            return Err(RuntimeError::ManifestRejected(
+                "macOS Endpoint Security request session id cannot be empty".into(),
+            ));
+        }
+        let event_id = event_id.into();
+        if event_id.trim().is_empty() {
+            return Err(RuntimeError::ManifestRejected(
+                "macOS Endpoint Security request event id cannot be empty".into(),
+            ));
+        }
+        if !matches!(event_kind, MacOsEndpointSecurityEventKind::Exec)
+            && target_path.as_deref().unwrap_or_default().trim().is_empty()
+        {
+            return Err(RuntimeError::ManifestRejected(
+                "macOS Endpoint Security file request target path cannot be empty".into(),
+            ));
+        }
+        if !matches!(event_kind, MacOsEndpointSecurityEventKind::Exec)
+            && requested_access.is_empty()
+        {
+            return Err(RuntimeError::ManifestRejected(
+                "macOS Endpoint Security file request access cannot be empty".into(),
+            ));
+        }
+
+        Ok(Self {
+            schema_version: 1,
+            session_id,
+            event_id,
+            event_kind,
+            subject,
+            command_argv,
+            target_path,
+            target_new_path,
+            requested_access,
+            observed_at: Utc::now(),
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MacOsEndpointSecurityAuthorizationDecision {
+    pub schema_version: i64,
+    pub request_event_id: String,
+    pub decision: HostBridgeDecision,
+    pub reason: String,
+    pub evidence_ref: Option<String>,
+    pub decided_at: DateTime<Utc>,
+}
+
+impl MacOsEndpointSecurityAuthorizationDecision {
+    pub fn new(
+        request: &MacOsEndpointSecurityAuthorizationRequest,
+        decision: HostBridgeDecision,
+        reason: impl Into<String>,
+        evidence_ref: Option<String>,
+    ) -> Self {
+        Self {
+            schema_version: 1,
+            request_event_id: request.event_id.clone(),
+            decision,
+            reason: reason.into(),
+            evidence_ref,
+            decided_at: Utc::now(),
+        }
+    }
+}
+
 fn cpu_shares_to_vcpu(cpu_shares: u32) -> u32 {
     let vcpus = (cpu_shares.max(1) as u64).div_ceil(2048);
     vcpus.clamp(1, 8) as u32
@@ -298,5 +479,84 @@ mod tests {
             assert!(!plan.live_execution_enabled);
             assert!(!plan.runnable_on_current_host());
         }
+    }
+
+    #[test]
+    fn endpoint_security_exec_request_models_policy_authorization() {
+        let subject = MacOsEndpointSecuritySubject {
+            pid: 42,
+            ppid: Some(1),
+            executable_path: "/usr/bin/git".into(),
+            signing_id: Some("com.apple.git".into()),
+            team_id: Some("APPLE".into()),
+        };
+
+        let request = MacOsEndpointSecurityAuthorizationRequest::exec(
+            "session-1",
+            "event-1",
+            subject,
+            vec!["/usr/bin/git".into(), "push".into()],
+        )
+        .unwrap();
+        let decision = MacOsEndpointSecurityAuthorizationDecision::new(
+            &request,
+            HostBridgeDecision::Approve,
+            "git push requires operator approval",
+            Some("audit:1".into()),
+        );
+
+        assert_eq!(request.schema_version, 1);
+        assert_eq!(request.event_kind, MacOsEndpointSecurityEventKind::Exec);
+        assert_eq!(request.target_path.as_deref(), Some("/usr/bin/git"));
+        assert_eq!(request.requested_access, vec![MacOsFileAccess::Execute]);
+        assert_eq!(decision.request_event_id, "event-1");
+        assert_eq!(decision.decision, HostBridgeDecision::Approve);
+        assert_eq!(decision.evidence_ref.as_deref(), Some("audit:1"));
+    }
+
+    #[test]
+    fn endpoint_security_file_request_models_protected_path_access() {
+        let request = MacOsEndpointSecurityAuthorizationRequest::file(
+            "session-1",
+            "event-2",
+            MacOsEndpointSecurityEventKind::Open,
+            MacOsEndpointSecuritySubject::unsigned(43, "/usr/bin/python3"),
+            "/Users/efe/.ssh/id_ed25519",
+            vec![MacOsFileAccess::Read],
+        )
+        .unwrap();
+
+        assert_eq!(request.schema_version, 1);
+        assert_eq!(request.command_argv, Vec::<String>::new());
+        assert_eq!(
+            request.target_path.as_deref(),
+            Some("/Users/efe/.ssh/id_ed25519")
+        );
+        assert_eq!(request.requested_access, vec![MacOsFileAccess::Read]);
+    }
+
+    #[test]
+    fn endpoint_security_requests_reject_empty_boundaries() {
+        let subject = MacOsEndpointSecuritySubject::unsigned(44, "/usr/bin/python3");
+
+        let exec_err = MacOsEndpointSecurityAuthorizationRequest::exec(
+            "session-1",
+            "event-3",
+            subject.clone(),
+            vec![],
+        )
+        .unwrap_err();
+        let file_err = MacOsEndpointSecurityAuthorizationRequest::file(
+            "session-1",
+            "event-4",
+            MacOsEndpointSecurityEventKind::Open,
+            subject,
+            "",
+            vec![MacOsFileAccess::Read],
+        )
+        .unwrap_err();
+
+        assert!(exec_err.to_string().contains("empty argv"));
+        assert!(file_err.to_string().contains("target path"));
     }
 }
