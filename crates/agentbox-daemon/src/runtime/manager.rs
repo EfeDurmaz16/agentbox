@@ -81,6 +81,12 @@ impl RuntimeManager {
             .get(session_id)
             .map_err(|e| RuntimeError::Internal(e.to_string()))?
             .ok_or_else(|| RuntimeError::NotFound(session_id.to_string()))?;
+        if !matches!(session.status, RuntimeStatus::Running) {
+            return Err(RuntimeError::PolicyDenied(format!(
+                "cannot exec in session {session_id} with status {:?}",
+                session.status
+            )));
+        }
 
         let expired_credentials_removed = self.expire_credential_grants(&mut session)?;
         let grant_count_before = session.approval_grants.len();
@@ -1429,6 +1435,36 @@ mod tests {
         let audit = manager.audit.recent(1).unwrap();
         assert_eq!(audit[0].decision, "destroyed");
         assert!(audit[0].command.contains("runtime.destroy"));
+    }
+
+    #[tokio::test]
+    async fn exec_rejects_stopped_sessions_before_provider_dispatch() {
+        let manager = manager("exec-stopped");
+        let spec = MinipodSpec::for_agent_task("aspendos", "/tmp/agentbox-work");
+        let session = manager.create(&spec).await.unwrap();
+        manager.destroy(&session.id).await.unwrap();
+
+        let err = manager
+            .exec(
+                &session.id,
+                &ExecCommand {
+                    argv: vec!["echo".into(), "after-stop".into()],
+                    working_dir: None,
+                    env: Default::default(),
+                    timeout_seconds: None,
+                },
+            )
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, RuntimeError::PolicyDenied(_)));
+        assert!(err.to_string().contains("Stopped"));
+        let saved = manager
+            .sessions
+            .get(&session.id)
+            .unwrap()
+            .expect("stopped session remains available for evidence");
+        assert!(saved.transcripts.is_empty());
     }
 
     #[tokio::test]
