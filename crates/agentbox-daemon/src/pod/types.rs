@@ -43,6 +43,21 @@ pub struct MountSpec {
     pub host_path: PathBuf,
     pub container_path: String,
     pub read_only: bool,
+    #[serde(default)]
+    pub kind: MountKind,
+    #[serde(default)]
+    pub one_time: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MountKind {
+    Workspace,
+    #[default]
+    ReadOnlyHost,
+    Credential,
+    SystemBridge,
+    ServiceData,
+    Custom(String),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -132,5 +147,19 @@ mod tests {
         let policy = NetworkPolicy::default();
         assert!(matches!(policy.mode, NetworkMode::Restricted));
         assert!(policy.allow_domains.is_empty());
+    }
+
+    #[test]
+    fn legacy_mount_specs_default_to_read_only_host_kind() {
+        let json = serde_json::json!({
+            "host_path": "/tmp/config",
+            "container_path": "/mnt/config",
+            "read_only": true
+        });
+
+        let mount: MountSpec = serde_json::from_value(json).unwrap();
+
+        assert!(matches!(mount.kind, MountKind::ReadOnlyHost));
+        assert!(!mount.one_time);
     }
 }

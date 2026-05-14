@@ -5,13 +5,14 @@ use async_trait::async_trait;
 use crate::pod::podman::PodmanProvider;
 use crate::pod::provider::{PodError, PodProvider};
 use crate::pod::types::{
-    ContainerRole, ContainerSpec, ExecRequest, MountSpec, NetworkMode as PodNetworkMode,
-    NetworkPolicy as PodNetworkPolicy, PodSession, PodSpec, PodStatus, ResourceLimits,
+    ContainerRole, ContainerSpec, ExecRequest, MountKind as PodMountKind, MountSpec,
+    NetworkMode as PodNetworkMode, NetworkPolicy as PodNetworkPolicy, PodSession, PodSpec,
+    PodStatus, ResourceLimits,
 };
 use crate::runtime::provider::{RuntimeError, RuntimeProvider};
 use crate::runtime::types::{
-    CommandResult, ExecCommand, MinipodSpec, MountMode, NetworkMode, RuntimeCapability,
-    RuntimeSession, RuntimeStatus,
+    CommandResult, CredentialGrantKind, ExecCommand, MinipodSpec, MountKind, MountMode,
+    NetworkMode, RuntimeCapability, RuntimeSession, RuntimeStatus,
 };
 
 pub struct PodmanRuntimeProvider {
@@ -125,11 +126,15 @@ fn minipod_to_pod_spec(spec: &MinipodSpec) -> PodSpec {
         host_path: spec.filesystem.workspace_host_path.clone(),
         container_path: spec.filesystem.workspace_guest_path.clone(),
         read_only: false,
+        kind: PodMountKind::Workspace,
+        one_time: false,
     }];
     mounts.extend(spec.filesystem.mounts.iter().map(|mount| MountSpec {
         host_path: mount.host_path.clone(),
         container_path: mount.guest_path.clone(),
         read_only: matches!(mount.mode, MountMode::ReadOnly),
+        kind: pod_mount_kind(&mount.kind),
+        one_time: is_one_time_credential_mount(spec, mount),
     }));
 
     let mut containers = vec![ContainerSpec {
@@ -172,6 +177,29 @@ fn minipod_to_pod_spec(spec: &MinipodSpec) -> PodSpec {
         timeout_seconds: spec.resources.timeout_seconds,
         labels,
     }
+}
+
+fn pod_mount_kind(kind: &MountKind) -> PodMountKind {
+    match kind {
+        MountKind::Workspace => PodMountKind::Workspace,
+        MountKind::ReadOnlyHost => PodMountKind::ReadOnlyHost,
+        MountKind::Credential => PodMountKind::Credential,
+        MountKind::SystemBridge => PodMountKind::SystemBridge,
+        MountKind::ServiceData => PodMountKind::ServiceData,
+        MountKind::Custom(value) => PodMountKind::Custom(value.clone()),
+    }
+}
+
+fn is_one_time_credential_mount(
+    spec: &MinipodSpec,
+    mount: &crate::runtime::types::MountRule,
+) -> bool {
+    matches!(mount.kind, MountKind::Credential)
+        && spec.credentials.grants.iter().any(|grant| {
+            matches!(grant.kind, CredentialGrantKind::FileMount)
+                && grant.one_time
+                && grant.target == mount.host_path.display().to_string()
+        })
 }
 
 fn workspace_image(spec: &MinipodSpec) -> String {
@@ -300,6 +328,39 @@ mod tests {
         assert_eq!(pod_spec.network.allow_domains, vec!["api.openai.com"]);
         assert_eq!(pod_spec.labels.get("agentbox.session"), Some(&spec.id));
         assert_eq!(pod_spec.labels.get("purpose"), Some(&"test".to_string()));
+    }
+
+    #[test]
+    fn converts_one_time_credential_mounts_to_pod_mount_metadata() {
+        let mut spec = MinipodSpec::for_agent_task("hermes", "/tmp/workspace");
+        spec.filesystem
+            .mounts
+            .push(crate::runtime::types::MountRule {
+                host_path: "/tmp/agentbox-openai-key".into(),
+                guest_path: "/run/agentbox/credentials/openai".into(),
+                mode: MountMode::ReadOnly,
+                kind: MountKind::Credential,
+            });
+        spec.credentials
+            .grants
+            .push(crate::runtime::types::CredentialGrant {
+                name: "openai".into(),
+                kind: CredentialGrantKind::FileMount,
+                target: "/tmp/agentbox-openai-key".into(),
+                one_time: true,
+                requires_approval: true,
+            });
+
+        let pod_spec = minipod_to_pod_spec(&spec);
+        let credential_mount = pod_spec
+            .mounts
+            .iter()
+            .find(|mount| mount.container_path == "/run/agentbox/credentials/openai")
+            .expect("credential mount should be present");
+
+        assert!(matches!(credential_mount.kind, PodMountKind::Credential));
+        assert!(credential_mount.read_only);
+        assert!(credential_mount.one_time);
     }
 
     #[test]

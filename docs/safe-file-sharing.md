@@ -77,8 +77,12 @@ general host mount.
 
 ## Credential Grants
 
-Credential grants are planned as first-class minipod manifest entries. Until
-that surface is complete:
+Credential grants are first-class minipod manifest entries for exact files or
+future provider-mediated secret sources. `--credential-file name=host:guest`
+creates a read-only credential mount and a one-time file grant, and provider
+adapters preserve that metadata separately from ordinary read-only mounts.
+
+Until native provider enforcement is complete:
 
 - prefer short-lived task-specific tokens
 - pass only the exact file or env value needed

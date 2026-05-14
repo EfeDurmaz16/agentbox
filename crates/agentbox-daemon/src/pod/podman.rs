@@ -484,6 +484,8 @@ mod tests {
                 host_path: PathBuf::from("/home/user/project"),
                 container_path: "/workspace".to_string(),
                 read_only: false,
+                kind: MountKind::Workspace,
+                one_time: false,
             }],
             env: HashMap::from([("NODE_ENV".to_string(), "development".to_string())]),
             timeout_seconds: Some(300),

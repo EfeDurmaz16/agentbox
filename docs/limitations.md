@@ -64,7 +64,8 @@ Limitations:
 
 - redaction is pattern-based and can miss unusual secret formats
 - existing external logs outside Agentbox are not scrubbed
-- credential grants are still evolving
+- one-time credential file grants are modeled and carried into provider mount
+  metadata, but native provider revocation is still evolving
 - browser profiles, keychains, wallets, and cloud SDK caches need provider-level
   mediation before they are safe for broad agent access
 
