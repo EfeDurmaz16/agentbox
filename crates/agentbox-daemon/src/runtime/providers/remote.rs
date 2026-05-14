@@ -316,6 +316,16 @@ fn decode_hex_nibble(value: u8, label: &str) -> Result<u8, RuntimeError> {
     }
 }
 
+fn validate_sha256_hex(value: &str, label: &str) -> Result<(), RuntimeError> {
+    if value.len() == 64 && value.chars().all(|value| value.is_ascii_hexdigit()) {
+        Ok(())
+    } else {
+        Err(RuntimeError::ManifestRejected(format!(
+            "{label} must be a SHA-256 hex digest"
+        )))
+    }
+}
+
 impl RemoteAgentPodHandshakeDescriptor {
     pub fn new(
         endpoint: impl Into<String>,
@@ -757,6 +767,92 @@ impl RemoteAgentPodEvidenceBundleUploadResponse {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteAgentPodEvidenceStatusRequest {
+    pub session_id: String,
+    pub worker_session_id: String,
+}
+
+impl RemoteAgentPodEvidenceStatusRequest {
+    pub fn validate(&self) -> Result<(), RuntimeError> {
+        if self.session_id.trim().is_empty() || self.worker_session_id.trim().is_empty() {
+            return Err(RuntimeError::ManifestRejected(
+                "remote evidence status request must include session ids".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteAgentPodEvidenceReceiptStatus {
+    pub bundle_sha256: String,
+    #[serde(default)]
+    pub derived_from_bundle: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bundle_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bundle_root_sha256: Option<String>,
+    pub event_count: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sealed_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteAgentPodStoredEvidenceBundleStatus {
+    pub bundle_sha256: String,
+    pub stored_bytes: u64,
+    pub storage_path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteAgentPodEvidenceStatusResponse {
+    pub session_id: String,
+    pub worker_session_id: String,
+    pub status: RuntimeStatus,
+    pub evidence_receipts: Vec<RemoteAgentPodEvidenceReceiptStatus>,
+    pub stored_evidence_bundles: Vec<RemoteAgentPodStoredEvidenceBundleStatus>,
+}
+
+impl RemoteAgentPodEvidenceStatusResponse {
+    pub fn validate_for(
+        &self,
+        request: &RemoteAgentPodEvidenceStatusRequest,
+    ) -> Result<(), RuntimeError> {
+        request.validate()?;
+        if self.session_id != request.session_id
+            || self.worker_session_id != request.worker_session_id
+        {
+            return Err(RuntimeError::ManifestRejected(
+                "remote evidence status response session ids do not match request".into(),
+            ));
+        }
+        for receipt in &self.evidence_receipts {
+            validate_sha256_hex(
+                &receipt.bundle_sha256,
+                "remote evidence receipt bundle hash",
+            )?;
+            if receipt.event_count == 0 {
+                return Err(RuntimeError::ManifestRejected(
+                    "remote evidence status receipts must include event counts".into(),
+                ));
+            }
+            if let Some(root_hash) = &receipt.bundle_root_sha256 {
+                validate_sha256_hex(root_hash, "remote evidence receipt bundle root hash")?;
+            }
+        }
+        for bundle in &self.stored_evidence_bundles {
+            validate_sha256_hex(&bundle.bundle_sha256, "remote stored evidence bundle hash")?;
+            if bundle.stored_bytes == 0 || bundle.storage_path.trim().is_empty() {
+                return Err(RuntimeError::ManifestRejected(
+                    "remote stored evidence bundle status must include byte count and path".into(),
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
 #[async_trait]
 pub trait RemoteAgentPodTransport: Send + Sync {
     async fn handshake(
@@ -788,6 +884,11 @@ pub trait RemoteAgentPodTransport: Send + Sync {
         &self,
         request: RemoteAgentPodEvidenceBundleUploadRequest,
     ) -> Result<RemoteAgentPodEvidenceBundleUploadResponse, RuntimeError>;
+
+    async fn evidence_status(
+        &self,
+        request: RemoteAgentPodEvidenceStatusRequest,
+    ) -> Result<RemoteAgentPodEvidenceStatusResponse, RuntimeError>;
 }
 
 #[derive(Debug, Clone)]
@@ -978,6 +1079,38 @@ impl RemoteAgentPodTransport for HttpRemoteAgentPodTransport {
             .map_err(|err| {
                 RuntimeError::ManifestRejected(format!(
                     "remote evidence bundle upload response was invalid JSON: {err}"
+                ))
+            })?;
+        response.validate_for(&request)?;
+        Ok(response)
+    }
+
+    async fn evidence_status(
+        &self,
+        request: RemoteAgentPodEvidenceStatusRequest,
+    ) -> Result<RemoteAgentPodEvidenceStatusResponse, RuntimeError> {
+        request.validate()?;
+        let response = self
+            .client
+            .get(self.route(format!(
+                "sessions/{}/evidence/status",
+                request.worker_session_id
+            )))
+            .query(&[("session_id", request.session_id.as_str())])
+            .send()
+            .await
+            .map_err(|err| {
+                RuntimeError::Unavailable(format!("remote evidence status failed: {err}"))
+            })?
+            .error_for_status()
+            .map_err(|err| {
+                RuntimeError::Unavailable(format!("remote evidence status rejected: {err}"))
+            })?
+            .json::<RemoteAgentPodEvidenceStatusResponse>()
+            .await
+            .map_err(|err| {
+                RuntimeError::ManifestRejected(format!(
+                    "remote evidence status response was invalid JSON: {err}"
                 ))
             })?;
         response.validate_for(&request)?;
@@ -1420,6 +1553,36 @@ mod tests {
             response.validate_for(&request)?;
             Ok(response)
         }
+
+        async fn evidence_status(
+            &self,
+            request: RemoteAgentPodEvidenceStatusRequest,
+        ) -> Result<RemoteAgentPodEvidenceStatusResponse, RuntimeError> {
+            let response = RemoteAgentPodEvidenceStatusResponse {
+                session_id: request.session_id.clone(),
+                worker_session_id: request.worker_session_id.clone(),
+                status: RuntimeStatus::Running,
+                evidence_receipts: vec![RemoteAgentPodEvidenceReceiptStatus {
+                    bundle_sha256: "e".repeat(64),
+                    derived_from_bundle: false,
+                    bundle_id: None,
+                    bundle_root_sha256: None,
+                    event_count: 4,
+                    sealed_at: Some(Utc::now()),
+                }],
+                stored_evidence_bundles: vec![RemoteAgentPodStoredEvidenceBundleStatus {
+                    bundle_sha256: "e".repeat(64),
+                    stored_bytes: 128,
+                    storage_path: format!(
+                        "evidence/{}/{}.json",
+                        request.worker_session_id,
+                        "e".repeat(64)
+                    ),
+                }],
+            };
+            response.validate_for(&request)?;
+            Ok(response)
+        }
     }
 
     #[tokio::test]
@@ -1553,6 +1716,10 @@ mod tests {
         assert_eq!(
             transport.route("sessions/worker-1/evidence"),
             "https://worker.example.com/agentpod/sessions/worker-1/evidence"
+        );
+        assert_eq!(
+            transport.route("sessions/worker-1/evidence/status"),
+            "https://worker.example.com/agentpod/sessions/worker-1/evidence/status"
         );
         assert_eq!(
             transport.route("sessions/worker-1/evidence/bundle"),
@@ -2094,6 +2261,57 @@ mod tests {
         assert!(err.to_string().contains("stored byte count"));
     }
 
+    #[test]
+    fn remote_evidence_status_response_validates_receipts_and_storage() {
+        let request = RemoteAgentPodEvidenceStatusRequest {
+            session_id: "session-1".into(),
+            worker_session_id: "worker-session-1".into(),
+        };
+        let response = RemoteAgentPodEvidenceStatusResponse {
+            session_id: "session-1".into(),
+            worker_session_id: "worker-session-1".into(),
+            status: RuntimeStatus::Running,
+            evidence_receipts: vec![RemoteAgentPodEvidenceReceiptStatus {
+                bundle_sha256: "a".repeat(64),
+                derived_from_bundle: true,
+                bundle_id: Some("bundle-1".into()),
+                bundle_root_sha256: Some("a".repeat(64)),
+                event_count: 2,
+                sealed_at: Some(Utc::now()),
+            }],
+            stored_evidence_bundles: vec![RemoteAgentPodStoredEvidenceBundleStatus {
+                bundle_sha256: "a".repeat(64),
+                stored_bytes: 64,
+                storage_path: "evidence/worker-session-1/a.json".into(),
+            }],
+        };
+
+        response.validate_for(&request).unwrap();
+    }
+
+    #[test]
+    fn remote_evidence_status_response_rejects_empty_storage_ack() {
+        let request = RemoteAgentPodEvidenceStatusRequest {
+            session_id: "session-1".into(),
+            worker_session_id: "worker-session-1".into(),
+        };
+        let response = RemoteAgentPodEvidenceStatusResponse {
+            session_id: "session-1".into(),
+            worker_session_id: "worker-session-1".into(),
+            status: RuntimeStatus::Running,
+            evidence_receipts: Vec::new(),
+            stored_evidence_bundles: vec![RemoteAgentPodStoredEvidenceBundleStatus {
+                bundle_sha256: "a".repeat(64),
+                stored_bytes: 0,
+                storage_path: String::new(),
+            }],
+        };
+
+        let err = response.validate_for(&request).unwrap_err();
+
+        assert!(err.to_string().contains("byte count"));
+    }
+
     #[tokio::test]
     async fn fake_remote_transport_proves_contract_without_provider_execution() {
         let transport = RemoteAgentPodTransportDescriptor::new(
@@ -2188,6 +2406,16 @@ mod tests {
         assert!(bundle
             .lifecycle_events
             .contains(&RemoteAgentPodLifecycleEvent::EvidenceSealed));
+        let status = fake
+            .evidence_status(RemoteAgentPodEvidenceStatusRequest {
+                session_id: evidence.session_id,
+                worker_session_id: evidence.worker_session_id,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(status.evidence_receipts.len(), 1);
+        assert_eq!(status.stored_evidence_bundles.len(), 1);
 
         let provider = RemoteAgentPodProvider::default();
         assert_eq!(
