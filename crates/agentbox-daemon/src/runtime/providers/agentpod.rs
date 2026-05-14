@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 
+use crate::runtime::bridge::HostBridgeTransportKind;
 use crate::runtime::provider::{
     ProviderFamily, ProviderImplementationStatus, RuntimeError, RuntimeProvider,
 };
@@ -116,6 +117,17 @@ impl AgentPodProviderKind {
             ],
         }
     }
+
+    fn bridge_transport_kinds(&self) -> &'static [HostBridgeTransportKind] {
+        match self {
+            Self::MacOs => &[
+                HostBridgeTransportKind::UnixSocket,
+                HostBridgeTransportKind::Vsock,
+            ],
+            Self::Linux => &[HostBridgeTransportKind::UnixSocket],
+            Self::Windows => &[HostBridgeTransportKind::NamedPipe],
+        }
+    }
 }
 
 pub struct AgentPodProvider {
@@ -167,6 +179,10 @@ impl RuntimeProvider for AgentPodProvider {
 
     fn capabilities(&self) -> &[RuntimeCapability] {
         self.kind.capabilities()
+    }
+
+    fn bridge_transport_kinds(&self) -> &[HostBridgeTransportKind] {
+        self.kind.bridge_transport_kinds()
     }
 
     async fn is_available(&self) -> bool {
@@ -240,6 +256,9 @@ mod tests {
             "unavailable AgentPod descriptors must not claim active network enforcement"
         );
         assert_network_enforcement_metadata(&macos, &[]);
+        assert!(macos
+            .bridge_transport_kinds()
+            .contains(&HostBridgeTransportKind::Vsock));
     }
 
     #[tokio::test]

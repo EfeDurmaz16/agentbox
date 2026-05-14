@@ -16,6 +16,25 @@ pub enum HostBridgeTransport {
     RemoteTunnel { endpoint: String },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum HostBridgeTransportKind {
+    UnixSocket,
+    NamedPipe,
+    Vsock,
+    RemoteTunnel,
+}
+
+impl HostBridgeTransport {
+    pub fn kind(&self) -> HostBridgeTransportKind {
+        match self {
+            Self::UnixSocket { .. } => HostBridgeTransportKind::UnixSocket,
+            Self::NamedPipe { .. } => HostBridgeTransportKind::NamedPipe,
+            Self::Vsock { .. } => HostBridgeTransportKind::Vsock,
+            Self::RemoteTunnel { .. } => HostBridgeTransportKind::RemoteTunnel,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum HostBridgeDecision {
     Allow,
@@ -150,6 +169,7 @@ mod tests {
 
         assert_eq!(decoded.schema_version, HOST_BRIDGE_SCHEMA_VERSION);
         assert_eq!(decoded.session_id, "01session");
+        assert_eq!(decoded.transport.kind(), HostBridgeTransportKind::Vsock);
         assert!(matches!(
             decoded.request,
             HostBridgeRequest::CommandMediation(_)

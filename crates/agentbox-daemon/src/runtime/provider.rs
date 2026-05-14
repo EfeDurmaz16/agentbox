@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use thiserror::Error;
 
+use crate::runtime::bridge::HostBridgeTransportKind;
 use crate::runtime::types::{
     CommandResult, ExecCommand, MinipodSpec, NetworkEnforcementCapability, RuntimeCapability,
     RuntimeSession, RuntimeStatus,
@@ -115,6 +116,10 @@ pub trait RuntimeProvider: Send + Sync {
     fn capabilities(&self) -> &[RuntimeCapability];
 
     fn network_enforcement_capabilities(&self) -> &[NetworkEnforcementCapability] {
+        &[]
+    }
+
+    fn bridge_transport_kinds(&self) -> &[HostBridgeTransportKind] {
         &[]
     }
 

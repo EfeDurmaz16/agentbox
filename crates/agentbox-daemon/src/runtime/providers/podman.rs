@@ -9,6 +9,7 @@ use crate::pod::types::{
     NetworkMode as PodNetworkMode, NetworkPolicy as PodNetworkPolicy, PodSession, PodSpec,
     PodStatus, ReadinessProbe, ResourceLimits,
 };
+use crate::runtime::bridge::HostBridgeTransportKind;
 use crate::runtime::provider::{
     ProviderFamily, ProviderImplementationStatus, RuntimeError, RuntimeProvider,
 };
@@ -55,6 +56,10 @@ impl RuntimeProvider for PodmanRuntimeProvider {
             RuntimeCapability::ApprovalBridge,
             RuntimeCapability::EvidenceExport,
         ]
+    }
+
+    fn bridge_transport_kinds(&self) -> &[HostBridgeTransportKind] {
+        &[HostBridgeTransportKind::UnixSocket]
     }
 
     async fn is_available(&self) -> bool {
@@ -326,6 +331,10 @@ mod tests {
             "podman compatibility adapter must not claim domain or packet enforcement"
         );
         assert_network_enforcement_metadata(&provider, &[]);
+        assert_eq!(
+            provider.bridge_transport_kinds(),
+            &[HostBridgeTransportKind::UnixSocket]
+        );
         assert_eq!(provider.family(), ProviderFamily::Compatibility);
         assert_eq!(
             provider.implementation_status(),
