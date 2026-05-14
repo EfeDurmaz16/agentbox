@@ -230,6 +230,8 @@ See [docs/product-direction.md](docs/product-direction.md) and
 [docs/roadmap-100-issues.md](docs/roadmap-100-issues.md) for the current sprint direction.
 See [docs/glossary.md](docs/glossary.md) for the Agentbox vocabulary:
 AgentPod, minipod, boundary, provider, authority, evidence, and host bridge.
+See [docs/mac-mini-replacement-wedge.md](docs/mac-mini-replacement-wedge.md)
+for the local-software-boundary wedge and its limits.
 Evidence records can now be mapped into FIDES-style signed action drafts and
 AGIT-style lineage drafts, but both intentionally require external authority or
 adapter code before claiming live integration.

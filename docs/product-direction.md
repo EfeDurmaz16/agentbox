@@ -9,6 +9,11 @@ credentials, browser state, network, cloud accounts, payment surfaces, or
 production tools. Agentbox should make that separation available locally as a
 software runtime.
 
+See [Mac mini replacement wedge](mac-mini-replacement-wedge.md) for the focused
+positioning: Agentbox can reduce the need for a dedicated agent machine for
+many workflows, but it should not claim to replace hardware isolation for every
+threat model.
+
 ## Product Thesis
 
 An autonomous agent should not run directly in the user's real shell by default.
