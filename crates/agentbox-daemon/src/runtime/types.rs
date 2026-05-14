@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use ulid::Ulid;
 
-use crate::audit::AuditEvent;
+use crate::audit::{redact_sensitive_text, AuditEvent};
 
 pub const AGENTPOD_SPEC_SCHEMA_VERSION: u32 = 1;
 pub const AGENTPOD_SPEC_KIND: &str = "AgentPod";
@@ -893,9 +893,45 @@ pub struct SessionEvidenceBundle {
     pub commands: Vec<SessionEvidenceEvent>,
     pub boundary_events: Vec<SessionEvidenceEvent>,
     #[serde(default)]
+    pub credential_grants: Vec<CredentialEvidenceSummary>,
+    #[serde(default)]
+    pub credential_events: Vec<SessionEvidenceEvent>,
+    #[serde(default)]
     pub transcripts: Vec<CommandTranscript>,
     pub replay: SessionReplayMetadata,
     pub generated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CredentialEvidenceSummary {
+    pub schema_version: i64,
+    pub grant_name: String,
+    pub kind: CredentialGrantKind,
+    pub target: String,
+    pub one_time: bool,
+    pub requires_approval: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<DateTime<Utc>>,
+    pub status: String,
+}
+
+impl CredentialEvidenceSummary {
+    pub fn from_grant(grant: &CredentialGrant, now: DateTime<Utc>) -> Self {
+        Self {
+            schema_version: 1,
+            grant_name: grant.name.clone(),
+            kind: grant.kind.clone(),
+            target: redact_sensitive_text(&grant.target),
+            one_time: grant.one_time,
+            requires_approval: grant.requires_approval,
+            expires_at: grant.expires_at,
+            status: if grant.is_expired_at(now) {
+                "expired".to_string()
+            } else {
+                "active".to_string()
+            },
+        }
+    }
 }
 
 impl SessionEvidenceBundle {
@@ -904,6 +940,7 @@ impl SessionEvidenceBundle {
         let mut approvals = Vec::new();
         let mut commands = Vec::new();
         let mut boundary_events = Vec::new();
+        let mut credential_events = Vec::new();
 
         for event in events {
             let evidence_event = SessionEvidenceEvent::from(event);
@@ -911,11 +948,13 @@ impl SessionEvidenceBundle {
                 "runtime" => lifecycle_events.push(evidence_event),
                 "approve" => approvals.push(evidence_event),
                 "allow" | "block" => commands.push(evidence_event),
+                "credential" => credential_events.push(evidence_event),
                 _ => boundary_events.push(evidence_event),
             }
         }
 
         let replay = SessionReplayMetadata::from_session_events(session, events);
+        let now = Utc::now();
 
         Self {
             schema_version: 1,
@@ -937,6 +976,14 @@ impl SessionEvidenceBundle {
             approvals,
             commands,
             boundary_events,
+            credential_grants: session
+                .spec
+                .credentials
+                .grants
+                .iter()
+                .map(|grant| CredentialEvidenceSummary::from_grant(grant, now))
+                .collect(),
+            credential_events,
             transcripts: session.transcripts.clone(),
             replay,
             generated_at: Utc::now(),
@@ -1469,6 +1516,14 @@ mod tests {
             "agentbox.provider.selection_reason".into(),
             "explicit provider requested".into(),
         );
+        spec.credentials.grants.push(CredentialGrant {
+            name: "OPENAI_API_KEY".into(),
+            kind: CredentialGrantKind::EnvVar,
+            target: "OPENAI_API_KEY".into(),
+            one_time: true,
+            requires_approval: true,
+            expires_at: None,
+        });
         let mut session = RuntimeSession::new(
             spec.name.clone(),
             "agentpod-linux".into(),
@@ -1523,6 +1578,16 @@ mod tests {
                 None,
                 Some("agentbox-shim".into()),
             ),
+            AuditEvent::new(
+                1,
+                Some("openclaw".into()),
+                format!("credential.revoke OPENAI_API_KEY {}", session.id),
+                "/tmp/agentbox-work".into(),
+                "credential".into(),
+                "revoked:one_time_exec:EnvVar".into(),
+                None,
+                Some("agentbox-shim".into()),
+            ),
         ];
 
         let bundle = SessionEvidenceBundle::from_session_events(&session, &events);
@@ -1539,11 +1604,16 @@ mod tests {
         assert_eq!(bundle.lifecycle_events.len(), 1);
         assert_eq!(bundle.approvals.len(), 1);
         assert_eq!(bundle.commands.len(), 1);
+        assert_eq!(bundle.credential_grants.len(), 1);
+        assert_eq!(bundle.credential_grants[0].grant_name, "OPENAI_API_KEY");
+        assert_eq!(bundle.credential_grants[0].target, "OPENAI_API_KEY");
+        assert_eq!(bundle.credential_grants[0].status, "active");
+        assert_eq!(bundle.credential_events.len(), 1);
         assert_eq!(bundle.boundary_events.len(), 0);
         assert_eq!(bundle.transcripts.len(), 1);
         assert_eq!(bundle.transcripts[0].stdout.text, "hello");
         assert_eq!(bundle.replay.session_id, session.id);
-        assert_eq!(bundle.replay.steps.len(), 3);
+        assert_eq!(bundle.replay.steps.len(), 4);
         assert!(!bundle.replay.replayable);
         assert_eq!(bundle.replay.steps[0].sequence, 1);
         assert_eq!(bundle.replay.steps[1].policy_bucket, "approve");
