@@ -4,6 +4,36 @@ use std::sync::Arc;
 use crate::runtime::provider::{RuntimeError, RuntimeProvider};
 use crate::runtime::providers::agentpod::{AgentPodProvider, AgentPodProviderKind};
 use crate::runtime::providers::podman::PodmanRuntimeProvider;
+use crate::runtime::types::AgentPodRiskLevel;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderSelectionRequest {
+    pub preferred_provider: Option<String>,
+    pub risk: AgentPodRiskLevel,
+}
+
+impl Default for ProviderSelectionRequest {
+    fn default() -> Self {
+        Self {
+            preferred_provider: None,
+            risk: AgentPodRiskLevel::Medium,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderSelectionCandidate {
+    pub name: String,
+    pub family: String,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderSelectionExplanation {
+    pub selected_provider: String,
+    pub reason: String,
+    pub candidates: Vec<ProviderSelectionCandidate>,
+}
 
 #[derive(Default)]
 pub struct RuntimeProviderRegistry {
@@ -54,6 +84,65 @@ impl RuntimeProviderRegistry {
         self.get(name)
     }
 
+    pub fn explain_selection(
+        &self,
+        request: &ProviderSelectionRequest,
+    ) -> Result<ProviderSelectionExplanation, RuntimeError> {
+        if let Some(preferred) = request.preferred_provider.as_deref() {
+            self.get(preferred)?;
+            return Ok(ProviderSelectionExplanation {
+                selected_provider: preferred.to_string(),
+                reason: "explicit provider requested".to_string(),
+                candidates: self.selection_candidates(),
+            });
+        }
+
+        let selected_provider = self
+            .auto_provider_for_risk(&request.risk)
+            .or_else(|| self.default_provider.clone())
+            .ok_or_else(|| RuntimeError::Unavailable("no runtime provider registered".into()))?;
+
+        self.get(&selected_provider)?;
+
+        Ok(ProviderSelectionExplanation {
+            reason: auto_provider_reason(&request.risk, &selected_provider),
+            selected_provider,
+            candidates: self.selection_candidates(),
+        })
+    }
+
+    fn auto_provider_for_risk(&self, risk: &AgentPodRiskLevel) -> Option<String> {
+        let platform_agentpod = match AgentPodProviderKind::current_platform_candidate() {
+            AgentPodProviderKind::MacOs => "agentpod-macos",
+            AgentPodProviderKind::Linux => "agentpod-linux",
+            AgentPodProviderKind::Windows => "agentpod-windows",
+        };
+
+        match risk {
+            AgentPodRiskLevel::Low | AgentPodRiskLevel::Medium => self
+                .providers
+                .contains_key("podman")
+                .then(|| "podman".to_string())
+                .or_else(|| self.providers.keys().next().cloned()),
+            AgentPodRiskLevel::High | AgentPodRiskLevel::VeryHigh => self
+                .providers
+                .contains_key(platform_agentpod)
+                .then(|| platform_agentpod.to_string())
+                .or_else(|| self.providers.keys().next().cloned()),
+        }
+    }
+
+    fn selection_candidates(&self) -> Vec<ProviderSelectionCandidate> {
+        self.providers
+            .values()
+            .map(|provider| ProviderSelectionCandidate {
+                name: provider.name().to_string(),
+                family: format!("{:?}", provider.family()),
+                status: format!("{:?}", provider.implementation_status()),
+            })
+            .collect()
+    }
+
     pub fn with_agentpod_descriptors() -> Self {
         let mut registry = Self::new();
         registry.register(Arc::new(AgentPodProvider::new(AgentPodProviderKind::MacOs)));
@@ -76,6 +165,23 @@ impl RuntimeProviderRegistry {
             AgentPodProviderKind::Windows,
         )));
         registry
+    }
+}
+
+fn auto_provider_reason(risk: &AgentPodRiskLevel, provider: &str) -> String {
+    match risk {
+        AgentPodRiskLevel::Low => {
+            format!("{provider} selected as the lowest available local execution provider")
+        }
+        AgentPodRiskLevel::Medium => {
+            format!("{provider} selected for governed local execution with reviewable boundaries")
+        }
+        AgentPodRiskLevel::High => {
+            format!("{provider} selected because high-risk work should prefer native or VM-backed AgentPod isolation")
+        }
+        AgentPodRiskLevel::VeryHigh => {
+            format!("{provider} selected because very-high-risk work should prefer disposable, VM-backed, or remote AgentPod isolation")
+        }
     }
 }
 
@@ -204,5 +310,51 @@ mod tests {
                 "podman"
             ]
         );
+    }
+
+    #[test]
+    fn explicit_provider_selection_returns_requested_provider() {
+        let registry = RuntimeProviderRegistry::with_agentpod_descriptors();
+        let explanation = registry
+            .explain_selection(&ProviderSelectionRequest {
+                preferred_provider: Some("agentpod-linux".into()),
+                risk: AgentPodRiskLevel::Low,
+            })
+            .unwrap();
+
+        assert_eq!(explanation.selected_provider, "agentpod-linux");
+        assert_eq!(explanation.reason, "explicit provider requested");
+        assert_eq!(explanation.candidates.len(), 3);
+    }
+
+    #[test]
+    fn high_risk_selection_prefers_platform_agentpod_candidate() {
+        let registry = RuntimeProviderRegistry::with_local_providers(
+            "/tmp/agentbox.sock".into(),
+            "/tmp/agentbox-shim".into(),
+        );
+        let explanation = registry
+            .explain_selection(&ProviderSelectionRequest {
+                preferred_provider: None,
+                risk: AgentPodRiskLevel::High,
+            })
+            .unwrap();
+
+        assert!(explanation.selected_provider.starts_with("agentpod-"));
+        assert!(explanation.reason.contains("high-risk"));
+    }
+
+    #[test]
+    fn medium_risk_selection_uses_available_compat_provider_until_native_ships() {
+        let registry = RuntimeProviderRegistry::with_local_providers(
+            "/tmp/agentbox.sock".into(),
+            "/tmp/agentbox-shim".into(),
+        );
+        let explanation = registry
+            .explain_selection(&ProviderSelectionRequest::default())
+            .unwrap();
+
+        assert_eq!(explanation.selected_provider, "podman");
+        assert!(explanation.reason.contains("governed local execution"));
     }
 }
