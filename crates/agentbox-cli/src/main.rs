@@ -978,6 +978,7 @@ async fn cmd_run(options: RunOptions) {
     use agentbox_daemon::runtime::registry::{ProviderSelectionRequest, RuntimeProviderRegistry};
     use agentbox_daemon::runtime::session::RuntimeSessionStore;
     use agentbox_daemon::runtime::types::{ExecCommand, MinipodSpec, NetworkMode, ResourcePolicy};
+    use agentbox_daemon::runtime::workspace::WorkspaceProjectionMaterializer;
 
     let risk = parse_agentpod_risk(&options.risk);
     let provider_hint = parse_provider_hint(&options.provider);
@@ -1147,6 +1148,12 @@ async fn cmd_run(options: RunOptions) {
         }
     }
 
+    let workspace_projection = WorkspaceProjectionMaterializer::materialize(&mut spec)
+        .unwrap_or_else(|e| {
+            eprintln!("Error: failed to prepare workspace projection: {}", e);
+            std::process::exit(1);
+        });
+
     let provider = registry
         .get(&selection.selected_provider)
         .unwrap_or_else(|e| {
@@ -1177,6 +1184,13 @@ async fn cmd_run(options: RunOptions) {
     println!("  Provider: {}", selection.selected_provider);
     println!("  Selection: {}", selection.reason);
     println!("  Image: {}", ws_image);
+    if let Some(projection) = &workspace_projection {
+        println!("  Review lower: {}", projection.lower_host_path.display());
+        println!(
+            "  Review workspace: {}",
+            projection.projected_host_path.display()
+        );
+    }
 
     if !spec.services.is_empty() {
         let sidecars: Vec<String> = spec
