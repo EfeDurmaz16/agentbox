@@ -77,6 +77,31 @@ assert data["destroyed"] is True
 assert data["cleanup_error"] is None
 PY
 
+AGENTBOX_REMOTE_AGENTPOD_ENDPOINT="http://127.0.0.1:${PORT}" \
+AGENTBOX_REMOTE_AGENTPOD_ALLOW_HTTP_LOOPBACK=1 \
+AGENTBOX_REMOTE_AGENTPOD_TOKEN="remote-env-smoke" \
+HOME="$TMPDIR/home" \
+"$ROOT/target/debug/agentbox-cli" run \
+  --provider remote-agentpod \
+  --credential-env AGENTBOX_REMOTE_TOKEN=AGENTBOX_REMOTE_AGENTPOD_TOKEN \
+  --json \
+  -- \
+  sh -c 'printf %s "$AGENTBOX_REMOTE_TOKEN"' >"$TMPDIR/provider-env-run.json"
+
+python3 - "$TMPDIR/provider-env-run.json" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], "r", encoding="utf-8") as fh:
+    data = json.load(fh)
+
+assert data["session"]["provider"] == "remote-agentpod"
+assert data["command_result"]["exit_code"] == 0
+assert data["command_result"]["stdout"] == "remote-env-smoke"
+assert data["destroyed"] is True
+assert data["cleanup_error"] is None
+PY
+
 mkdir -p "$TMPDIR/workspace"
 cargo run --locked -q -p agentbox-cli -- minipod-spec remote-smoke --risk medium --workspace "$TMPDIR/workspace" \
   >"$TMPDIR/spec.json"

@@ -241,9 +241,9 @@ worker starts. The smoke test restarts the worker process with the same state
 directory and verifies that a previously created running session can execute
 again after reload.
 Worker contract violations such as unknown worker sessions, mismatched session
-ids, credential grants before remote handoff support, unpreparable workspace
-paths, stopped-session exec, or invalid evidence metadata return HTTP error
-statuses so the daemon-side transport treats them as rejected remote operations.
+ids, unsupported credential grant kinds, unpreparable workspace paths,
+stopped-session exec, or invalid evidence metadata return HTTP error statuses
+so the daemon-side transport treats them as rejected remote operations.
 
 This is still a contract worker, not the final sandboxed remote execution
 engine. The `exec` route runs the provided argv directly, without invoking a
@@ -254,11 +254,12 @@ Each worker session also carries the AgentPod workspace host path from the creat
 request. The worker prepares that directory during create-session and refuses to
 record a running session if it cannot be created or is not a directory. Exec
 defaults to that workspace and refuses an explicit working directory outside it.
-The contract worker also refuses command environment material until an explicit
-remote credential handoff protocol exists; remote env injection must not become
-an accidental secret channel. Create-session similarly rejects specs carrying
-credential grants or host environment inheritance until the handoff protocol is
-explicit.
+The contract worker accepts explicit environment credential grant metadata from
+the session manifest. During exec it only accepts command environment keys that
+match those session-bound grant names; arbitrary env material is rejected so
+remote env injection does not become an accidental secret channel. Create-session
+still rejects file, socket, provider-token, and host environment inheritance
+until those handoff protocols are explicit.
 Before spawning a process, exec classifies the argv with the session AgentPod
 network policy. Commands outside the allowed policy return exit code `126`
 without being spawned; approval-required commands are denied until a remote
@@ -286,21 +287,23 @@ receipts, and stored bundle payload references after binding the caller-provided
 When the daemon-side provider creates a remote session, it persists the worker
 endpoint, worker session id, worker identity, and worker evidence endpoint in
 session labels so later exec/destroy calls can route back to the same worker.
-Workspace materialization, workspace export, local apply, and worker-side
-command policy now exist as hash-checked/governed flows. Credential handoff,
-full evidence streaming, supervised worker restarts, and merge/conflict UX
-beyond overwrite protection remain future work.
+Workspace materialization, workspace export, local apply, worker-side command
+policy, and session-bound env credential handoff now exist as governed flows.
+File/socket/provider-token credential handoff, full evidence streaming,
+supervised worker restarts, and merge/conflict UX beyond overwrite protection
+remain future work.
 
 `scripts/smoke-remote-worker.sh` starts this worker on a random loopback port,
 posts a handshake descriptor, checks the Ed25519 acknowledgement shape, creates
 worker sessions from generated AgentPod specs, runs a direct `printf` exec
-request, proves deny-by-default worker policy blocks an unknown `curl` before
-spawn, exports the worker workspace through both direct HTTP and the CLI
-pullback command, applies the pulled workspace to a local directory, uploads a
-bundle metadata receipt, verifies the returned lifecycle evidence, uploads and
-verifies a hash-bound bundle payload, restarts the worker to prove persisted
-session reload, then starts a long-running command and proves destroy sends a
-kill signal that returns exit code `130` plus `KillSwitchAck`.
+request, proves session-bound env credential handoff through the provider path,
+proves deny-by-default worker policy blocks an unknown `curl` before spawn,
+exports the worker workspace through both direct HTTP and the CLI pullback
+command, applies the pulled workspace to a local directory, uploads a bundle
+metadata receipt, verifies the returned lifecycle evidence, uploads and verifies
+a hash-bound bundle payload, restarts the worker to prove persisted session
+reload, then starts a long-running command and proves destroy sends a kill
+signal that returns exit code `130` plus `KillSwitchAck`.
 
 ## Lifecycle Contract
 
@@ -341,6 +344,6 @@ implementation.
 ## Current Boundary
 
 `remote-agentpod` is now an experimental gated provider. The missing pieces are
-sandboxed remote execution, credential handoff, evidence streaming, supervised
-worker lifecycle, richer workspace merge UX, and live HTTPS worker conformance
-tests.
+sandboxed remote execution, file/socket/provider-token credential handoff,
+evidence streaming, supervised worker lifecycle, richer workspace merge UX, and
+live HTTPS worker conformance tests.

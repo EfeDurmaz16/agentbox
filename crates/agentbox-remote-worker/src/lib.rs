@@ -14,7 +14,8 @@ use agentbox_daemon::runtime::providers::remote::{
     RemoteAgentPodWorkspaceFile,
 };
 use agentbox_daemon::runtime::types::{
-    CommandResult, NetworkMode, RuntimeCapability, RuntimeStatus,
+    CommandResult, CredentialGrant, CredentialGrantKind, NetworkMode, RuntimeCapability,
+    RuntimeStatus,
 };
 use agentbox_policy::classify::{self, Bucket, CommandContext, PolicyConfig, PolicyNetworkMode};
 use axum::extract::{Path as AxumPath, Query, State};
@@ -71,10 +72,17 @@ struct WorkerSession {
     session_id: String,
     workspace_host_path: PathBuf,
     policy: WorkerPolicy,
+    env_credentials: Vec<WorkerEnvCredentialGrant>,
     status: RuntimeStatus,
     kill_tx: watch::Sender<bool>,
     evidence_receipts: Vec<WorkerEvidenceReceipt>,
     stored_evidence_bundles: Vec<WorkerStoredEvidenceBundle>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct WorkerEnvCredentialGrant {
+    name: String,
+    one_time: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -121,6 +129,8 @@ struct WorkerSessionSnapshot {
     workspace_host_path: PathBuf,
     #[serde(default)]
     policy: WorkerPolicy,
+    #[serde(default)]
+    env_credentials: Vec<WorkerEnvCredentialGrant>,
     status: RuntimeStatus,
     evidence_receipts: Vec<WorkerEvidenceReceiptSnapshot>,
     #[serde(default)]
@@ -284,12 +294,23 @@ impl WorkerPolicyNetworkMode {
 }
 
 impl WorkerSession {
+    #[cfg(test)]
     fn new(session_id: String, workspace_host_path: PathBuf, policy: WorkerPolicy) -> Self {
+        Self::new_with_env_credentials(session_id, workspace_host_path, policy, Vec::new())
+    }
+
+    fn new_with_env_credentials(
+        session_id: String,
+        workspace_host_path: PathBuf,
+        policy: WorkerPolicy,
+        env_credentials: Vec<WorkerEnvCredentialGrant>,
+    ) -> Self {
         let (kill_tx, _kill_rx) = watch::channel(false);
         Self {
             session_id,
             workspace_host_path,
             policy,
+            env_credentials,
             status: RuntimeStatus::Running,
             kill_tx,
             evidence_receipts: Vec::new(),
@@ -312,6 +333,7 @@ impl WorkerSession {
             session_id: snapshot.session_id,
             workspace_host_path: snapshot.workspace_host_path,
             policy: snapshot.policy,
+            env_credentials: snapshot.env_credentials,
             status: snapshot.status,
             kill_tx,
             evidence_receipts: snapshot
@@ -344,6 +366,7 @@ impl WorkerSession {
             worker_session_id,
             workspace_host_path: self.workspace_host_path.clone(),
             policy: self.policy.clone(),
+            env_credentials: self.env_credentials.clone(),
             status: self.status.clone(),
             evidence_receipts: self
                 .evidence_receipts
@@ -453,10 +476,11 @@ async fn create_session(
     if let Some(bundle) = request.workspace_bundle.as_ref() {
         materialize_worker_workspace_bundle(&workspace_host_path, bundle).await?;
     }
-    let session = WorkerSession::new(
+    let session = WorkerSession::new_with_env_credentials(
         request.spec.id.clone(),
         workspace_host_path,
         WorkerPolicy::from_spec(&request.spec),
+        worker_env_credentials(&request.spec.credentials.grants),
     );
     state
         .sessions
@@ -479,12 +503,33 @@ fn validate_create_material(
     request: &RemoteAgentPodCreateSessionRequest,
 ) -> Result<(), (StatusCode, Json<WorkerError>)> {
     if request.spec.credentials.inherit_host_env || !request.spec.credentials.grants.is_empty() {
+        if !request.spec.credentials.inherit_host_env
+            && request
+                .spec
+                .credentials
+                .grants
+                .iter()
+                .all(|grant| matches!(grant.kind, CredentialGrantKind::EnvVar))
+        {
+            return Ok(());
+        }
         return Err(worker_error(
             StatusCode::BAD_REQUEST,
-            "agentbox remote worker refuses credential grants until credential handoff is implemented",
+            "agentbox remote worker only accepts explicit environment credential grants; file, socket, provider-token, and host env inheritance are refused",
         ));
     }
     Ok(())
+}
+
+fn worker_env_credentials(grants: &[CredentialGrant]) -> Vec<WorkerEnvCredentialGrant> {
+    grants
+        .iter()
+        .filter(|grant| matches!(grant.kind, CredentialGrantKind::EnvVar))
+        .map(|grant| WorkerEnvCredentialGrant {
+            name: grant.name.clone(),
+            one_time: grant.one_time,
+        })
+        .collect()
 }
 
 async fn prepare_worker_workspace(
@@ -589,8 +634,8 @@ async fn exec_command(
     Json(request): Json<RemoteAgentPodExecRequest>,
 ) -> WorkerRouteResult<RemoteAgentPodExecResponse> {
     let started = Instant::now();
-    validate_exec_material(&request)?;
     let context = session_exec_context(&state, &request).await?;
+    validate_exec_material(&request, &context)?;
     let result = execute_command(request, started, context).await;
     Ok(Json(RemoteAgentPodExecResponse {
         result,
@@ -604,11 +649,22 @@ async fn exec_command(
 
 fn validate_exec_material(
     request: &RemoteAgentPodExecRequest,
+    context: &WorkerExecContext,
 ) -> Result<(), (StatusCode, Json<WorkerError>)> {
-    if !request.command.env.is_empty() {
+    let allowed_env_names = context
+        .env_credentials
+        .iter()
+        .map(|grant| grant.name.as_str())
+        .collect::<std::collections::HashSet<_>>();
+    if request
+        .command
+        .env
+        .keys()
+        .any(|key| !allowed_env_names.contains(key.as_str()))
+    {
         return Err(worker_error(
             StatusCode::BAD_REQUEST,
-            "agentbox remote worker refuses command environment material until credential handoff is implemented",
+            "agentbox remote worker refuses command environment material without a matching session credential grant",
         ));
     }
     Ok(())
@@ -618,6 +674,7 @@ struct WorkerExecContext {
     kill_rx: watch::Receiver<bool>,
     workspace_host_path: PathBuf,
     policy: WorkerPolicy,
+    env_credentials: Vec<WorkerEnvCredentialGrant>,
 }
 
 async fn session_exec_context(
@@ -653,6 +710,7 @@ async fn session_exec_context(
         kill_rx: session.kill_receiver(),
         workspace_host_path: session.workspace_host_path.clone(),
         policy: session.policy.clone(),
+        env_credentials: session.env_credentials.clone(),
     })
 }
 
@@ -1887,7 +1945,48 @@ mod tests {
         let err = exec_command(State(state), Json(request)).await.unwrap_err();
 
         assert_eq!(err.0, StatusCode::BAD_REQUEST);
-        assert!(err.1 .0.error.contains("credential handoff"));
+        assert!(err.1 .0.error.contains("matching session credential grant"));
+    }
+
+    #[tokio::test]
+    async fn exec_command_allows_session_bound_env_credentials() {
+        let config = RemoteWorkerConfig::new(
+            "worker.local/dev",
+            "https://worker.example.com/agentpod/evidence",
+            SigningKey::from_bytes(&[42_u8; 32]),
+        );
+        let state = test_state(config);
+        state.sessions.lock().await.insert(
+            "worker-session-1".into(),
+            WorkerSession::new_with_env_credentials(
+                "session-1".into(),
+                std::env::temp_dir(),
+                WorkerPolicy::default(),
+                vec![WorkerEnvCredentialGrant {
+                    name: "AGENTBOX_TEST_TOKEN".into(),
+                    one_time: true,
+                }],
+            ),
+        );
+        let request = RemoteAgentPodExecRequest {
+            session_id: "session-1".into(),
+            worker_session_id: "worker-session-1".into(),
+            command: ExecCommand {
+                argv: vec![
+                    "sh".into(),
+                    "-c".into(),
+                    "printf %s \"$AGENTBOX_TEST_TOKEN\"".into(),
+                ],
+                working_dir: None,
+                env: HashMap::from([("AGENTBOX_TEST_TOKEN".into(), "remote-secret".into())]),
+                timeout_seconds: Some(5),
+            },
+        };
+
+        let response = exec_command(State(state), Json(request)).await.unwrap().0;
+
+        assert_eq!(response.result.exit_code, 0);
+        assert_eq!(response.result.stdout, "remote-secret");
     }
 
     #[tokio::test]
@@ -2027,7 +2126,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn create_session_rejects_credential_grants() {
+    async fn create_session_accepts_explicit_env_credential_grants() {
         let config = RemoteWorkerConfig::new(
             "worker.local/dev",
             "https://worker.example.com/agentpod/evidence",
@@ -2035,14 +2134,50 @@ mod tests {
         );
         let state = test_state(config);
         let workspace = std::env::temp_dir().join(format!(
-            "agentbox-remote-worker-credential-workspace-{}",
+            "agentbox-remote-worker-env-credential-workspace-{}",
             std::process::id()
         ));
+        let _ = std::fs::remove_dir_all(&workspace);
         let mut request = create_session_request(workspace.clone());
         request.spec.credentials.grants.push(CredentialGrant {
             name: "OPENAI_API_KEY".into(),
             kind: CredentialGrantKind::EnvVar,
-            target: "OPENAI_API_KEY".into(),
+            target: "HOST_OPENAI_API_KEY".into(),
+            one_time: true,
+            requires_approval: true,
+            expires_at: None,
+        });
+
+        let response = create_session(State(state.clone()), Json(request))
+            .await
+            .unwrap()
+            .0;
+
+        assert_eq!(response.status, RuntimeStatus::Running);
+        let sessions = state.sessions.lock().await;
+        let session = sessions.get(&response.worker_session_id).unwrap();
+        assert_eq!(session.env_credentials.len(), 1);
+        assert_eq!(session.env_credentials[0].name, "OPENAI_API_KEY");
+        let _ = std::fs::remove_dir_all(workspace);
+    }
+
+    #[tokio::test]
+    async fn create_session_rejects_non_env_credential_grants() {
+        let config = RemoteWorkerConfig::new(
+            "worker.local/dev",
+            "https://worker.example.com/agentpod/evidence",
+            SigningKey::from_bytes(&[43_u8; 32]),
+        );
+        let state = test_state(config);
+        let workspace = std::env::temp_dir().join(format!(
+            "agentbox-remote-worker-file-credential-workspace-{}",
+            std::process::id()
+        ));
+        let mut request = create_session_request(workspace.clone());
+        request.spec.credentials.grants.push(CredentialGrant {
+            name: "openai".into(),
+            kind: CredentialGrantKind::FileMount,
+            target: "/run/agentbox/secrets/openai".into(),
             one_time: true,
             requires_approval: true,
             expires_at: None,
@@ -2053,7 +2188,7 @@ mod tests {
             .unwrap_err();
 
         assert_eq!(err.0, StatusCode::BAD_REQUEST);
-        assert!(err.1 .0.error.contains("credential handoff"));
+        assert!(err.1 .0.error.contains("only accepts explicit environment"));
         assert!(state.sessions.lock().await.is_empty());
         assert!(!workspace.exists());
     }
