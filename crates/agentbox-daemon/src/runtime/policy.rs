@@ -58,10 +58,11 @@ fn is_protected_path(spec: &MinipodSpec, path: &Path) -> bool {
 
 fn has_matching_file_grant(spec: &MinipodSpec, path: &Path) -> bool {
     let path = normalize_path(path).to_string_lossy().to_string();
-    spec.credentials
-        .grants
-        .iter()
-        .any(|grant| matches!(grant.kind, CredentialGrantKind::FileMount) && grant.target == path)
+    spec.credentials.grants.iter().any(|grant| {
+        matches!(grant.kind, CredentialGrantKind::FileMount)
+            && grant.target == path
+            && grant.requires_approval
+    })
 }
 
 fn escapes_workspace_via_symlink(spec: &MinipodSpec, path: &Path) -> bool {
@@ -241,6 +242,36 @@ mod tests {
         });
 
         validate_minipod_spec(&spec).unwrap();
+    }
+
+    #[test]
+    fn protected_file_grants_must_require_approval() {
+        let mut spec = spec();
+        spec.filesystem = FilesystemPolicy {
+            protected_paths: vec![ProtectedPath {
+                path: "/tmp/agentbox-secret".into(),
+                class: SensitivePathClass::Custom("secret".into()),
+                reason: "test secret".into(),
+            }],
+            mounts: vec![MountRule {
+                host_path: "/tmp/agentbox-secret/key".into(),
+                guest_path: "/secret/key".into(),
+                mode: MountMode::ReadOnly,
+                kind: Default::default(),
+            }],
+            ..FilesystemPolicy::workspace("/tmp/agentbox-work")
+        };
+        spec.credentials.grants.push(CredentialGrant {
+            name: "secret-key".into(),
+            kind: CredentialGrantKind::FileMount,
+            target: "/tmp/agentbox-secret/key".into(),
+            one_time: true,
+            requires_approval: false,
+        });
+
+        let reason = rejection_reason(validate_minipod_spec(&spec));
+
+        assert!(reason.contains("file grant"));
     }
 
     #[test]
