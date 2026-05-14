@@ -208,6 +208,24 @@ pub struct ApprovalGrant {
     pub expires_at: Option<DateTime<Utc>>,
 }
 
+impl ApprovalGrant {
+    pub fn bound_to_session(mut self, session_id: &str) -> Self {
+        if let ApprovalScope::Session { session_id: scope } = &mut self.scope {
+            if scope.is_empty() {
+                *scope = session_id.to_string();
+            }
+        }
+        self
+    }
+
+    pub fn session_scope_id(&self) -> Option<&str> {
+        match &self.scope {
+            ApprovalScope::Session { session_id } => Some(session_id),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TaskPolicyBundle {
     #[serde(default = "default_task_policy_bundle_schema_version")]
@@ -366,6 +384,8 @@ pub struct RuntimeSession {
     pub platform: String,
     pub status: RuntimeStatus,
     pub spec: MinipodSpec,
+    #[serde(default)]
+    pub approval_grants: Vec<ApprovalGrant>,
     pub started_at: DateTime<Utc>,
     pub stopped_at: Option<DateTime<Utc>>,
 }
@@ -373,6 +393,12 @@ pub struct RuntimeSession {
 impl RuntimeSession {
     pub fn new(name: String, provider: String, platform: String, spec: MinipodSpec) -> Self {
         let mut spec = spec;
+        let approval_grants = spec
+            .approvals
+            .iter()
+            .cloned()
+            .map(|grant| grant.bound_to_session(&spec.id))
+            .collect();
         spec.labels
             .entry("agentbox.session".to_string())
             .or_insert_with(|| spec.id.clone());
@@ -390,6 +416,7 @@ impl RuntimeSession {
             platform,
             status: RuntimeStatus::Creating,
             spec,
+            approval_grants,
             started_at: Utc::now(),
             stopped_at: None,
         }
@@ -907,5 +934,31 @@ mod tests {
         let decoded: Vec<ApprovalScope> = serde_json::from_str(&encoded).unwrap();
 
         assert_eq!(decoded, scopes);
+    }
+
+    #[test]
+    fn runtime_session_carries_session_bound_approval_grants() {
+        let mut spec = MinipodSpec::for_agent_task("hermes", "/tmp/agentbox-work");
+        spec.approvals.push(ApprovalGrant {
+            id: "session-approval".into(),
+            scope: ApprovalScope::Session {
+                session_id: String::new(),
+            },
+            reason: "allow repeated task-local operation".into(),
+            expires_at: None,
+        });
+
+        let session = RuntimeSession::new(
+            spec.name.clone(),
+            "native-test".into(),
+            "test".into(),
+            spec.clone(),
+        );
+
+        assert_eq!(session.approval_grants.len(), 1);
+        assert_eq!(
+            session.approval_grants[0].session_scope_id(),
+            Some(spec.id.as_str())
+        );
     }
 }

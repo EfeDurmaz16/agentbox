@@ -7,7 +7,7 @@ use crate::runtime::policy::validate_minipod_spec;
 use crate::runtime::provider::{RuntimeError, RuntimeProvider};
 use crate::runtime::session::RuntimeSessionStore;
 use crate::runtime::types::{
-    CommandResult, ExecCommand, MinipodSpec, RuntimeSession, RuntimeStatus,
+    ApprovalGrant, CommandResult, ExecCommand, MinipodSpec, RuntimeSession, RuntimeStatus,
 };
 
 pub struct RuntimeManager {
@@ -136,6 +136,55 @@ impl RuntimeManager {
         Ok(())
     }
 
+    pub fn add_session_approval_grant(
+        &self,
+        session_id: &str,
+        grant: ApprovalGrant,
+    ) -> Result<ApprovalGrant, RuntimeError> {
+        let mut session = self
+            .sessions
+            .get(session_id)
+            .map_err(|e| RuntimeError::Internal(e.to_string()))?
+            .ok_or_else(|| RuntimeError::NotFound(session_id.to_string()))?;
+        let grant = grant.bound_to_session(session_id);
+        if let Some(scope_session_id) = grant.session_scope_id() {
+            if scope_session_id != session_id {
+                return Err(RuntimeError::ManifestRejected(format!(
+                    "approval grant {} is scoped to another session",
+                    grant.id
+                )));
+            }
+        }
+
+        session.approval_grants.push(grant.clone());
+        self.sessions
+            .upsert(session.clone())
+            .map_err(|e| RuntimeError::Internal(e.to_string()))?;
+        self.audit_runtime_event(
+            "runtime.approval_grant",
+            &session,
+            "approval",
+            &format!("grant_added:{}", grant.id),
+            None,
+            Some(self.provider.name().to_string()),
+        )?;
+
+        Ok(grant)
+    }
+
+    pub fn session_approval_grants(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<ApprovalGrant>, RuntimeError> {
+        let session = self
+            .sessions
+            .get(session_id)
+            .map_err(|e| RuntimeError::Internal(e.to_string()))?
+            .ok_or_else(|| RuntimeError::NotFound(session_id.to_string()))?;
+
+        Ok(session.approval_grants)
+    }
+
     pub fn list_sessions(&self) -> Result<Vec<RuntimeSession>, RuntimeError> {
         self.sessions
             .list()
@@ -200,7 +249,7 @@ mod tests {
     use async_trait::async_trait;
     use std::fs;
 
-    use crate::runtime::types::RuntimeCapability;
+    use crate::runtime::types::{ApprovalScope, RuntimeCapability};
 
     struct MockProvider;
 
@@ -344,5 +393,82 @@ mod tests {
         assert!(audit[0].decision.contains("rejected:"));
         assert!(audit[0].command.contains("runtime.validate"));
         assert!(audit[0].event_hash.is_some());
+    }
+
+    #[tokio::test]
+    async fn session_approval_grants_persist_with_session() {
+        let manager = manager("session-approvals");
+        let spec = MinipodSpec::for_agent_task("hermes", "/tmp/agentbox-work");
+        let session = manager.create(&spec).await.unwrap();
+        let grant = ApprovalGrant {
+            id: "grant-session".into(),
+            scope: ApprovalScope::Session {
+                session_id: String::new(),
+            },
+            reason: "operator approved this session".into(),
+            expires_at: None,
+        };
+
+        let saved = manager
+            .add_session_approval_grant(&session.id, grant)
+            .unwrap();
+        let grants = manager.session_approval_grants(&session.id).unwrap();
+
+        assert_eq!(saved.session_scope_id(), Some(session.id.as_str()));
+        assert_eq!(grants.len(), 1);
+        assert_eq!(grants[0].id, "grant-session");
+        let audit = manager.audit.recent(1).unwrap();
+        assert_eq!(audit[0].bucket, "approval");
+        assert_eq!(audit[0].decision, "grant_added:grant-session");
+    }
+
+    #[tokio::test]
+    async fn destroy_expires_session_approval_grants() {
+        let manager = manager("session-approval-destroy");
+        let spec = MinipodSpec::for_agent_task("hermes", "/tmp/agentbox-work");
+        let session = manager.create(&spec).await.unwrap();
+        manager
+            .add_session_approval_grant(
+                &session.id,
+                ApprovalGrant {
+                    id: "grant-session".into(),
+                    scope: ApprovalScope::Session {
+                        session_id: session.id.clone(),
+                    },
+                    reason: "operator approved this session".into(),
+                    expires_at: None,
+                },
+            )
+            .unwrap();
+
+        manager.destroy(&session.id).await.unwrap();
+
+        assert!(matches!(
+            manager.session_approval_grants(&session.id),
+            Err(RuntimeError::NotFound(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn rejects_session_approval_grant_for_another_session() {
+        let manager = manager("session-approval-mismatch");
+        let spec = MinipodSpec::for_agent_task("hermes", "/tmp/agentbox-work");
+        let session = manager.create(&spec).await.unwrap();
+
+        let err = manager
+            .add_session_approval_grant(
+                &session.id,
+                ApprovalGrant {
+                    id: "grant-session".into(),
+                    scope: ApprovalScope::Session {
+                        session_id: "another-session".into(),
+                    },
+                    reason: "operator approved another session".into(),
+                    expires_at: None,
+                },
+            )
+            .unwrap_err();
+
+        assert!(matches!(err, RuntimeError::ManifestRejected(_)));
     }
 }

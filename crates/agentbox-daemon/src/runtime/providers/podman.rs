@@ -182,6 +182,12 @@ fn workspace_image(spec: &MinipodSpec) -> String {
 }
 
 fn pod_session_to_runtime_session(session: PodSession, spec: MinipodSpec) -> RuntimeSession {
+    let approval_grants = spec
+        .approvals
+        .iter()
+        .cloned()
+        .map(|grant| grant.bound_to_session(&session.id))
+        .collect();
     RuntimeSession {
         id: session.id,
         name: spec.name.clone(),
@@ -189,6 +195,7 @@ fn pod_session_to_runtime_session(session: PodSession, spec: MinipodSpec) -> Run
         platform: "linux-vm".to_string(),
         status: pod_status_to_runtime_status(session.status),
         spec,
+        approval_grants,
         started_at: session.created_at,
         stopped_at: None,
     }
