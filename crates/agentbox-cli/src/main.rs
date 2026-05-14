@@ -6,6 +6,7 @@ use std::process::Command;
 use std::thread;
 use std::time::Duration;
 
+use agentbox_policy::classify::{Bucket, Classification, CommandContext};
 use chrono::{NaiveDateTime, Utc};
 use clap::{Parser, Subcommand};
 use rusqlite::Connection;
@@ -97,6 +98,16 @@ enum Commands {
     Why,
     /// Show current policy posture (allow/approve/block rules)
     Policy,
+    /// Simulate the policy decision for a command without executing it
+    PolicySimulate {
+        /// Command to classify; use `--` before the command if it has flags
+        command: Vec<String>,
+    },
+    /// Explain the policy decision for a command without executing it
+    PolicyExplain {
+        /// Command to explain; use `--` before the command if it has flags
+        command: Vec<String>,
+    },
     /// Rich audit log viewer with timeline formatting
     History {
         /// Show all events (not just today)
@@ -1466,6 +1477,97 @@ fn cmd_policy() {
     );
 }
 
+fn cmd_policy_simulate(command: Vec<String>) {
+    let (command_text, classification) = classify_cli_command(command);
+
+    println!("Command: {}", command_text);
+    println!("Bucket:  {}", bucket_name(classification.bucket));
+    println!("Reason:  {}", classification.reason);
+    if let Some(summary) = classification.notification_summary {
+        println!("Notify:  {}", summary);
+    }
+}
+
+fn cmd_policy_explain(command: Vec<String>) {
+    let (command_text, classification) = classify_cli_command(command);
+    let bucket = bucket_name(classification.bucket);
+    let decision = match classification.bucket {
+        Bucket::Allow => "allowed",
+        Bucket::Approve => "needs approval",
+        Bucket::Block => "blocked",
+    };
+
+    println!("Command:  {}", command_text);
+    println!("Bucket:   {}", bucket);
+    println!("Decision: {}", decision);
+    println!("Reason:   {}", classification.reason);
+    println!();
+    println!(
+        "Why: {}",
+        explain_why(
+            &command_text,
+            bucket,
+            simulated_decision_key(classification.bucket)
+        )
+    );
+    if let Some(summary) = classification.notification_summary {
+        println!();
+        println!("Approval prompt: {}", summary);
+    }
+}
+
+fn classify_cli_command(command: Vec<String>) -> (String, Classification) {
+    if command.is_empty() {
+        eprintln!("error: command is required");
+        eprintln!("hint: agentbox policy-simulate -- git push origin main");
+        std::process::exit(2);
+    }
+
+    let binary = command[0].clone();
+    let args = command[1..].to_vec();
+    let cwd = std::env::current_dir()
+        .map(|path| path.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| ".".to_string());
+    let config = agentbox_daemon::config::load()
+        .map(|config| config.to_policy_config())
+        .unwrap_or_default();
+    let ctx = CommandContext {
+        binary,
+        args,
+        cwd,
+        parent_process: Some("agentbox-cli".to_string()),
+        pid: std::process::id(),
+    };
+
+    let command_text = format_command_text(&ctx.binary, &ctx.args);
+    let classification = agentbox_policy::classify::classify(&ctx, &config);
+    (command_text, classification)
+}
+
+fn format_command_text(binary: &str, args: &[String]) -> String {
+    if args.is_empty() {
+        binary.to_string()
+    } else {
+        format!("{} {}", binary, args.join(" "))
+    }
+}
+
+fn bucket_name(bucket: Bucket) -> &'static str {
+    match bucket {
+        Bucket::Allow => "allow",
+        Bucket::Approve => "approve",
+        Bucket::Block => "block",
+    }
+}
+
+fn simulated_decision_key(bucket: Bucket) -> &'static str {
+    match bucket {
+        Bucket::Allow => "allowed",
+        Bucket::Approve => "approved",
+        Bucket::Block => "blocked",
+    }
+}
+
 fn cmd_history(show_all: bool, bucket_filter: Option<String>, json_output: bool) {
     let db_path = audit_db_path();
     if !db_path.exists() {
@@ -2030,6 +2132,8 @@ async fn main() {
         Commands::Pods => cmd_pods().await,
         Commands::Why => cmd_why(),
         Commands::Policy => cmd_policy(),
+        Commands::PolicySimulate { command } => cmd_policy_simulate(command),
+        Commands::PolicyExplain { command } => cmd_policy_explain(command),
         Commands::History { all, bucket, json } => cmd_history(all, bucket, json),
         Commands::Evidence { limit, verify } => cmd_evidence(limit, verify),
         Commands::MinipodSpec {
