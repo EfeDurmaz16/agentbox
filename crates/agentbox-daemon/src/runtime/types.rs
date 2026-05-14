@@ -86,6 +86,35 @@ pub enum WorkspaceWritePolicy {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AgentPodWorkspaceMode {
+    #[default]
+    Direct,
+    OverlayReview,
+    Ephemeral,
+    CommitGated,
+}
+
+impl AgentPodWorkspaceMode {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Direct => "direct",
+            Self::OverlayReview => "overlay-review",
+            Self::Ephemeral => "ephemeral",
+            Self::CommitGated => "commit-gated",
+        }
+    }
+
+    pub fn write_policy(&self) -> WorkspaceWritePolicy {
+        match self {
+            Self::Direct => WorkspaceWritePolicy::Direct,
+            Self::OverlayReview | Self::Ephemeral | Self::CommitGated => {
+                WorkspaceWritePolicy::WritableOverlay
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MountKind {
     Workspace,
     WorkspaceOverlay,
@@ -693,6 +722,8 @@ pub struct MinipodSpec {
     #[serde(default)]
     pub risk: AgentPodRiskLevel,
     #[serde(default)]
+    pub workspace_mode: AgentPodWorkspaceMode,
+    #[serde(default)]
     pub policy_profile: AgentPolicyProfile,
     pub filesystem: FilesystemPolicy,
     pub network: NetworkPolicy,
@@ -743,6 +774,7 @@ impl MinipodSpec {
                 command: vec![agent_name],
             },
             risk: AgentPodRiskLevel::Medium,
+            workspace_mode: AgentPodWorkspaceMode::Direct,
             policy_profile: policy_profile.clone(),
             filesystem: FilesystemPolicy::workspace(workspace),
             network: policy_profile.network.clone(),
@@ -1130,6 +1162,7 @@ mod tests {
         assert_eq!(spec.schema_version, AGENTPOD_SPEC_SCHEMA_VERSION);
         assert_eq!(spec.kind, AGENTPOD_SPEC_KIND);
         assert_eq!(spec.risk, AgentPodRiskLevel::Medium);
+        assert_eq!(spec.workspace_mode, AgentPodWorkspaceMode::Direct);
         assert!(spec.name.starts_with("agentbox-"));
         assert_eq!(spec.agent.name, "openclaw");
         assert_eq!(spec.filesystem.workspace_guest_path, "/workspace");
@@ -1170,6 +1203,25 @@ mod tests {
         assert_eq!(AgentPodRiskLevel::Medium.label(), "medium");
         assert_eq!(AgentPodRiskLevel::High.label(), "high");
         assert_eq!(AgentPodRiskLevel::VeryHigh.label(), "very-high");
+    }
+
+    #[test]
+    fn agentpod_workspace_modes_have_stable_labels_and_write_policies() {
+        assert_eq!(AgentPodWorkspaceMode::Direct.label(), "direct");
+        assert_eq!(
+            AgentPodWorkspaceMode::OverlayReview.label(),
+            "overlay-review"
+        );
+        assert_eq!(AgentPodWorkspaceMode::Ephemeral.label(), "ephemeral");
+        assert_eq!(AgentPodWorkspaceMode::CommitGated.label(), "commit-gated");
+        assert_eq!(
+            AgentPodWorkspaceMode::Direct.write_policy(),
+            WorkspaceWritePolicy::Direct
+        );
+        assert_eq!(
+            AgentPodWorkspaceMode::OverlayReview.write_policy(),
+            WorkspaceWritePolicy::WritableOverlay
+        );
     }
 
     #[test]
@@ -1670,6 +1722,7 @@ mod tests {
         assert_eq!(spec.schema_version, AGENTPOD_SPEC_SCHEMA_VERSION);
         assert_eq!(spec.kind, AGENTPOD_SPEC_KIND);
         assert_eq!(spec.risk, AgentPodRiskLevel::Medium);
+        assert_eq!(spec.workspace_mode, AgentPodWorkspaceMode::Direct);
         assert!(matches!(
             spec.filesystem.mounts[0].kind,
             MountKind::ReadOnlyHost
