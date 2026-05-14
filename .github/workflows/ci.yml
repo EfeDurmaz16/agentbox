@@ -50,6 +50,9 @@ jobs:
         run: |
           cargo run --locked -p agentbox-cli -- --help
           cargo run --locked -p agentbox-cli -- minipod-spec hermes --workspace .
+          bash scripts/smoke-cli-contracts.sh
 
       - name: Live-test skip script syntax
-        run: bash -n scripts/smoke-macos-minipod.sh
+        run: |
+          bash -n scripts/smoke-cli-contracts.sh
+          bash -n scripts/smoke-macos-minipod.sh
