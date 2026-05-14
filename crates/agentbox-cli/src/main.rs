@@ -305,6 +305,10 @@ enum Commands {
         /// Emit JSON
         #[arg(long)]
         json: bool,
+
+        /// Emit only the workspace patch
+        #[arg(long)]
+        patch: bool,
     },
     /// Show logs for a minipod session backed by the compatibility backend
     MinipodLogs {
@@ -2889,7 +2893,7 @@ fn cmd_minipod_inspect(session_id: Option<String>, json: bool) {
     }
 }
 
-fn cmd_review(session_id: String, json: bool) {
+fn cmd_review(session_id: String, json: bool, patch: bool) {
     use agentbox_daemon::audit::AuditStore;
     use agentbox_daemon::config;
     use agentbox_daemon::runtime::manager::RuntimeManager;
@@ -2937,6 +2941,23 @@ fn cmd_review(session_id: String, json: bool) {
             std::process::exit(1);
         });
 
+    if patch {
+        if !snapshot.available {
+            eprintln!(
+                "error: workspace diff unavailable ({})",
+                snapshot
+                    .reason
+                    .clone()
+                    .unwrap_or_else(|| "unknown reason".to_string())
+            );
+            std::process::exit(1);
+        }
+        if let Some(diff_patch) = snapshot.diff_patch.as_deref() {
+            println!("{}", diff_patch);
+        }
+        return;
+    }
+
     if json {
         println!(
             "{}",
@@ -2971,6 +2992,14 @@ fn cmd_review(session_id: String, json: bool) {
             .diff_shortstat
             .clone()
             .unwrap_or_else(|| "no unstaged diff".to_string())
+    );
+    println!(
+        "patch:     {}",
+        if snapshot.diff_patch.is_some() {
+            "available via --patch"
+        } else {
+            "none"
+        }
     );
     if snapshot.changed_files.is_empty() {
         println!("files:     no workspace changes");
@@ -3182,7 +3211,11 @@ async fn main() {
         }),
         Commands::Providers => cmd_providers(),
         Commands::MinipodInspect { session_id, json } => cmd_minipod_inspect(session_id, json),
-        Commands::Review { session_id, json } => cmd_review(session_id, json),
+        Commands::Review {
+            session_id,
+            json,
+            patch,
+        } => cmd_review(session_id, json, patch),
         Commands::MinipodLogs {
             session_id,
             follow,

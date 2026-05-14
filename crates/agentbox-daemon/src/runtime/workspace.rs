@@ -329,6 +329,7 @@ pub struct WorkspaceDiffSnapshot {
     pub status_porcelain: Vec<String>,
     pub diff_shortstat: Option<String>,
     pub diff_name_status: Vec<String>,
+    pub diff_patch: Option<String>,
     pub changed_files: Vec<String>,
 }
 
@@ -359,6 +360,7 @@ impl WorkspaceDiffSnapshotter {
             status_porcelain: vec![],
             diff_shortstat: None,
             diff_name_status: vec![],
+            diff_patch: None,
             changed_files: vec![],
         };
 
@@ -383,6 +385,9 @@ impl WorkspaceDiffSnapshotter {
         snapshot.diff_name_status = git_output(workspace, &["diff", "--name-status"])
             .map(lines)
             .unwrap_or_default();
+        snapshot.diff_patch = git_output(workspace, &["diff", "--binary"])
+            .map(|value| value.trim_end().to_string())
+            .filter(|value| !value.is_empty());
         snapshot.changed_files = changed_files_from_status(&snapshot.status_porcelain);
 
         snapshot
@@ -492,6 +497,10 @@ mod tests {
         assert!(snapshot.available);
         assert!(snapshot.git_head.is_some());
         assert!(snapshot.has_changes());
+        assert!(snapshot
+            .diff_patch
+            .as_deref()
+            .is_some_and(|patch| { patch.contains("diff --git") && patch.contains("+changed") }));
         assert!(snapshot.changed_files.contains(&"README.md".to_string()));
         assert_eq!(
             snapshot.evidence_ref(),
