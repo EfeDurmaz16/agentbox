@@ -337,6 +337,20 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
+    /// Generate a secret-free remote AgentPod transport descriptor
+    RemoteDescriptor {
+        /// Remote worker endpoint, e.g. https://worker.example.com/agentpod or ssh://agentpod@host
+        #[arg(long)]
+        endpoint: String,
+
+        /// Auth model: signed-challenge, workload-identity, mtls, operator-ssh
+        #[arg(long = "auth", default_value = "signed-challenge")]
+        auth: String,
+
+        /// Evidence mode: append-only-stream, bundle-upload, local-pull
+        #[arg(long = "evidence", default_value = "append-only-stream")]
+        evidence: String,
+    },
     /// Inspect persisted minipod session metadata
     MinipodInspect {
         /// Session id to inspect; omit to list all persisted sessions
@@ -3127,6 +3141,63 @@ fn cmd_providers(json: bool) {
     );
 }
 
+fn cmd_remote_descriptor(endpoint: String, auth: String, evidence: String) {
+    use agentbox_daemon::runtime::providers::remote::RemoteAgentPodTransportDescriptor;
+
+    let descriptor = RemoteAgentPodTransportDescriptor::new(
+        endpoint,
+        parse_remote_auth_kind(&auth),
+        parse_remote_evidence_mode(&evidence),
+    )
+    .unwrap_or_else(|e| {
+        eprintln!("error: failed to build remote AgentPod descriptor: {}", e);
+        std::process::exit(1);
+    });
+
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&descriptor)
+            .expect("failed to serialize remote AgentPod descriptor")
+    );
+}
+
+fn parse_remote_auth_kind(
+    raw: &str,
+) -> agentbox_daemon::runtime::providers::remote::RemoteAgentPodAuthKind {
+    use agentbox_daemon::runtime::providers::remote::RemoteAgentPodAuthKind;
+
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "signed-challenge" | "signed_challenge" => RemoteAgentPodAuthKind::SignedChallenge,
+        "workload-identity" | "workload_identity" => RemoteAgentPodAuthKind::WorkloadIdentity,
+        "mtls" | "mutual-tls" | "mutual_tls" => RemoteAgentPodAuthKind::MutualTls,
+        "operator-ssh" | "operator_ssh" | "ssh" => RemoteAgentPodAuthKind::OperatorSsh,
+        other => {
+            eprintln!("error: invalid --auth value `{}`", other);
+            eprintln!("hint: expected signed-challenge, workload-identity, mtls, or operator-ssh");
+            std::process::exit(1);
+        }
+    }
+}
+
+fn parse_remote_evidence_mode(
+    raw: &str,
+) -> agentbox_daemon::runtime::providers::remote::RemoteAgentPodEvidenceMode {
+    use agentbox_daemon::runtime::providers::remote::RemoteAgentPodEvidenceMode;
+
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "append-only-stream" | "append_only_stream" | "stream" => {
+            RemoteAgentPodEvidenceMode::AppendOnlyStream
+        }
+        "bundle-upload" | "bundle_upload" | "upload" => RemoteAgentPodEvidenceMode::BundleUpload,
+        "local-pull" | "local_pull" | "pull" => RemoteAgentPodEvidenceMode::LocalPull,
+        other => {
+            eprintln!("error: invalid --evidence value `{}`", other);
+            eprintln!("hint: expected append-only-stream, bundle-upload, or local-pull");
+            std::process::exit(1);
+        }
+    }
+}
+
 fn format_provider_family(
     family: agentbox_daemon::runtime::provider::ProviderFamily,
 ) -> &'static str {
@@ -3715,6 +3786,11 @@ async fn main() {
             workspace_overlay_dir,
         }),
         Commands::Providers { json } => cmd_providers(json),
+        Commands::RemoteDescriptor {
+            endpoint,
+            auth,
+            evidence,
+        } => cmd_remote_descriptor(endpoint, auth, evidence),
         Commands::MinipodInspect { session_id, json } => cmd_minipod_inspect(session_id, json),
         Commands::Review {
             session_id,
