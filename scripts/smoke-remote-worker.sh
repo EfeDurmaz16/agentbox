@@ -148,6 +148,23 @@ assert data["result"]["stdout"] == "remote-worker-smoke"
 assert "EvidenceSealed" in data["lifecycle_events"]
 PY
 
+printf 'worker export smoke\n' >"$TMPDIR/workspace/export.txt"
+curl -fsS "http://127.0.0.1:${PORT}/sessions/${WORKER_SESSION_ID}/workspace/export?session_id=${SESSION_ID}" \
+  >"$TMPDIR/workspace-export-response.json"
+
+python3 - "$TMPDIR/workspace-export-response.json" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], "r", encoding="utf-8") as fh:
+    data = json.load(fh)
+
+assert data["workspace_bundle"]["schema_version"] == 1
+paths = {file["path"]: file for file in data["workspace_bundle"]["files"]}
+assert paths["export.txt"]["contents_utf8"] == "worker export smoke\n"
+assert "EvidenceSealed" in data["lifecycle_events"]
+PY
+
 SEALED_AT="$(python3 - <<'PY'
 from datetime import datetime, timezone
 print(datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"))

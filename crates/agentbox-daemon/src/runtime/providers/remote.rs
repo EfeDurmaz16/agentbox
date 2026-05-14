@@ -931,6 +931,54 @@ impl RemoteAgentPodEvidenceStatusResponse {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteAgentPodWorkspaceExportRequest {
+    pub session_id: String,
+    pub worker_session_id: String,
+}
+
+impl RemoteAgentPodWorkspaceExportRequest {
+    pub fn validate(&self) -> Result<(), RuntimeError> {
+        if self.session_id.trim().is_empty() || self.worker_session_id.trim().is_empty() {
+            return Err(RuntimeError::ManifestRejected(
+                "remote workspace export request must include session ids".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteAgentPodWorkspaceExportResponse {
+    pub session_id: String,
+    pub worker_session_id: String,
+    pub status: RuntimeStatus,
+    pub workspace_bundle: RemoteAgentPodWorkspaceBundle,
+    pub lifecycle_events: Vec<RemoteAgentPodLifecycleEvent>,
+}
+
+impl RemoteAgentPodWorkspaceExportResponse {
+    pub fn validate_for(
+        &self,
+        request: &RemoteAgentPodWorkspaceExportRequest,
+    ) -> Result<(), RuntimeError> {
+        request.validate()?;
+        if self.session_id != request.session_id
+            || self.worker_session_id != request.worker_session_id
+        {
+            return Err(RuntimeError::ManifestRejected(
+                "remote workspace export response session ids do not match request".into(),
+            ));
+        }
+        self.workspace_bundle.validate()?;
+        require_lifecycle_events(
+            &self.lifecycle_events,
+            &[RemoteAgentPodLifecycleEvent::EvidenceSealed],
+            "workspace export response",
+        )
+    }
+}
+
 #[async_trait]
 pub trait RemoteAgentPodTransport: Send + Sync {
     async fn handshake(
@@ -967,6 +1015,11 @@ pub trait RemoteAgentPodTransport: Send + Sync {
         &self,
         request: RemoteAgentPodEvidenceStatusRequest,
     ) -> Result<RemoteAgentPodEvidenceStatusResponse, RuntimeError>;
+
+    async fn export_workspace(
+        &self,
+        request: RemoteAgentPodWorkspaceExportRequest,
+    ) -> Result<RemoteAgentPodWorkspaceExportResponse, RuntimeError>;
 }
 
 #[derive(Debug, Clone)]
@@ -1192,6 +1245,38 @@ impl RemoteAgentPodTransport for HttpRemoteAgentPodTransport {
             .map_err(|err| {
                 RuntimeError::ManifestRejected(format!(
                     "remote evidence status response was invalid JSON: {err}"
+                ))
+            })?;
+        response.validate_for(&request)?;
+        Ok(response)
+    }
+
+    async fn export_workspace(
+        &self,
+        request: RemoteAgentPodWorkspaceExportRequest,
+    ) -> Result<RemoteAgentPodWorkspaceExportResponse, RuntimeError> {
+        request.validate()?;
+        let response = self
+            .client
+            .get(self.route(format!(
+                "sessions/{}/workspace/export",
+                request.worker_session_id
+            )))
+            .query(&[("session_id", request.session_id.as_str())])
+            .send()
+            .await
+            .map_err(|err| {
+                RuntimeError::Unavailable(format!("remote workspace export failed: {err}"))
+            })?
+            .error_for_status()
+            .map_err(|err| {
+                RuntimeError::Unavailable(format!("remote workspace export rejected: {err}"))
+            })?
+            .json::<RemoteAgentPodWorkspaceExportResponse>()
+            .await
+            .map_err(|err| {
+                RuntimeError::ManifestRejected(format!(
+                    "remote workspace export response was invalid JSON: {err}"
                 ))
             })?;
         response.validate_for(&request)?;
@@ -2093,6 +2178,35 @@ mod tests {
             response.validate_for(&request)?;
             Ok(response)
         }
+
+        async fn export_workspace(
+            &self,
+            request: RemoteAgentPodWorkspaceExportRequest,
+        ) -> Result<RemoteAgentPodWorkspaceExportResponse, RuntimeError> {
+            let contents = "remote workspace export\n".to_string();
+            let file = RemoteAgentPodWorkspaceFile {
+                path: "README.md".into(),
+                media_type: "text/plain; charset=utf-8".into(),
+                sha256: sha256_hex(contents.as_bytes()),
+                bytes: contents.len(),
+                contents_utf8: contents,
+            };
+            let bundle = RemoteAgentPodWorkspaceBundle {
+                schema_version: 1,
+                root_sha256: workspace_bundle_root_sha256(std::slice::from_ref(&file))?,
+                files: vec![file],
+                secret_material_included: false,
+            };
+            let response = RemoteAgentPodWorkspaceExportResponse {
+                session_id: request.session_id.clone(),
+                worker_session_id: request.worker_session_id.clone(),
+                status: RuntimeStatus::Running,
+                workspace_bundle: bundle,
+                lifecycle_events: vec![RemoteAgentPodLifecycleEvent::EvidenceSealed],
+            };
+            response.validate_for(&request)?;
+            Ok(response)
+        }
     }
 
     #[tokio::test]
@@ -2284,6 +2398,27 @@ mod tests {
         assert_eq!(bundle.files[0].contents_utf8, "fn main() {}\n");
         bundle.validate().unwrap();
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn fake_remote_transport_exports_workspace_bundle() {
+        let fake = FakeRemoteAgentPodTransport;
+        let response = fake
+            .export_workspace(RemoteAgentPodWorkspaceExportRequest {
+                session_id: "session-1".into(),
+                worker_session_id: "worker-session-1".into(),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(response.session_id, "session-1");
+        assert_eq!(response.worker_session_id, "worker-session-1");
+        assert_eq!(response.workspace_bundle.files.len(), 1);
+        assert_eq!(response.workspace_bundle.files[0].path, "README.md");
+        assert!(response
+            .lifecycle_events
+            .contains(&RemoteAgentPodLifecycleEvent::EvidenceSealed));
+        response.workspace_bundle.validate().unwrap();
     }
 
     #[test]

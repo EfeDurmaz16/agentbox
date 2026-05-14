@@ -14,6 +14,9 @@ The provider builds that bundle only when
 `AGENTBOX_REMOTE_AGENTPOD_WORKSPACE_BUNDLE=1` is set. The builder skips common
 secret/generated paths, symlinks, non-UTF-8 files, and files over the configured
 size limits.
+Workers can export the current workspace as the same verified bundle shape from
+`/sessions/{worker_session_id}/workspace/export`, allowing a later CLI flow to
+review or pull changed files without trusting raw paths.
 
 The product surface starts with a secret-free transport descriptor:
 

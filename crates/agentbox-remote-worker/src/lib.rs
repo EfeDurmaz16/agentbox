@@ -10,7 +10,8 @@ use agentbox_daemon::runtime::providers::remote::{
     RemoteAgentPodDestroySessionResponse, RemoteAgentPodEvidenceUploadRequest,
     RemoteAgentPodEvidenceUploadResponse, RemoteAgentPodExecRequest, RemoteAgentPodExecResponse,
     RemoteAgentPodHandshakeAck, RemoteAgentPodHandshakeDescriptor, RemoteAgentPodLifecycleEvent,
-    RemoteAgentPodWorkspaceBundle,
+    RemoteAgentPodWorkspaceBundle, RemoteAgentPodWorkspaceExportResponse,
+    RemoteAgentPodWorkspaceFile,
 };
 use agentbox_daemon::runtime::types::{CommandResult, RuntimeCapability, RuntimeStatus};
 use axum::extract::{Path as AxumPath, Query, State};
@@ -302,6 +303,10 @@ pub fn router(config: RemoteWorkerConfig) -> Router {
         .route(
             "/sessions/{worker_session_id}/evidence/bundle",
             post(upload_evidence_bundle),
+        )
+        .route(
+            "/sessions/{worker_session_id}/workspace/export",
+            get(export_workspace),
         )
         .route(
             "/sessions/{worker_session_id}/destroy",
@@ -773,6 +778,34 @@ async fn evidence_status(
     }))
 }
 
+async fn export_workspace(
+    State(state): State<Arc<RemoteWorkerState>>,
+    AxumPath(worker_session_id): AxumPath<String>,
+    Query(query): Query<WorkerEvidenceStatusQuery>,
+) -> WorkerRouteResult<RemoteAgentPodWorkspaceExportResponse> {
+    let sessions = state.sessions.lock().await;
+    let Some(session) = sessions.get(&worker_session_id) else {
+        return Err(worker_error(
+            StatusCode::NOT_FOUND,
+            format!("agentbox remote worker session {worker_session_id} has not been created"),
+        ));
+    };
+    if session.session_id != query.session_id {
+        return Err(worker_error(
+            StatusCode::CONFLICT,
+            "agentbox remote worker session id does not match worker session",
+        ));
+    }
+    let bundle = build_worker_workspace_bundle(&session.workspace_host_path).await?;
+    Ok(Json(RemoteAgentPodWorkspaceExportResponse {
+        session_id: session.session_id.clone(),
+        worker_session_id,
+        status: session.status.clone(),
+        workspace_bundle: bundle,
+        lifecycle_events: vec![RemoteAgentPodLifecycleEvent::EvidenceSealed],
+    }))
+}
+
 struct StoredEvidenceBundlePath {
     path: PathBuf,
     stored_bytes: u64,
@@ -900,6 +933,175 @@ fn evidence_bundle_root_sha256(
     Ok(sha256_hex(
         format!("agentbox-evidence-root-v1\n{}", entries.join("\n")).as_bytes(),
     ))
+}
+
+async fn build_worker_workspace_bundle(
+    workspace_host_path: &Path,
+) -> Result<RemoteAgentPodWorkspaceBundle, (StatusCode, Json<WorkerError>)> {
+    let workspace = tokio::fs::canonicalize(workspace_host_path)
+        .await
+        .map_err(|err| {
+            worker_error(
+                StatusCode::BAD_REQUEST,
+                format!(
+                    "agentbox remote worker failed to resolve workspace {}: {err}",
+                    workspace_host_path.display()
+                ),
+            )
+        })?;
+    let mut files = Vec::new();
+    collect_worker_workspace_files(&workspace, &workspace, &mut files)?;
+    let root_sha256 = worker_workspace_root_sha256(&files)?;
+    let bundle = RemoteAgentPodWorkspaceBundle {
+        schema_version: 1,
+        root_sha256,
+        files,
+        secret_material_included: false,
+    };
+    bundle.validate().map_err(|err| {
+        worker_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("agentbox remote worker built invalid workspace bundle: {err}"),
+        )
+    })?;
+    Ok(bundle)
+}
+
+fn collect_worker_workspace_files(
+    root: &Path,
+    current: &Path,
+    files: &mut Vec<RemoteAgentPodWorkspaceFile>,
+) -> Result<(), (StatusCode, Json<WorkerError>)> {
+    let mut entries = std::fs::read_dir(current)
+        .map_err(|err| {
+            worker_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!(
+                    "agentbox remote worker failed to read workspace directory {}: {err}",
+                    current.display()
+                ),
+            )
+        })?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|err| {
+            worker_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("agentbox remote worker failed to read workspace entry: {err}"),
+            )
+        })?;
+    entries.sort_by_key(|entry| entry.path());
+    for entry in entries {
+        let path = entry.path();
+        let relative = path.strip_prefix(root).map_err(|err| {
+            worker_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("agentbox remote worker failed to derive relative path: {err}"),
+            )
+        })?;
+        if should_skip_worker_workspace_path(relative) {
+            continue;
+        }
+        let metadata = std::fs::symlink_metadata(&path).map_err(|err| {
+            worker_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!(
+                    "agentbox remote worker failed to inspect workspace file {}: {err}",
+                    path.display()
+                ),
+            )
+        })?;
+        if metadata.file_type().is_symlink() {
+            continue;
+        }
+        if metadata.is_dir() {
+            collect_worker_workspace_files(root, &path, files)?;
+            continue;
+        }
+        if !metadata.is_file() {
+            continue;
+        }
+        let bytes = std::fs::read(&path).map_err(|err| {
+            worker_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!(
+                    "agentbox remote worker failed to read workspace file {}: {err}",
+                    path.display()
+                ),
+            )
+        })?;
+        let Ok(contents_utf8) = String::from_utf8(bytes) else {
+            continue;
+        };
+        let relative = safe_worker_workspace_relative_path(relative)?;
+        files.push(RemoteAgentPodWorkspaceFile {
+            path: relative,
+            media_type: "text/plain; charset=utf-8".into(),
+            sha256: sha256_hex(contents_utf8.as_bytes()),
+            bytes: contents_utf8.len(),
+            contents_utf8,
+        });
+    }
+    Ok(())
+}
+
+fn worker_workspace_root_sha256(
+    files: &[RemoteAgentPodWorkspaceFile],
+) -> Result<String, (StatusCode, Json<WorkerError>)> {
+    let mut entries = Vec::with_capacity(files.len());
+    for file in files {
+        entries.push(format!(
+            "{}\0{}\0{}\0{}",
+            file.path, file.sha256, file.bytes, file.media_type
+        ));
+    }
+    entries.sort();
+    Ok(sha256_hex(
+        format!("agentbox-workspace-root-v1\n{}", entries.join("\n")).as_bytes(),
+    ))
+}
+
+fn safe_worker_workspace_relative_path(
+    relative: &Path,
+) -> Result<String, (StatusCode, Json<WorkerError>)> {
+    let parts = relative
+        .components()
+        .map(|component| match component {
+            std::path::Component::Normal(value) => Ok(value.to_string_lossy().to_string()),
+            _ => Err(worker_error(
+                StatusCode::BAD_REQUEST,
+                "agentbox remote worker workspace export path is unsafe",
+            )),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if parts.is_empty() {
+        return Err(worker_error(
+            StatusCode::BAD_REQUEST,
+            "agentbox remote worker workspace export path is empty",
+        ));
+    }
+    Ok(parts.join("/"))
+}
+
+fn should_skip_worker_workspace_path(relative: &Path) -> bool {
+    relative.components().any(|component| {
+        let std::path::Component::Normal(value) = component else {
+            return true;
+        };
+        matches!(
+            value.to_string_lossy().as_ref(),
+            ".git"
+                | ".agentbox"
+                | ".symphony"
+                | ".projects"
+                | ".env"
+                | ".env.local"
+                | ".ssh"
+                | ".aws"
+                | "node_modules"
+                | "target"
+                | ".turbo"
+        )
+    })
 }
 
 fn validate_bundle_file_path(path: &str) -> Result<(), (StatusCode, Json<WorkerError>)> {
@@ -1238,7 +1440,6 @@ mod tests {
         Ed25519HandshakeVerifier, RemoteAgentPodAuthKind, RemoteAgentPodDestroySessionRequest,
         RemoteAgentPodEvidenceMode, RemoteAgentPodHandshakeVerifier,
         RemoteAgentPodTransportDescriptor, RemoteAgentPodWorkspaceBundle,
-        RemoteAgentPodWorkspaceFile,
     };
     use agentbox_daemon::runtime::types::{
         CredentialGrant, CredentialGrantKind, ExecCommand, MinipodSpec,
@@ -1590,6 +1791,52 @@ mod tests {
         let materialized = std::fs::read_to_string(workspace.join("src/main.rs")).unwrap();
         assert_eq!(materialized, "fn main() {}\n");
         assert_eq!(state.sessions.lock().await.len(), 1);
+        let _ = std::fs::remove_dir_all(workspace);
+    }
+
+    #[tokio::test]
+    async fn workspace_export_returns_verified_workspace_bundle() {
+        let config = RemoteWorkerConfig::new(
+            "worker.local/dev",
+            "https://worker.example.com/agentpod/evidence",
+            SigningKey::from_bytes(&[34_u8; 32]),
+        );
+        let state = test_state(config);
+        let workspace = std::env::temp_dir().join(format!(
+            "agentbox-remote-worker-workspace-export-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&workspace);
+        std::fs::create_dir_all(workspace.join("src")).unwrap();
+        std::fs::write(workspace.join("src/main.rs"), "fn main() {}\n").unwrap();
+        std::fs::write(workspace.join(".env"), "TOKEN=secret\n").unwrap();
+        state.sessions.lock().await.insert(
+            "worker-session-1".into(),
+            WorkerSession::new("session-1".into(), workspace.clone()),
+        );
+
+        let Json(response) = export_workspace(
+            State(state),
+            AxumPath("worker-session-1".into()),
+            Query(WorkerEvidenceStatusQuery {
+                session_id: "session-1".into(),
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(response.session_id, "session-1");
+        assert_eq!(response.worker_session_id, "worker-session-1");
+        assert!(response
+            .lifecycle_events
+            .contains(&RemoteAgentPodLifecycleEvent::EvidenceSealed));
+        response.workspace_bundle.validate().unwrap();
+        assert_eq!(response.workspace_bundle.files.len(), 1);
+        assert_eq!(response.workspace_bundle.files[0].path, "src/main.rs");
+        assert_eq!(
+            response.workspace_bundle.files[0].contents_utf8,
+            "fn main() {}\n"
+        );
         let _ = std::fs::remove_dir_all(workspace);
     }
 
