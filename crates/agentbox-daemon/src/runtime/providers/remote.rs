@@ -51,6 +51,54 @@ pub struct RemoteAgentPodHandshakeDescriptor {
     pub created_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteAgentPodHandshakeAck {
+    pub worker_identity: String,
+    pub worker_public_key: String,
+    pub signed_challenge: String,
+    pub capabilities: Vec<RuntimeCapability>,
+    pub evidence_endpoint: String,
+    pub lifecycle_ack: bool,
+    pub secret_material_included: bool,
+    pub expires_at: DateTime<Utc>,
+}
+
+impl RemoteAgentPodHandshakeAck {
+    pub fn validate_for(
+        &self,
+        descriptor: &RemoteAgentPodHandshakeDescriptor,
+        now: DateTime<Utc>,
+    ) -> Result<(), RuntimeError> {
+        if self.worker_identity.trim().is_empty()
+            || self.worker_public_key.trim().is_empty()
+            || self.signed_challenge.trim().is_empty()
+            || self.evidence_endpoint.trim().is_empty()
+        {
+            return Err(RuntimeError::ManifestRejected(
+                "remote AgentPod handshake ack is missing required identity, signature, or evidence fields"
+                    .into(),
+            ));
+        }
+        if self.secret_material_included {
+            return Err(RuntimeError::ManifestRejected(
+                "remote AgentPod handshake ack must not include secret material".into(),
+            ));
+        }
+        if !self.lifecycle_ack {
+            return Err(RuntimeError::ManifestRejected(
+                "remote AgentPod handshake ack must acknowledge lifecycle contract".into(),
+            ));
+        }
+        if self.expires_at <= now || self.expires_at > descriptor.expires_at {
+            return Err(RuntimeError::ManifestRejected(
+                "remote AgentPod handshake ack expiry is invalid".into(),
+            ));
+        }
+
+        Ok(())
+    }
+}
+
 impl RemoteAgentPodHandshakeDescriptor {
     pub fn new(
         endpoint: impl Into<String>,
@@ -180,6 +228,92 @@ impl RemoteAgentPodLifecycleDescriptor {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteAgentPodCreateSessionRequest {
+    pub transport: RemoteAgentPodTransportDescriptor,
+    pub handshake_ack: RemoteAgentPodHandshakeAck,
+    pub spec: MinipodSpec,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteAgentPodCreateSessionResponse {
+    pub session_id: String,
+    pub worker_session_id: String,
+    pub status: RuntimeStatus,
+    pub lifecycle_events: Vec<RemoteAgentPodLifecycleEvent>,
+}
+
+impl RemoteAgentPodCreateSessionResponse {
+    pub fn validate_for(
+        &self,
+        request: &RemoteAgentPodCreateSessionRequest,
+    ) -> Result<(), RuntimeError> {
+        if self.session_id != request.spec.id {
+            return Err(RuntimeError::ManifestRejected(
+                "remote AgentPod create response session id does not match spec".into(),
+            ));
+        }
+        if self.worker_session_id.trim().is_empty() {
+            return Err(RuntimeError::ManifestRejected(
+                "remote AgentPod create response must include worker session id".into(),
+            ));
+        }
+        require_lifecycle_events(
+            &self.lifecycle_events,
+            &[
+                RemoteAgentPodLifecycleEvent::WorkerAllocated,
+                RemoteAgentPodLifecycleEvent::SessionCreated,
+            ],
+            "create response",
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteAgentPodExecRequest {
+    pub session_id: String,
+    pub worker_session_id: String,
+    pub command: ExecCommand,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteAgentPodExecResponse {
+    pub result: CommandResult,
+    pub lifecycle_events: Vec<RemoteAgentPodLifecycleEvent>,
+}
+
+impl RemoteAgentPodExecResponse {
+    pub fn validate(&self) -> Result<(), RuntimeError> {
+        require_lifecycle_events(
+            &self.lifecycle_events,
+            &[
+                RemoteAgentPodLifecycleEvent::CommandStarted,
+                RemoteAgentPodLifecycleEvent::CommandFinished,
+                RemoteAgentPodLifecycleEvent::EvidenceSealed,
+            ],
+            "exec response",
+        )
+    }
+}
+
+#[async_trait]
+pub trait RemoteAgentPodTransport: Send + Sync {
+    async fn handshake(
+        &self,
+        descriptor: &RemoteAgentPodHandshakeDescriptor,
+    ) -> Result<RemoteAgentPodHandshakeAck, RuntimeError>;
+
+    async fn create_session(
+        &self,
+        request: RemoteAgentPodCreateSessionRequest,
+    ) -> Result<RemoteAgentPodCreateSessionResponse, RuntimeError>;
+
+    async fn exec_command(
+        &self,
+        request: RemoteAgentPodExecRequest,
+    ) -> Result<RemoteAgentPodExecResponse, RuntimeError>;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RemoteAgentPodTransportDescriptor {
     pub schema_version: i64,
     pub provider: String,
@@ -239,6 +373,21 @@ fn validate_remote_endpoint(endpoint: &str) -> Result<(), RuntimeError> {
 fn sha256_hex(bytes: &[u8]) -> String {
     let digest = Sha256::digest(bytes);
     digest.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn require_lifecycle_events(
+    actual: &[RemoteAgentPodLifecycleEvent],
+    required: &[RemoteAgentPodLifecycleEvent],
+    context: &str,
+) -> Result<(), RuntimeError> {
+    for event in required {
+        if !actual.contains(event) {
+            return Err(RuntimeError::ManifestRejected(format!(
+                "remote AgentPod {context} is missing required lifecycle event {event:?}"
+            )));
+        }
+    }
+    Ok(())
 }
 
 pub struct RemoteAgentPodProvider;
@@ -320,6 +469,71 @@ mod tests {
         assert_network_enforcement_metadata, assert_provider_metadata,
         assert_unavailable_provider_contract,
     };
+    use std::collections::HashMap;
+
+    struct FakeRemoteAgentPodTransport;
+
+    #[async_trait]
+    impl RemoteAgentPodTransport for FakeRemoteAgentPodTransport {
+        async fn handshake(
+            &self,
+            descriptor: &RemoteAgentPodHandshakeDescriptor,
+        ) -> Result<RemoteAgentPodHandshakeAck, RuntimeError> {
+            let ack = RemoteAgentPodHandshakeAck {
+                worker_identity: "worker.local/test".into(),
+                worker_public_key: "ed25519:test-public-key".into(),
+                signed_challenge: format!("signed:{}", descriptor.challenge_id),
+                capabilities: vec![
+                    RuntimeCapability::ApprovalBridge,
+                    RuntimeCapability::EvidenceExport,
+                ],
+                evidence_endpoint: "https://worker.example.com/agentpod/evidence".into(),
+                lifecycle_ack: true,
+                secret_material_included: false,
+                expires_at: descriptor.created_at + Duration::seconds(60),
+            };
+            ack.validate_for(descriptor, descriptor.created_at)?;
+            Ok(ack)
+        }
+
+        async fn create_session(
+            &self,
+            request: RemoteAgentPodCreateSessionRequest,
+        ) -> Result<RemoteAgentPodCreateSessionResponse, RuntimeError> {
+            let response = RemoteAgentPodCreateSessionResponse {
+                session_id: request.spec.id.clone(),
+                worker_session_id: format!("worker-{}", request.spec.id),
+                status: RuntimeStatus::Running,
+                lifecycle_events: vec![
+                    RemoteAgentPodLifecycleEvent::WorkerAllocated,
+                    RemoteAgentPodLifecycleEvent::SessionCreated,
+                ],
+            };
+            response.validate_for(&request)?;
+            Ok(response)
+        }
+
+        async fn exec_command(
+            &self,
+            _request: RemoteAgentPodExecRequest,
+        ) -> Result<RemoteAgentPodExecResponse, RuntimeError> {
+            let response = RemoteAgentPodExecResponse {
+                result: CommandResult {
+                    exit_code: 0,
+                    stdout: "ok\n".into(),
+                    stderr: String::new(),
+                    duration_ms: 1,
+                },
+                lifecycle_events: vec![
+                    RemoteAgentPodLifecycleEvent::CommandStarted,
+                    RemoteAgentPodLifecycleEvent::CommandFinished,
+                    RemoteAgentPodLifecycleEvent::EvidenceSealed,
+                ],
+            };
+            response.validate()?;
+            Ok(response)
+        }
+    }
 
     #[tokio::test]
     async fn remote_agentpod_descriptor_does_not_claim_execution() {
@@ -424,6 +638,152 @@ mod tests {
         .unwrap_err();
 
         assert!(err.to_string().contains("ttl"));
+    }
+
+    #[test]
+    fn remote_handshake_ack_rejects_secret_material_or_missing_lifecycle_ack() {
+        let descriptor = RemoteAgentPodHandshakeDescriptor::new(
+            "https://worker.example.com/agentpod",
+            RemoteAgentPodAuthKind::SignedChallenge,
+            300,
+        )
+        .unwrap();
+        let mut ack = RemoteAgentPodHandshakeAck {
+            worker_identity: "worker.local/test".into(),
+            worker_public_key: "ed25519:test-public-key".into(),
+            signed_challenge: format!("signed:{}", descriptor.challenge_id),
+            capabilities: vec![RuntimeCapability::EvidenceExport],
+            evidence_endpoint: "https://worker.example.com/agentpod/evidence".into(),
+            lifecycle_ack: false,
+            secret_material_included: false,
+            expires_at: descriptor.created_at + Duration::seconds(60),
+        };
+
+        let lifecycle_err = ack
+            .validate_for(&descriptor, descriptor.created_at)
+            .unwrap_err();
+        assert!(lifecycle_err.to_string().contains("lifecycle"));
+
+        ack.lifecycle_ack = true;
+        ack.secret_material_included = true;
+        let secret_err = ack
+            .validate_for(&descriptor, descriptor.created_at)
+            .unwrap_err();
+        assert!(secret_err.to_string().contains("secret material"));
+    }
+
+    #[test]
+    fn remote_create_response_requires_worker_lifecycle_events() {
+        let transport = RemoteAgentPodTransportDescriptor::new(
+            "https://worker.example.com/agentpod",
+            RemoteAgentPodAuthKind::SignedChallenge,
+            RemoteAgentPodEvidenceMode::AppendOnlyStream,
+        )
+        .unwrap();
+        let handshake = RemoteAgentPodHandshakeDescriptor::new(
+            "https://worker.example.com/agentpod",
+            RemoteAgentPodAuthKind::SignedChallenge,
+            300,
+        )
+        .unwrap();
+        let handshake_ack = RemoteAgentPodHandshakeAck {
+            worker_identity: "worker.local/test".into(),
+            worker_public_key: "ed25519:test-public-key".into(),
+            signed_challenge: format!("signed:{}", handshake.challenge_id),
+            capabilities: vec![RuntimeCapability::EvidenceExport],
+            evidence_endpoint: "https://worker.example.com/agentpod/evidence".into(),
+            lifecycle_ack: true,
+            secret_material_included: false,
+            expires_at: handshake.created_at + Duration::seconds(60),
+        };
+        let spec = MinipodSpec::for_agent_task("remote-test", std::env::temp_dir());
+        let request = RemoteAgentPodCreateSessionRequest {
+            transport,
+            handshake_ack,
+            spec: spec.clone(),
+        };
+        let response = RemoteAgentPodCreateSessionResponse {
+            session_id: spec.id.clone(),
+            worker_session_id: "worker-session".into(),
+            status: RuntimeStatus::Running,
+            lifecycle_events: vec![RemoteAgentPodLifecycleEvent::WorkerAllocated],
+        };
+
+        let err = response.validate_for(&request).unwrap_err();
+
+        assert!(err.to_string().contains("SessionCreated"));
+    }
+
+    #[test]
+    fn remote_exec_response_requires_command_and_evidence_events() {
+        let response = RemoteAgentPodExecResponse {
+            result: CommandResult {
+                exit_code: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+                duration_ms: 1,
+            },
+            lifecycle_events: vec![
+                RemoteAgentPodLifecycleEvent::CommandStarted,
+                RemoteAgentPodLifecycleEvent::CommandFinished,
+            ],
+        };
+
+        let err = response.validate().unwrap_err();
+
+        assert!(err.to_string().contains("EvidenceSealed"));
+    }
+
+    #[tokio::test]
+    async fn fake_remote_transport_proves_contract_without_provider_execution() {
+        let transport = RemoteAgentPodTransportDescriptor::new(
+            "https://worker.example.com/agentpod",
+            RemoteAgentPodAuthKind::SignedChallenge,
+            RemoteAgentPodEvidenceMode::AppendOnlyStream,
+        )
+        .unwrap();
+        let handshake = RemoteAgentPodHandshakeDescriptor::new(
+            "https://worker.example.com/agentpod",
+            RemoteAgentPodAuthKind::SignedChallenge,
+            300,
+        )
+        .unwrap();
+        let fake = FakeRemoteAgentPodTransport;
+        let handshake_ack = fake.handshake(&handshake).await.unwrap();
+        let spec = MinipodSpec::for_agent_task("remote-test", std::env::temp_dir());
+        let create = fake
+            .create_session(RemoteAgentPodCreateSessionRequest {
+                transport,
+                handshake_ack,
+                spec: spec.clone(),
+            })
+            .await
+            .unwrap();
+        let exec = fake
+            .exec_command(RemoteAgentPodExecRequest {
+                session_id: create.session_id,
+                worker_session_id: create.worker_session_id,
+                command: ExecCommand {
+                    argv: vec!["true".into()],
+                    working_dir: None,
+                    env: HashMap::new(),
+                    timeout_seconds: Some(30),
+                },
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(exec.result.exit_code, 0);
+        assert!(exec
+            .lifecycle_events
+            .contains(&RemoteAgentPodLifecycleEvent::EvidenceSealed));
+
+        let provider = RemoteAgentPodProvider;
+        assert_eq!(
+            provider.implementation_status(),
+            ProviderImplementationStatus::DescriptorOnly
+        );
+        assert!(!provider.is_available().await);
     }
 
     #[test]

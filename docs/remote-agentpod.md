@@ -52,6 +52,21 @@ time, and the response fields a future worker must return:
 It does not include the nonce itself or any credential material. The transport
 and signed response verifier are still future work.
 
+## Transport Conformance
+
+The daemon models the minimum remote transport contract in code without shipping
+a network adapter yet. A conforming worker must:
+
+- return a handshake acknowledgement without secret material
+- acknowledge the lifecycle contract before session creation
+- emit `WorkerAllocated` and `SessionCreated` for session creation
+- emit `CommandStarted`, `CommandFinished`, and `EvidenceSealed` for command
+  execution
+
+The current test suite uses an in-memory fake transport to prove this schema and
+lifecycle ordering. `RemoteAgentPodProvider` still returns unavailable until a
+real HTTP, SSH, or tunnel adapter exists.
+
 ## Lifecycle Contract
 
 Remote workers must eventually prove lifecycle events rather than only returning
