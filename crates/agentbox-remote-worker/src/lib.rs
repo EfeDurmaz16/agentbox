@@ -247,6 +247,7 @@ async fn create_session(
     State(state): State<Arc<RemoteWorkerState>>,
     Json(request): Json<RemoteAgentPodCreateSessionRequest>,
 ) -> WorkerRouteResult<RemoteAgentPodCreateSessionResponse> {
+    validate_create_material(&request)?;
     let worker_session_id = format!("worker-{}", request.spec.id);
     let workspace_host_path = request.spec.filesystem.workspace_host_path.clone();
     prepare_worker_workspace(&workspace_host_path).await?;
@@ -266,6 +267,18 @@ async fn create_session(
             RemoteAgentPodLifecycleEvent::SessionCreated,
         ],
     }))
+}
+
+fn validate_create_material(
+    request: &RemoteAgentPodCreateSessionRequest,
+) -> Result<(), (StatusCode, Json<WorkerError>)> {
+    if request.spec.credentials.inherit_host_env || !request.spec.credentials.grants.is_empty() {
+        return Err(worker_error(
+            StatusCode::BAD_REQUEST,
+            "agentbox remote worker refuses credential grants until credential handoff is implemented",
+        ));
+    }
+    Ok(())
 }
 
 async fn prepare_worker_workspace(
@@ -696,7 +709,9 @@ mod tests {
         RemoteAgentPodEvidenceMode, RemoteAgentPodHandshakeVerifier,
         RemoteAgentPodTransportDescriptor,
     };
-    use agentbox_daemon::runtime::types::{ExecCommand, MinipodSpec};
+    use agentbox_daemon::runtime::types::{
+        CredentialGrant, CredentialGrantKind, ExecCommand, MinipodSpec,
+    };
     use std::collections::HashMap;
 
     fn test_state(config: RemoteWorkerConfig) -> Arc<RemoteWorkerState> {
@@ -937,6 +952,38 @@ mod tests {
         assert!(err.1 .0.error.contains("failed to prepare workspace"));
         assert!(state.sessions.lock().await.is_empty());
         let _ = std::fs::remove_file(workspace_file);
+    }
+
+    #[tokio::test]
+    async fn create_session_rejects_credential_grants() {
+        let config = RemoteWorkerConfig::new(
+            "worker.local/dev",
+            "https://worker.example.com/agentpod/evidence",
+            SigningKey::from_bytes(&[33_u8; 32]),
+        );
+        let state = test_state(config);
+        let workspace = std::env::temp_dir().join(format!(
+            "agentbox-remote-worker-credential-workspace-{}",
+            std::process::id()
+        ));
+        let mut request = create_session_request(workspace.clone());
+        request.spec.credentials.grants.push(CredentialGrant {
+            name: "OPENAI_API_KEY".into(),
+            kind: CredentialGrantKind::EnvVar,
+            target: "OPENAI_API_KEY".into(),
+            one_time: true,
+            requires_approval: true,
+            expires_at: None,
+        });
+
+        let err = create_session(State(state.clone()), Json(request))
+            .await
+            .unwrap_err();
+
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+        assert!(err.1 .0.error.contains("credential handoff"));
+        assert!(state.sessions.lock().await.is_empty());
+        assert!(!workspace.exists());
     }
 
     #[tokio::test]
