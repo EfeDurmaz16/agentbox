@@ -63,6 +63,82 @@ pub struct RemoteAgentPodHandshakeAck {
     pub expires_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteAgentPodVerifiedHandshake {
+    pub worker_identity: String,
+    pub worker_public_key: String,
+    pub challenge_id: String,
+    pub evidence_endpoint: String,
+    pub verified_at: DateTime<Utc>,
+    pub verifier: String,
+    pub cryptographic_signature_verified: bool,
+}
+
+pub trait RemoteAgentPodHandshakeVerifier: Send + Sync {
+    fn name(&self) -> &str;
+
+    fn verify(
+        &self,
+        descriptor: &RemoteAgentPodHandshakeDescriptor,
+        ack: &RemoteAgentPodHandshakeAck,
+        now: DateTime<Utc>,
+    ) -> Result<RemoteAgentPodVerifiedHandshake, RuntimeError>;
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ChallengeBindingHandshakeVerifier;
+
+impl ChallengeBindingHandshakeVerifier {
+    pub fn bound_challenge(
+        descriptor: &RemoteAgentPodHandshakeDescriptor,
+        ack: &RemoteAgentPodHandshakeAck,
+    ) -> String {
+        let payload = format!(
+            "{}:{}:{}:{}",
+            descriptor.challenge_id,
+            descriptor.challenge_nonce_sha256,
+            ack.worker_identity,
+            ack.worker_public_key
+        );
+        format!(
+            "agentbox-v1:{}:{}",
+            descriptor.challenge_id,
+            sha256_hex(payload.as_bytes())
+        )
+    }
+}
+
+impl RemoteAgentPodHandshakeVerifier for ChallengeBindingHandshakeVerifier {
+    fn name(&self) -> &str {
+        "challenge-binding-digest"
+    }
+
+    fn verify(
+        &self,
+        descriptor: &RemoteAgentPodHandshakeDescriptor,
+        ack: &RemoteAgentPodHandshakeAck,
+        now: DateTime<Utc>,
+    ) -> Result<RemoteAgentPodVerifiedHandshake, RuntimeError> {
+        ack.validate_for(descriptor, now)?;
+        let expected = Self::bound_challenge(descriptor, ack);
+        if ack.signed_challenge != expected {
+            return Err(RuntimeError::ManifestRejected(
+                "remote AgentPod handshake ack does not match canonical challenge binding".into(),
+            ));
+        }
+
+        Ok(RemoteAgentPodVerifiedHandshake {
+            worker_identity: ack.worker_identity.clone(),
+            worker_public_key: ack.worker_public_key.clone(),
+            challenge_id: descriptor.challenge_id.clone(),
+            evidence_endpoint: ack.evidence_endpoint.clone(),
+            verified_at: now,
+            verifier: self.name().to_string(),
+            cryptographic_signature_verified: false,
+        })
+    }
+}
+
 impl RemoteAgentPodHandshakeAck {
     pub fn validate_for(
         &self,
@@ -375,7 +451,7 @@ impl RemoteAgentPodTransport for HttpRemoteAgentPodTransport {
                     "remote handshake ack was invalid JSON: {err}"
                 ))
             })?;
-        ack.validate_for(descriptor, Utc::now())?;
+        ChallengeBindingHandshakeVerifier.verify(descriptor, &ack, Utc::now())?;
         Ok(ack)
     }
 
@@ -594,10 +670,10 @@ mod tests {
             &self,
             descriptor: &RemoteAgentPodHandshakeDescriptor,
         ) -> Result<RemoteAgentPodHandshakeAck, RuntimeError> {
-            let ack = RemoteAgentPodHandshakeAck {
+            let mut ack = RemoteAgentPodHandshakeAck {
                 worker_identity: "worker.local/test".into(),
                 worker_public_key: "ed25519:test-public-key".into(),
-                signed_challenge: format!("signed:{}", descriptor.challenge_id),
+                signed_challenge: String::new(),
                 capabilities: vec![
                     RuntimeCapability::ApprovalBridge,
                     RuntimeCapability::EvidenceExport,
@@ -607,7 +683,9 @@ mod tests {
                 secret_material_included: false,
                 expires_at: descriptor.created_at + Duration::seconds(60),
             };
-            ack.validate_for(descriptor, descriptor.created_at)?;
+            ack.signed_challenge =
+                ChallengeBindingHandshakeVerifier::bound_challenge(descriptor, &ack);
+            ChallengeBindingHandshakeVerifier.verify(descriptor, &ack, descriptor.created_at)?;
             Ok(ack)
         }
 
@@ -830,6 +908,63 @@ mod tests {
             .unwrap_err();
 
         assert!(err.to_string().contains("challenge id"));
+    }
+
+    #[test]
+    fn remote_handshake_verifier_accepts_canonical_binding() {
+        let descriptor = RemoteAgentPodHandshakeDescriptor::new(
+            "https://worker.example.com/agentpod",
+            RemoteAgentPodAuthKind::SignedChallenge,
+            300,
+        )
+        .unwrap();
+        let mut ack = RemoteAgentPodHandshakeAck {
+            worker_identity: "worker.local/test".into(),
+            worker_public_key: "ed25519:test-public-key".into(),
+            signed_challenge: String::new(),
+            capabilities: vec![RuntimeCapability::EvidenceExport],
+            evidence_endpoint: "https://worker.example.com/agentpod/evidence".into(),
+            lifecycle_ack: true,
+            secret_material_included: false,
+            expires_at: descriptor.created_at + Duration::seconds(60),
+        };
+        ack.signed_challenge =
+            ChallengeBindingHandshakeVerifier::bound_challenge(&descriptor, &ack);
+
+        let verified = ChallengeBindingHandshakeVerifier
+            .verify(&descriptor, &ack, descriptor.created_at)
+            .unwrap();
+
+        assert_eq!(verified.worker_identity, ack.worker_identity);
+        assert_eq!(verified.challenge_id, descriptor.challenge_id);
+        assert_eq!(verified.verifier, "challenge-binding-digest");
+        assert!(!verified.cryptographic_signature_verified);
+    }
+
+    #[test]
+    fn remote_handshake_verifier_rejects_loose_challenge_substring() {
+        let descriptor = RemoteAgentPodHandshakeDescriptor::new(
+            "https://worker.example.com/agentpod",
+            RemoteAgentPodAuthKind::SignedChallenge,
+            300,
+        )
+        .unwrap();
+        let ack = RemoteAgentPodHandshakeAck {
+            worker_identity: "worker.local/test".into(),
+            worker_public_key: "ed25519:test-public-key".into(),
+            signed_challenge: format!("signed:{}", descriptor.challenge_id),
+            capabilities: vec![RuntimeCapability::EvidenceExport],
+            evidence_endpoint: "https://worker.example.com/agentpod/evidence".into(),
+            lifecycle_ack: true,
+            secret_material_included: false,
+            expires_at: descriptor.created_at + Duration::seconds(60),
+        };
+
+        let err = ChallengeBindingHandshakeVerifier
+            .verify(&descriptor, &ack, descriptor.created_at)
+            .unwrap_err();
+
+        assert!(err.to_string().contains("canonical challenge binding"));
     }
 
     #[test]

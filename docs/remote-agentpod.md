@@ -49,10 +49,19 @@ time, and the response fields a future worker must return:
 - `EvidenceEndpoint`
 - `LifecycleAck`
 
-It does not include the nonce itself or any credential material. The transport
-and full signed response verifier are still future work. Current validation
-does require the acknowledgement signature field to bind the challenge id, so a
-worker cannot return an unrelated signed payload and satisfy the contract.
+It does not include the nonce itself or any credential material. Current
+validation requires the acknowledgement signature field to bind the challenge id,
+so a worker cannot return an unrelated signed payload and satisfy the contract.
+
+The HTTPS adapter also enforces a canonical challenge-binding digest:
+
+```text
+agentbox-v1:<challenge-id>:sha256(<challenge-id>:<nonce-sha256>:<worker-identity>:<worker-public-key>)
+```
+
+This is a verifier boundary, not final worker authentication. It proves the
+adapter is no longer accepting loose challenge substrings, while keeping the
+future Ed25519, mTLS, workload-identity, or SSH verifier pluggable.
 
 ## Transport Conformance
 
@@ -77,9 +86,10 @@ API. It posts:
 - `POST /sessions/{worker_session_id}/exec`
 
 The adapter validates the same handshake, create, exec, and lifecycle evidence
-contracts before returning responses. It is not wired into
+contracts before returning responses, and the handshake path now requires the
+canonical challenge-binding verifier. It is not wired into
 `RemoteAgentPodProvider` yet because there is no shipped remote worker server or
-signed response verifier.
+cryptographic signed response verifier.
 
 ## Lifecycle Contract
 
@@ -119,6 +129,7 @@ implementation.
 
 ## Current Boundary
 
-`remote-agentpod` remains descriptor-only. The missing pieces are transport
-handshake, worker lifecycle, command execution, evidence streaming, credential
-handoff, kill switch enforcement, and live conformance tests.
+`remote-agentpod` remains descriptor-only. The missing pieces are a live worker
+server, cryptographic worker authentication, provider lifecycle wiring, command
+execution, evidence streaming, credential handoff, kill switch enforcement, and
+live conformance tests.
