@@ -87,6 +87,14 @@ enum Commands {
         #[arg(long, default_value = "true")]
         mount_cwd: bool,
 
+        /// Workspace write mode: direct, overlay-review, ephemeral, commit-gated
+        #[arg(long = "workspace-mode")]
+        workspace_mode: Option<String>,
+
+        /// Enable a writable workspace overlay rooted at this host directory
+        #[arg(long = "workspace-overlay-dir")]
+        workspace_overlay_dir: Option<PathBuf>,
+
         /// Resource limit: memory in MB (default: 1024)
         #[arg(long, default_value = "1024")]
         memory: u64,
@@ -204,6 +212,10 @@ enum Commands {
         /// Disable localhost/loopback service access in the generated manifest
         #[arg(long = "deny-localhost")]
         deny_localhost: bool,
+
+        /// Workspace write mode: direct, overlay-review, ephemeral, commit-gated
+        #[arg(long = "workspace-mode")]
+        workspace_mode: Option<String>,
 
         /// Add a read-only host mount as host_path:guest_path
         #[arg(long = "mount-ro")]
@@ -860,6 +872,8 @@ struct RunOptions {
     provider: String,
     services: Vec<String>,
     mount_cwd: bool,
+    workspace_mode: Option<String>,
+    workspace_overlay_dir: Option<PathBuf>,
     memory: u64,
     read_only_mounts: Vec<String>,
     credential_files: Vec<String>,
@@ -988,6 +1002,11 @@ async fn cmd_run(options: RunOptions) {
         "agentbox.provider.selection_reason".to_string(),
         selection.reason.clone(),
     );
+    apply_workspace_mode(
+        &mut spec,
+        options.workspace_mode.as_deref(),
+        options.workspace_overlay_dir,
+    );
     spec.agent.command = if options.command.is_empty() {
         vec!["sleep".to_string(), "infinity".to_string()]
     } else {
@@ -1044,6 +1063,7 @@ async fn cmd_run(options: RunOptions) {
         .unwrap_or_else(|| "ubuntu:24.04".to_string());
     println!("Creating governed minipod {}...", spec.name);
     println!("  Risk: {}", spec.risk.label());
+    println!("  Workspace mode: {}", spec.workspace_mode.label());
     println!("  Provider: {}", selection.selected_provider);
     println!("  Selection: {}", selection.reason);
     println!("  Image: {}", ws_image);
@@ -2095,15 +2115,14 @@ struct MinipodSpecOptions {
     network_mode: Option<String>,
     deny_domains: Vec<String>,
     deny_localhost: bool,
+    workspace_mode: Option<String>,
     workspace_overlay_dir: Option<PathBuf>,
 }
 
 fn cmd_minipod_spec(options: MinipodSpecOptions) {
     use agentbox_daemon::runtime::policy::validate_minipod_spec;
     use agentbox_daemon::runtime::registry::{ProviderSelectionRequest, RuntimeProviderRegistry};
-    use agentbox_daemon::runtime::types::{
-        MinipodSpec, NetworkMode, WorkspaceOverlayPolicy, WorkspaceWritePolicy,
-    };
+    use agentbox_daemon::runtime::types::{MinipodSpec, NetworkMode};
 
     let workspace = options.workspace.unwrap_or_else(|| {
         std::env::current_dir().unwrap_or_else(|_| {
@@ -2148,11 +2167,11 @@ fn cmd_minipod_spec(options: MinipodSpecOptions) {
         spec.filesystem.mounts.push(mount);
         spec.credentials.grants.push(credential_grant);
     }
-    if let Some(overlay_dir) = options.workspace_overlay_dir {
-        spec.filesystem.workspace_write_policy = WorkspaceWritePolicy::WritableOverlay;
-        spec.filesystem.workspace_overlay =
-            WorkspaceOverlayPolicy::review_required(Some(overlay_dir));
-    }
+    apply_workspace_mode(
+        &mut spec,
+        options.workspace_mode.as_deref(),
+        options.workspace_overlay_dir,
+    );
     if !options.allow_domains.is_empty() {
         spec.network.mode = NetworkMode::AllowListed;
         spec.network.allowed_domains = options.allow_domains;
@@ -2244,6 +2263,65 @@ fn parse_provider_hint(raw: &str) -> Option<String> {
         None
     } else {
         Some(provider.to_string())
+    }
+}
+
+fn apply_workspace_mode(
+    spec: &mut agentbox_daemon::runtime::types::MinipodSpec,
+    raw_mode: Option<&str>,
+    overlay_dir: Option<PathBuf>,
+) {
+    use agentbox_daemon::runtime::types::{
+        AgentPodWorkspaceMode, WorkspaceOverlayMode, WorkspaceOverlayPolicy,
+    };
+
+    let mut mode = raw_mode
+        .map(parse_workspace_mode)
+        .unwrap_or(AgentPodWorkspaceMode::Direct);
+    if overlay_dir.is_some() && mode == AgentPodWorkspaceMode::Direct {
+        mode = AgentPodWorkspaceMode::OverlayReview;
+    }
+
+    spec.workspace_mode = mode.clone();
+    spec.labels.insert(
+        "agentbox.workspace_mode".to_string(),
+        spec.workspace_mode.label().to_string(),
+    );
+    spec.filesystem.workspace_write_policy = mode.write_policy();
+
+    if mode == AgentPodWorkspaceMode::Direct {
+        spec.filesystem.workspace_overlay = WorkspaceOverlayPolicy::default();
+        return;
+    }
+
+    let overlay_base = overlay_dir.unwrap_or_else(|| {
+        agentbox_dir()
+            .join("overlays")
+            .join(spec.id.clone())
+            .join(mode.label())
+    });
+    let mut overlay = WorkspaceOverlayPolicy::review_required(Some(overlay_base));
+    if mode == AgentPodWorkspaceMode::Ephemeral {
+        overlay.mode = WorkspaceOverlayMode::DiscardOnDestroy;
+    }
+    spec.filesystem.workspace_overlay = overlay;
+}
+
+fn parse_workspace_mode(raw: &str) -> agentbox_daemon::runtime::types::AgentPodWorkspaceMode {
+    use agentbox_daemon::runtime::types::AgentPodWorkspaceMode;
+
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "direct" => AgentPodWorkspaceMode::Direct,
+        "overlay-review" | "overlay_review" | "overlay" | "review" => {
+            AgentPodWorkspaceMode::OverlayReview
+        }
+        "ephemeral" | "discard" => AgentPodWorkspaceMode::Ephemeral,
+        "commit-gated" | "commit_gated" | "commit" => AgentPodWorkspaceMode::CommitGated,
+        other => {
+            eprintln!("error: invalid --workspace-mode value `{}`", other);
+            eprintln!("hint: expected direct, overlay-review, ephemeral, or commit-gated");
+            std::process::exit(1);
+        }
     }
 }
 
@@ -2578,6 +2656,8 @@ async fn main() {
             provider,
             services,
             mount_cwd,
+            workspace_mode,
+            workspace_overlay_dir,
             memory,
             read_only_mounts,
             credential_files,
@@ -2595,6 +2675,8 @@ async fn main() {
                 provider,
                 services,
                 mount_cwd,
+                workspace_mode,
+                workspace_overlay_dir,
                 memory,
                 read_only_mounts,
                 credential_files,
@@ -2629,6 +2711,7 @@ async fn main() {
             read_only_mounts,
             credential_files,
             policy_bundles,
+            workspace_mode,
             workspace_overlay_dir,
             deny_domains,
             deny_localhost,
@@ -2645,6 +2728,7 @@ async fn main() {
             network_mode,
             deny_domains,
             deny_localhost,
+            workspace_mode,
             workspace_overlay_dir,
         }),
         Commands::Providers => cmd_providers(),
