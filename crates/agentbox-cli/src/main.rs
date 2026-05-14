@@ -2740,7 +2740,7 @@ fn cmd_evidence(
 }
 
 fn cmd_all_evidence_jsonl(db_path: &PathBuf, limit: usize) {
-    let conn = Connection::open(&db_path).expect("failed to open audit db");
+    let conn = Connection::open(db_path).expect("failed to open audit db");
     ensure_evidence_columns(&conn);
     let mut stmt = conn
         .prepare(

@@ -686,7 +686,7 @@ mod tests {
         fs::create_dir_all(&base).unwrap();
         let configured = base.join("agentbox-shim");
         let linux_artifact = configured.with_extension("linux");
-        fs::write(&configured, &[0xcf, 0xfa, 0xed, 0xfe, 0x00]).unwrap();
+        fs::write(&configured, [0xcf, 0xfa, 0xed, 0xfe, 0x00]).unwrap();
         fs::write(&linux_artifact, b"\x7fELFdemo").unwrap();
 
         let resolved = resolve_linux_guest_shim(&configured.to_string_lossy()).unwrap();
