@@ -12,6 +12,7 @@ use agentbox_policy::classify::{
 use chrono::{NaiveDateTime, Utc};
 use clap::{Parser, Subcommand};
 use rusqlite::Connection;
+use serde::Serialize;
 
 // ---------------------------------------------------------------------------
 // CLI definition
@@ -1137,6 +1138,37 @@ struct RunOptions {
     deny_localhost: bool,
 }
 
+#[derive(Serialize)]
+struct RunPlanPreview {
+    schema_version: i64,
+    command: Vec<String>,
+    selected_provider: RunPlanProvider,
+    candidates: Vec<RunPlanCandidate>,
+    manifest: agentbox_daemon::runtime::types::MinipodSpec,
+    backend_actions: Vec<String>,
+    warnings: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct RunPlanProvider {
+    name: String,
+    family: String,
+    platform: String,
+    status: String,
+    selection_reason: String,
+    bridge_transports: Vec<String>,
+    capabilities: Vec<String>,
+    network_enforcement: Vec<String>,
+    availability_check: String,
+}
+
+#[derive(Serialize)]
+struct RunPlanCandidate {
+    name: String,
+    family: String,
+    status: String,
+}
+
 async fn cmd_run(options: RunOptions) {
     use agentbox_daemon::audit::AuditStore;
     use agentbox_daemon::config;
@@ -1272,9 +1304,90 @@ async fn cmd_run(options: RunOptions) {
     }
 
     if options.plan {
+        let selected_provider = registry
+            .get(&selection.selected_provider)
+            .unwrap_or_else(|e| {
+                eprintln!("Error: failed to resolve runtime provider: {}", e);
+                std::process::exit(1);
+            });
+        let mut backend_actions = vec![
+            "validate AgentPod manifest".to_string(),
+            "materialize workspace projection when requested".to_string(),
+            "create runtime session through selected provider".to_string(),
+            "execute command through RuntimeManager policy checks".to_string(),
+            "record hash-chained runtime evidence".to_string(),
+        ];
+        if selection.selected_provider == "podman" {
+            backend_actions.insert(
+                0,
+                "check Podman availability and start compatibility VM if required".to_string(),
+            );
+        }
+
+        let mut warnings = vec![
+            "plan output does not start a backend, create a session, hydrate credentials, or run the command"
+                .to_string(),
+        ];
+        if selection.selected_provider != "podman" {
+            warnings.push(format!(
+                "{} is not generally runnable in this build; execution may require a platform gate or future provider wiring",
+                selection.selected_provider
+            ));
+        }
+        if !selected_provider
+            .network_enforcement_capabilities()
+            .is_empty()
+        {
+            warnings.push("provider reports active network enforcement metadata".to_string());
+        } else {
+            warnings.push(
+                "network policy is command-mediated unless the selected provider reports enforcement"
+                    .to_string(),
+            );
+        }
+
+        let preview = RunPlanPreview {
+            schema_version: 1,
+            command: spec.agent.command.clone(),
+            selected_provider: RunPlanProvider {
+                name: selected_provider.name().to_string(),
+                family: format!("{:?}", selected_provider.family()),
+                platform: selected_provider.platform().to_string(),
+                status: format!("{:?}", selected_provider.implementation_status()),
+                selection_reason: selection.reason.clone(),
+                bridge_transports: selected_provider
+                    .bridge_transport_kinds()
+                    .iter()
+                    .map(|transport| format!("{transport:?}"))
+                    .collect(),
+                capabilities: selected_provider
+                    .capabilities()
+                    .iter()
+                    .map(|capability| format!("{capability:?}"))
+                    .collect(),
+                network_enforcement: selected_provider
+                    .network_enforcement_capabilities()
+                    .iter()
+                    .map(|capability| format!("{capability:?}"))
+                    .collect(),
+                availability_check: "not performed by --plan".to_string(),
+            },
+            candidates: selection
+                .candidates
+                .iter()
+                .map(|candidate| RunPlanCandidate {
+                    name: candidate.name.clone(),
+                    family: candidate.family.clone(),
+                    status: candidate.status.clone(),
+                })
+                .collect(),
+            manifest: spec,
+            backend_actions,
+            warnings,
+        };
         println!(
             "{}",
-            serde_json::to_string_pretty(&spec).expect("failed to serialize AgentPod run plan")
+            serde_json::to_string_pretty(&preview).expect("failed to serialize AgentPod run plan")
         );
         return;
     }
