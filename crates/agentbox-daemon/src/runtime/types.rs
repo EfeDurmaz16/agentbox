@@ -496,6 +496,37 @@ mod tests {
     }
 
     #[test]
+    fn network_policy_manifest_covers_governed_egress_modes() {
+        let policies = vec![
+            NetworkPolicy {
+                mode: NetworkMode::DenyByDefault,
+                allowed_domains: vec![],
+                denied_domains: vec![],
+                allow_localhost: true,
+            },
+            NetworkPolicy {
+                mode: NetworkMode::AllowListed,
+                allowed_domains: vec!["api.openai.com".into(), "github.com".into()],
+                denied_domains: vec!["metadata.google.internal".into()],
+                allow_localhost: false,
+            },
+            NetworkPolicy {
+                mode: NetworkMode::ApprovalOnFirstContact,
+                allowed_domains: vec![],
+                denied_domains: vec!["169.254.169.254".into()],
+                allow_localhost: true,
+            },
+        ];
+
+        for policy in policies {
+            let encoded = serde_json::to_string(&policy).unwrap();
+            let decoded: NetworkPolicy = serde_json::from_str(&encoded).unwrap();
+
+            assert_eq!(decoded, policy);
+        }
+    }
+
+    #[test]
     fn legacy_minipod_manifest_mounts_default_to_read_only_host_kind() {
         let json = serde_json::json!({
             "id": "01legacyagentpod",
