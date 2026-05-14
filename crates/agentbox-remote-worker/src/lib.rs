@@ -16,7 +16,7 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::routing::post;
 use axum::{Json, Router};
-use chrono::Duration;
+use chrono::{DateTime, Duration, Utc};
 use ed25519_dalek::{Signer, SigningKey};
 use serde::{Deserialize, Serialize};
 use tokio::process::Command;
@@ -72,7 +72,11 @@ struct WorkerSession {
 #[derive(Clone)]
 struct WorkerEvidenceReceipt {
     bundle_sha256: String,
+    derived_from_bundle: bool,
+    bundle_id: Option<String>,
+    bundle_root_sha256: Option<String>,
     event_count: u64,
+    sealed_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -88,7 +92,15 @@ struct WorkerSessionSnapshot {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct WorkerEvidenceReceiptSnapshot {
     bundle_sha256: String,
+    #[serde(default)]
+    derived_from_bundle: bool,
+    #[serde(default)]
+    bundle_id: Option<String>,
+    #[serde(default)]
+    bundle_root_sha256: Option<String>,
     event_count: u64,
+    #[serde(default)]
+    sealed_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -140,7 +152,11 @@ impl WorkerSession {
                 .into_iter()
                 .map(|receipt| WorkerEvidenceReceipt {
                     bundle_sha256: receipt.bundle_sha256,
+                    derived_from_bundle: receipt.derived_from_bundle,
+                    bundle_id: receipt.bundle_id,
+                    bundle_root_sha256: receipt.bundle_root_sha256,
                     event_count: receipt.event_count,
+                    sealed_at: receipt.sealed_at,
                 })
                 .collect(),
         }
@@ -157,7 +173,11 @@ impl WorkerSession {
                 .iter()
                 .map(|receipt| WorkerEvidenceReceiptSnapshot {
                     bundle_sha256: receipt.bundle_sha256.clone(),
+                    derived_from_bundle: receipt.derived_from_bundle,
+                    bundle_id: receipt.bundle_id.clone(),
+                    bundle_root_sha256: receipt.bundle_root_sha256.clone(),
                     event_count: receipt.event_count,
+                    sealed_at: receipt.sealed_at,
                 })
                 .collect(),
         }
@@ -533,7 +553,11 @@ async fn accept_evidence(
     }
     let receipt = WorkerEvidenceReceipt {
         bundle_sha256: request.bundle_sha256.clone(),
+        derived_from_bundle: request.derived_from_bundle,
+        bundle_id: request.bundle_id.clone(),
+        bundle_root_sha256: request.bundle_root_sha256.clone(),
         event_count: request.event_count,
+        sealed_at: Some(request.sealed_at),
     };
     session.evidence_receipts.push(receipt.clone());
     drop(sessions);
@@ -973,16 +997,17 @@ mod tests {
             "worker-session-1".into(),
             WorkerSession::new("session-1".into(), std::env::temp_dir()),
         );
+        let sealed_at = chrono::Utc::now();
         let request = RemoteAgentPodEvidenceUploadRequest {
             session_id: "session-1".into(),
             worker_session_id: "worker-session-1".into(),
             evidence_mode: RemoteAgentPodEvidenceMode::BundleUpload,
             bundle_sha256: "a".repeat(64),
-            derived_from_bundle: false,
-            bundle_id: None,
-            bundle_root_sha256: None,
+            derived_from_bundle: true,
+            bundle_id: Some("bundle-1".into()),
+            bundle_root_sha256: Some("a".repeat(64)),
             event_count: 7,
-            sealed_at: chrono::Utc::now(),
+            sealed_at,
             secret_material_included: false,
         };
 
@@ -996,7 +1021,17 @@ mod tests {
         let session = sessions.get("worker-session-1").unwrap();
         assert_eq!(session.evidence_receipts.len(), 1);
         assert_eq!(session.evidence_receipts[0].bundle_sha256, "a".repeat(64));
+        assert!(session.evidence_receipts[0].derived_from_bundle);
+        assert_eq!(
+            session.evidence_receipts[0].bundle_id.as_deref(),
+            Some("bundle-1")
+        );
+        assert_eq!(
+            session.evidence_receipts[0].bundle_root_sha256,
+            Some("a".repeat(64))
+        );
         assert_eq!(session.evidence_receipts[0].event_count, 7);
+        assert_eq!(session.evidence_receipts[0].sealed_at, Some(sealed_at));
     }
 
     #[tokio::test]
@@ -1064,9 +1099,14 @@ mod tests {
         .with_state_dir(&path);
         let state = test_state(config.clone());
         let mut session = WorkerSession::new("session-1".into(), std::env::temp_dir());
+        let sealed_at = chrono::Utc::now();
         session.evidence_receipts.push(WorkerEvidenceReceipt {
             bundle_sha256: "b".repeat(64),
+            derived_from_bundle: true,
+            bundle_id: Some("bundle-state".into()),
+            bundle_root_sha256: Some("b".repeat(64)),
             event_count: 5,
+            sealed_at: Some(sealed_at),
         });
         session.mark_stopped();
         state
@@ -1083,7 +1123,17 @@ mod tests {
         assert_eq!(session.status, RuntimeStatus::Stopped);
         assert_eq!(session.evidence_receipts.len(), 1);
         assert_eq!(session.evidence_receipts[0].bundle_sha256, "b".repeat(64));
+        assert!(session.evidence_receipts[0].derived_from_bundle);
+        assert_eq!(
+            session.evidence_receipts[0].bundle_id.as_deref(),
+            Some("bundle-state")
+        );
+        assert_eq!(
+            session.evidence_receipts[0].bundle_root_sha256,
+            Some("b".repeat(64))
+        );
         assert_eq!(session.evidence_receipts[0].event_count, 5);
+        assert_eq!(session.evidence_receipts[0].sealed_at, Some(sealed_at));
         let _ = std::fs::remove_file(path);
     }
 }

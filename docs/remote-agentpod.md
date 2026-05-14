@@ -187,7 +187,8 @@ an accidental secret channel.
 Evidence upload validates the evidence metadata and records an in-memory receipt
 on the matching worker session before acknowledging the bundle hash and event
 count. With `--state-dir`, those receipts are also persisted in the worker state
-snapshot.
+snapshot, including bundle provenance fields such as `bundle_id`,
+`bundle_root_sha256`, `derived_from_bundle`, and `sealed_at` when provided.
 When the daemon-side provider creates a remote session, it persists the worker
 endpoint, worker session id, worker identity, and worker evidence endpoint in
 session labels so later exec/destroy calls can route back to the same worker.
