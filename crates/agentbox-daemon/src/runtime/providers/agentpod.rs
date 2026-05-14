@@ -258,6 +258,13 @@ impl RuntimeProvider for AgentPodProvider {
             .get(session_id)
             .cloned()
             .ok_or_else(|| RuntimeError::NotFound(session_id.to_string()))?;
+        if !matches!(session.status, RuntimeStatus::Running) {
+            return Err(RuntimeError::PolicyDenied(format!(
+                "cannot exec in {} session {session_id} with status {:?}",
+                self.name(),
+                session.status
+            )));
+        }
         let mut command = command.clone();
         if command.working_dir.as_deref() == Some(&session.spec.filesystem.workspace_guest_path) {
             command.working_dir = Some(
@@ -301,10 +308,11 @@ impl RuntimeProvider for AgentPodProvider {
             .sessions
             .lock()
             .map_err(|_| RuntimeError::Internal("agentpod-linux session lock poisoned".into()))?;
-        if let Some(session) = sessions.get_mut(session_id) {
-            session.status = RuntimeStatus::Stopped;
-            session.stopped_at = Some(chrono::Utc::now());
-        }
+        let session = sessions
+            .get_mut(session_id)
+            .ok_or_else(|| RuntimeError::NotFound(session_id.to_string()))?;
+        session.status = RuntimeStatus::Stopped;
+        session.stopped_at = Some(chrono::Utc::now());
         Ok(())
     }
 
@@ -435,6 +443,20 @@ mod tests {
             provider.status(&session.id).await.unwrap(),
             RuntimeStatus::Stopped
         );
+        let exec_err = provider
+            .exec(
+                &session.id,
+                &ExecCommand {
+                    argv: vec!["true".into()],
+                    working_dir: None,
+                    env: HashMap::new(),
+                    timeout_seconds: Some(5),
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(exec_err, RuntimeError::PolicyDenied(_)));
+        assert!(provider.destroy("missing-session").await.is_err());
     }
 
     #[test]
