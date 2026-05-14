@@ -5,6 +5,8 @@ use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
+use std::fs;
+use std::path::Path;
 use std::sync::Arc;
 
 use crate::runtime::bridge::HostBridgeTransportKind;
@@ -1275,6 +1277,16 @@ fn remote_loopback_http_enabled() -> bool {
     )
 }
 
+fn remote_workspace_bundle_enabled() -> bool {
+    matches!(
+        std::env::var(REMOTE_WORKSPACE_BUNDLE_ENV)
+            .unwrap_or_default()
+            .to_ascii_lowercase()
+            .as_str(),
+        "1" | "true" | "yes"
+    )
+}
+
 fn is_loopback_http_endpoint(endpoint: &str) -> bool {
     let Ok(url) = reqwest::Url::parse(endpoint) else {
         return false;
@@ -1319,6 +1331,158 @@ fn workspace_bundle_root_sha256(
     Ok(sha256_hex(
         format!("agentbox-workspace-root-v1\n{}", entries.join("\n")).as_bytes(),
     ))
+}
+
+fn build_remote_workspace_bundle(
+    root: &Path,
+) -> Result<RemoteAgentPodWorkspaceBundle, RuntimeError> {
+    let root = root.canonicalize().map_err(|err| {
+        RuntimeError::ManifestRejected(format!(
+            "remote workspace bundle root {} is not readable: {err}",
+            root.display()
+        ))
+    })?;
+    if !root.is_dir() {
+        return Err(RuntimeError::ManifestRejected(format!(
+            "remote workspace bundle root is not a directory: {}",
+            root.display()
+        )));
+    }
+    let mut files = Vec::new();
+    let mut total_bytes = 0usize;
+    collect_remote_workspace_files(&root, &root, &mut files, &mut total_bytes)?;
+    let root_sha256 = workspace_bundle_root_sha256(&files)?;
+    let bundle = RemoteAgentPodWorkspaceBundle {
+        schema_version: 1,
+        root_sha256,
+        files,
+        secret_material_included: false,
+    };
+    bundle.validate()?;
+    Ok(bundle)
+}
+
+fn collect_remote_workspace_files(
+    root: &Path,
+    current: &Path,
+    files: &mut Vec<RemoteAgentPodWorkspaceFile>,
+    total_bytes: &mut usize,
+) -> Result<(), RuntimeError> {
+    let mut entries = fs::read_dir(current)
+        .map_err(|err| {
+            RuntimeError::ManifestRejected(format!(
+                "remote workspace bundle failed to read {}: {err}",
+                current.display()
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|err| {
+            RuntimeError::ManifestRejected(format!(
+                "remote workspace bundle failed to read directory entry: {err}"
+            ))
+        })?;
+    entries.sort_by_key(|entry| entry.path());
+    for entry in entries {
+        let path = entry.path();
+        let relative = path.strip_prefix(root).map_err(|err| {
+            RuntimeError::ManifestRejected(format!(
+                "remote workspace bundle failed to derive relative path: {err}"
+            ))
+        })?;
+        if should_skip_workspace_bundle_path(relative) {
+            continue;
+        }
+        let metadata = fs::symlink_metadata(&path).map_err(|err| {
+            RuntimeError::ManifestRejected(format!(
+                "remote workspace bundle failed to inspect {}: {err}",
+                path.display()
+            ))
+        })?;
+        if metadata.file_type().is_symlink() {
+            continue;
+        }
+        if metadata.is_dir() {
+            collect_remote_workspace_files(root, &path, files, total_bytes)?;
+            continue;
+        }
+        if !metadata.is_file() {
+            continue;
+        }
+        if files.len() >= REMOTE_WORKSPACE_BUNDLE_MAX_FILES {
+            return Err(RuntimeError::ManifestRejected(format!(
+                "remote workspace bundle exceeds file limit of {REMOTE_WORKSPACE_BUNDLE_MAX_FILES}"
+            )));
+        }
+        let bytes: usize = metadata.len().try_into().unwrap_or(usize::MAX);
+        if bytes > REMOTE_WORKSPACE_BUNDLE_MAX_FILE_BYTES {
+            continue;
+        }
+        if *total_bytes + bytes > REMOTE_WORKSPACE_BUNDLE_MAX_TOTAL_BYTES {
+            return Err(RuntimeError::ManifestRejected(format!(
+                "remote workspace bundle exceeds total byte limit of {REMOTE_WORKSPACE_BUNDLE_MAX_TOTAL_BYTES}"
+            )));
+        }
+        let contents = fs::read(&path).map_err(|err| {
+            RuntimeError::ManifestRejected(format!(
+                "remote workspace bundle failed to read {}: {err}",
+                path.display()
+            ))
+        })?;
+        let Ok(contents_utf8) = String::from_utf8(contents) else {
+            continue;
+        };
+        let relative = workspace_bundle_relative_path(relative)?;
+        let sha256 = sha256_hex(contents_utf8.as_bytes());
+        *total_bytes += contents_utf8.len();
+        files.push(RemoteAgentPodWorkspaceFile {
+            path: relative,
+            media_type: "text/plain; charset=utf-8".to_string(),
+            sha256,
+            bytes: contents_utf8.len(),
+            contents_utf8,
+        });
+    }
+    Ok(())
+}
+
+fn workspace_bundle_relative_path(relative: &Path) -> Result<String, RuntimeError> {
+    let parts = relative
+        .components()
+        .map(|component| match component {
+            std::path::Component::Normal(value) => Ok(value.to_string_lossy().to_string()),
+            _ => Err(RuntimeError::ManifestRejected(
+                "remote workspace bundle file path is unsafe".into(),
+            )),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if parts.is_empty() {
+        return Err(RuntimeError::ManifestRejected(
+            "remote workspace bundle file path is empty".into(),
+        ));
+    }
+    Ok(parts.join("/"))
+}
+
+fn should_skip_workspace_bundle_path(relative: &Path) -> bool {
+    relative.components().any(|component| {
+        let std::path::Component::Normal(value) = component else {
+            return true;
+        };
+        matches!(
+            value.to_string_lossy().as_ref(),
+            ".git"
+                | ".agentbox"
+                | ".symphony"
+                | ".projects"
+                | ".env"
+                | ".env.local"
+                | ".ssh"
+                | ".aws"
+                | "node_modules"
+                | "target"
+                | ".turbo"
+        )
+    })
 }
 
 fn validate_workspace_bundle_file(file: &RemoteAgentPodWorkspaceFile) -> Result<(), RuntimeError> {
@@ -1410,6 +1574,10 @@ const REMOTE_LABEL_ENDPOINT: &str = "agentbox.remote.endpoint";
 const REMOTE_LABEL_WORKER_SESSION_ID: &str = "agentbox.remote.worker_session";
 const REMOTE_LABEL_WORKER_IDENTITY: &str = "agentbox.remote.worker_identity";
 const REMOTE_LABEL_WORKER_EVIDENCE_ENDPOINT: &str = "agentbox.remote.evidence_endpoint";
+const REMOTE_WORKSPACE_BUNDLE_ENV: &str = "AGENTBOX_REMOTE_AGENTPOD_WORKSPACE_BUNDLE";
+const REMOTE_WORKSPACE_BUNDLE_MAX_FILES: usize = 512;
+const REMOTE_WORKSPACE_BUNDLE_MAX_FILE_BYTES: usize = 512 * 1024;
+const REMOTE_WORKSPACE_BUNDLE_MAX_TOTAL_BYTES: usize = 8 * 1024 * 1024;
 
 #[derive(Clone, Default)]
 pub struct RemoteAgentPodProvider {
@@ -1592,6 +1760,16 @@ impl RemoteAgentPodProvider {
         payload.validate()?;
         Ok((receipt, payload))
     }
+
+    fn workspace_bundle_for_spec(
+        &self,
+        spec: &MinipodSpec,
+    ) -> Result<Option<RemoteAgentPodWorkspaceBundle>, RuntimeError> {
+        if !remote_workspace_bundle_enabled() {
+            return Ok(None);
+        }
+        build_remote_workspace_bundle(&spec.filesystem.workspace_host_path).map(Some)
+    }
 }
 
 impl std::fmt::Debug for RemoteAgentPodProvider {
@@ -1654,12 +1832,13 @@ impl RuntimeProvider for RemoteAgentPodProvider {
             300,
         )?;
         let handshake_ack = transport.handshake(&handshake_descriptor).await?;
+        let workspace_bundle = self.workspace_bundle_for_spec(spec)?;
         let response = transport
             .create_session(RemoteAgentPodCreateSessionRequest {
                 transport: transport_descriptor,
                 handshake_ack: handshake_ack.clone(),
                 spec: spec.clone(),
-                workspace_bundle: None,
+                workspace_bundle,
             })
             .await?;
         let mut session = RuntimeSession::new(
@@ -2080,6 +2259,31 @@ mod tests {
         file.path = "../secret".to_string();
         let err = workspace_bundle_root_sha256(&[file]).unwrap_err();
         assert!(err.to_string().contains("unsafe"));
+    }
+
+    #[test]
+    fn remote_workspace_bundle_builder_skips_secret_and_large_material() {
+        let root = std::env::temp_dir().join(format!(
+            "agentbox-remote-workspace-bundle-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::create_dir_all(root.join("target")).unwrap();
+        fs::write(root.join("src/main.rs"), "fn main() {}\n").unwrap();
+        fs::write(root.join(".env"), "TOKEN=secret\n").unwrap();
+        fs::write(root.join("target/build.log"), "generated\n").unwrap();
+        fs::write(root.join("binary.bin"), [0, 159, 146, 150]).unwrap();
+
+        let bundle = build_remote_workspace_bundle(&root).unwrap();
+
+        assert_eq!(bundle.schema_version, 1);
+        assert!(!bundle.secret_material_included);
+        assert_eq!(bundle.files.len(), 1);
+        assert_eq!(bundle.files[0].path, "src/main.rs");
+        assert_eq!(bundle.files[0].contents_utf8, "fn main() {}\n");
+        bundle.validate().unwrap();
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

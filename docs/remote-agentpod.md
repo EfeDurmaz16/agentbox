@@ -10,6 +10,10 @@ HTTP and credential-bearing endpoints remain rejected.
 Create-session requests can also carry an optional hash-bound workspace bundle.
 The worker verifies every indexed path, byte count, and SHA-256 digest before
 materializing files into the worker workspace.
+The provider builds that bundle only when
+`AGENTBOX_REMOTE_AGENTPOD_WORKSPACE_BUNDLE=1` is set. The builder skips common
+secret/generated paths, symlinks, non-UTF-8 files, and files over the configured
+size limits.
 
 The product surface starts with a secret-free transport descriptor:
 
