@@ -6,6 +6,19 @@ use ulid::Ulid;
 
 use crate::audit::AuditEvent;
 
+pub const AGENTPOD_SPEC_SCHEMA_VERSION: u32 = 1;
+pub const AGENTPOD_SPEC_KIND: &str = "AgentPod";
+
+pub type AgentPodSpec = MinipodSpec;
+
+fn default_agentpod_spec_schema_version() -> u32 {
+    AGENTPOD_SPEC_SCHEMA_VERSION
+}
+
+fn default_agentpod_spec_kind() -> String {
+    AGENTPOD_SPEC_KIND.to_string()
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RuntimeCapability {
     ContainerIsolation,
@@ -642,6 +655,10 @@ impl ServiceReadinessProbe {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MinipodSpec {
+    #[serde(default = "default_agentpod_spec_schema_version")]
+    pub schema_version: u32,
+    #[serde(default = "default_agentpod_spec_kind")]
+    pub kind: String,
     pub id: String,
     pub name: String,
     pub agent: AgentProfile,
@@ -686,6 +703,8 @@ impl MinipodSpec {
         );
 
         Self {
+            schema_version: AGENTPOD_SPEC_SCHEMA_VERSION,
+            kind: AGENTPOD_SPEC_KIND.to_string(),
             id: id.clone(),
             name: format!("agentbox-{short}"),
             agent: AgentProfile {
@@ -1077,6 +1096,8 @@ mod tests {
     fn default_minipod_is_deny_by_default() {
         let spec = MinipodSpec::for_agent_task("openclaw", "/tmp/agentbox-work");
 
+        assert_eq!(spec.schema_version, AGENTPOD_SPEC_SCHEMA_VERSION);
+        assert_eq!(spec.kind, AGENTPOD_SPEC_KIND);
         assert!(spec.name.starts_with("agentbox-"));
         assert_eq!(spec.agent.name, "openclaw");
         assert_eq!(spec.filesystem.workspace_guest_path, "/workspace");
@@ -1093,7 +1114,7 @@ mod tests {
 
     #[test]
     fn minipod_spec_carries_standard_task_labels() {
-        let spec = MinipodSpec::for_agent_task("openclaw", "/tmp/agentbox-work");
+        let spec: AgentPodSpec = MinipodSpec::for_agent_task("openclaw", "/tmp/agentbox-work");
 
         assert_eq!(spec.labels.get("agentbox.agent"), Some(&"openclaw".into()));
         assert_eq!(spec.labels.get("agentbox.task"), Some(&spec.id));
@@ -1596,6 +1617,8 @@ mod tests {
 
         let spec: MinipodSpec = serde_json::from_value(json).unwrap();
 
+        assert_eq!(spec.schema_version, AGENTPOD_SPEC_SCHEMA_VERSION);
+        assert_eq!(spec.kind, AGENTPOD_SPEC_KIND);
         assert!(matches!(
             spec.filesystem.mounts[0].kind,
             MountKind::ReadOnlyHost
