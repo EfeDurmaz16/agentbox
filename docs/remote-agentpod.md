@@ -167,6 +167,10 @@ shell, and returns exit code, stdout, stderr, duration, and lifecycle evidence.
 Workspace materialization, policy enforcement, credential handoff, evidence
 storage, and kill-switch process control remain future work.
 
+`scripts/smoke-remote-worker.sh` starts this worker on a random loopback port,
+posts a handshake descriptor, checks the Ed25519 acknowledgement shape, runs a
+direct `printf` exec request, and verifies the returned lifecycle evidence.
+
 ## Lifecycle Contract
 
 Remote workers must eventually prove lifecycle events rather than only returning
