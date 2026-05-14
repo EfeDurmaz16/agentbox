@@ -175,6 +175,8 @@ agentbox run "openclaw start"
 
 # Preview the AgentPod run plan without requiring a runnable backend
 agentbox run --plan --risk high --workspace-mode overlay-review "codex"
+# The preview includes provider selection, candidates, backend actions,
+# network enforcement metadata, warnings, and the full AgentPod manifest.
 
 # Generate the governed minipod manifest without starting a backend
 agentbox minipod-spec hermes --workspace . --allow-domain api.openai.com
