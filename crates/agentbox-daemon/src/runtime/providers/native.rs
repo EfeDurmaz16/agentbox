@@ -25,9 +25,9 @@ impl NativeProviderKind {
 
     fn name(&self) -> &'static str {
         match self {
-            Self::MacOs => "native-macos",
-            Self::Linux => "native-linux",
-            Self::Windows => "native-windows",
+            Self::MacOs => "agentpod-macos",
+            Self::Linux => "agentpod-linux",
+            Self::Windows => "agentpod-windows",
         }
     }
 
@@ -138,20 +138,23 @@ impl RuntimeProvider for NativeProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::runtime::providers::conformance::{
+        assert_provider_metadata, assert_unavailable_provider_contract,
+    };
 
     #[test]
     fn native_provider_names_are_explicit() {
         assert_eq!(
             NativeProvider::new(NativeProviderKind::MacOs).name(),
-            "native-macos"
+            "agentpod-macos"
         );
         assert_eq!(
             NativeProvider::new(NativeProviderKind::Linux).name(),
-            "native-linux"
+            "agentpod-linux"
         );
         assert_eq!(
             NativeProvider::new(NativeProviderKind::Windows).name(),
-            "native-windows"
+            "agentpod-windows"
         );
     }
 
@@ -159,23 +162,31 @@ mod tests {
     fn native_provider_describes_planned_capabilities() {
         let macos = NativeProvider::new(NativeProviderKind::MacOs);
 
-        assert_eq!(macos.platform(), "macos");
-        assert!(macos
-            .capabilities()
-            .contains(&RuntimeCapability::EndpointSecurity));
-        assert!(macos
-            .capabilities()
-            .contains(&RuntimeCapability::EvidenceExport));
+        assert_provider_metadata(
+            &macos,
+            "agentpod-macos",
+            "macos",
+            &[
+                RuntimeCapability::EndpointSecurity,
+                RuntimeCapability::EvidenceExport,
+            ],
+        );
     }
 
     #[tokio::test]
     async fn native_provider_is_not_available_until_enforcement_lands() {
         let provider = NativeProvider::new(NativeProviderKind::Linux);
-        let spec = MinipodSpec::for_agent_task("codex", "/tmp/agentbox-work");
 
-        assert!(!provider.is_available().await);
-        let err = provider.create(&spec).await.unwrap_err();
-
-        assert!(err.to_string().contains("not implemented yet"));
+        assert_provider_metadata(
+            &provider,
+            "agentpod-linux",
+            "linux",
+            &[
+                RuntimeCapability::NativeNamespaces,
+                RuntimeCapability::FilesystemPolicy,
+                RuntimeCapability::EvidenceExport,
+            ],
+        );
+        assert_unavailable_provider_contract(&provider).await;
     }
 }

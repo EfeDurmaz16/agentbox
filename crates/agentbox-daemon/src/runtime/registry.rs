@@ -138,11 +138,14 @@ mod tests {
     fn first_registered_provider_becomes_default() {
         let mut registry = RuntimeProviderRegistry::new();
 
-        registry.register(Arc::new(NamedProvider("native-macos")));
+        registry.register(Arc::new(NamedProvider("agentpod-macos")));
         registry.register(Arc::new(NamedProvider("podman")));
 
-        assert_eq!(registry.default_provider().unwrap().name(), "native-macos");
-        assert_eq!(registry.names(), vec!["native-macos", "podman"]);
+        assert_eq!(
+            registry.default_provider().unwrap().name(),
+            "agentpod-macos"
+        );
+        assert_eq!(registry.names(), vec!["agentpod-macos", "podman"]);
     }
 
     #[test]
@@ -153,7 +156,7 @@ mod tests {
         registry.set_default("podman").unwrap();
         assert_eq!(registry.default_provider().unwrap().name(), "podman");
 
-        let err = registry.set_default("native-linux").unwrap_err();
+        let err = registry.set_default("agentpod-linux").unwrap_err();
         assert!(err.to_string().contains("not registered"));
     }
 
@@ -175,9 +178,9 @@ mod tests {
 
         assert_eq!(
             registry.names(),
-            vec!["native-linux", "native-macos", "native-windows"]
+            vec!["agentpod-linux", "agentpod-macos", "agentpod-windows"]
         );
-        assert_eq!(registry.get("native-macos").unwrap().platform(), "macos");
+        assert_eq!(registry.get("agentpod-macos").unwrap().platform(), "macos");
     }
 
     #[test]
@@ -190,7 +193,12 @@ mod tests {
         assert_eq!(registry.default_provider().unwrap().name(), "podman");
         assert_eq!(
             registry.names(),
-            vec!["native-linux", "native-macos", "native-windows", "podman"]
+            vec![
+                "agentpod-linux",
+                "agentpod-macos",
+                "agentpod-windows",
+                "podman"
+            ]
         );
     }
 }

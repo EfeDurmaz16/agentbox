@@ -244,6 +244,28 @@ fn runtime_error(error: PodError) -> RuntimeError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::runtime::providers::conformance::assert_provider_metadata;
+
+    #[test]
+    fn podman_provider_matches_runtime_provider_metadata() {
+        let provider = PodmanRuntimeProvider::new(
+            "/tmp/agentbox.sock".to_string(),
+            "/tmp/agentbox-shim".to_string(),
+        );
+
+        assert_provider_metadata(
+            &provider,
+            "podman",
+            "linux-vm",
+            &[
+                RuntimeCapability::ContainerIsolation,
+                RuntimeCapability::VmIsolation,
+                RuntimeCapability::FilesystemPolicy,
+                RuntimeCapability::ApprovalBridge,
+                RuntimeCapability::EvidenceExport,
+            ],
+        );
+    }
 
     #[test]
     fn converts_minipod_spec_to_pod_spec() {
