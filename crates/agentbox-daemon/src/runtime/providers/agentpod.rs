@@ -1,8 +1,13 @@
 use async_trait::async_trait;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 use crate::runtime::bridge::HostBridgeTransportKind;
 use crate::runtime::provider::{
     ProviderFamily, ProviderImplementationStatus, RuntimeError, RuntimeProvider,
+};
+use crate::runtime::providers::linux::{
+    linux_native_execution_enabled, LinuxAgentPodPrototypeExecutor,
 };
 use crate::runtime::types::{
     CommandResult, ExecCommand, MinipodSpec, RuntimeCapability, RuntimeSession, RuntimeStatus,
@@ -132,11 +137,15 @@ impl AgentPodProviderKind {
 
 pub struct AgentPodProvider {
     kind: AgentPodProviderKind,
+    sessions: Arc<Mutex<HashMap<String, RuntimeSession>>>,
 }
 
 impl AgentPodProvider {
     pub fn new(kind: AgentPodProviderKind) -> Self {
-        Self { kind }
+        Self {
+            kind,
+            sessions: Arc::new(Mutex::new(HashMap::new())),
+        }
     }
 
     pub fn current_platform_candidate() -> Self {
@@ -152,6 +161,18 @@ impl AgentPodProvider {
             "{} is a provider descriptor; enforcement is not implemented yet",
             self.name()
         ))
+    }
+
+    fn linux_prototype_available(&self) -> bool {
+        matches!(self.kind, AgentPodProviderKind::Linux)
+            && cfg!(target_os = "linux")
+            && linux_native_execution_enabled()
+    }
+
+    fn linux_prototype_unavailable(&self) -> RuntimeError {
+        RuntimeError::Unavailable(
+            "agentpod-linux prototype execution requires Linux and AGENTBOX_LINUX_NATIVE=1".into(),
+        )
     }
 }
 
@@ -191,31 +212,117 @@ impl RuntimeProvider for AgentPodProvider {
     }
 
     async fn is_available(&self) -> bool {
-        false
+        self.linux_prototype_available()
     }
 
-    async fn create(&self, _spec: &MinipodSpec) -> Result<RuntimeSession, RuntimeError> {
-        Err(self.unavailable())
+    async fn create(&self, spec: &MinipodSpec) -> Result<RuntimeSession, RuntimeError> {
+        if !self.linux_prototype_available() {
+            return Err(match self.kind {
+                AgentPodProviderKind::Linux => self.linux_prototype_unavailable(),
+                AgentPodProviderKind::MacOs | AgentPodProviderKind::Windows => self.unavailable(),
+            });
+        }
+
+        let mut session = RuntimeSession::new(
+            spec.name.clone(),
+            self.name().to_string(),
+            self.platform().to_string(),
+            spec.clone(),
+        );
+        session.status = RuntimeStatus::Running;
+
+        self.sessions
+            .lock()
+            .map_err(|_| RuntimeError::Internal("agentpod-linux session lock poisoned".into()))?
+            .insert(session.id.clone(), session.clone());
+
+        Ok(session)
     }
 
     async fn exec(
         &self,
-        _session_id: &str,
-        _command: &ExecCommand,
+        session_id: &str,
+        command: &ExecCommand,
     ) -> Result<CommandResult, RuntimeError> {
-        Err(self.unavailable())
+        if !self.linux_prototype_available() {
+            return Err(match self.kind {
+                AgentPodProviderKind::Linux => self.linux_prototype_unavailable(),
+                AgentPodProviderKind::MacOs | AgentPodProviderKind::Windows => self.unavailable(),
+            });
+        }
+
+        let session = self
+            .sessions
+            .lock()
+            .map_err(|_| RuntimeError::Internal("agentpod-linux session lock poisoned".into()))?
+            .get(session_id)
+            .cloned()
+            .ok_or_else(|| RuntimeError::NotFound(session_id.to_string()))?;
+        let mut command = command.clone();
+        if command.working_dir.as_deref() == Some(&session.spec.filesystem.workspace_guest_path) {
+            command.working_dir = Some(
+                session
+                    .spec
+                    .filesystem
+                    .workspace_host_path
+                    .display()
+                    .to_string(),
+            );
+        }
+
+        LinuxAgentPodPrototypeExecutor::execute(&session.spec, &command)
     }
 
-    async fn status(&self, _session_id: &str) -> Result<RuntimeStatus, RuntimeError> {
-        Err(self.unavailable())
+    async fn status(&self, session_id: &str) -> Result<RuntimeStatus, RuntimeError> {
+        if !self.linux_prototype_available() {
+            return Err(match self.kind {
+                AgentPodProviderKind::Linux => self.linux_prototype_unavailable(),
+                AgentPodProviderKind::MacOs | AgentPodProviderKind::Windows => self.unavailable(),
+            });
+        }
+
+        self.sessions
+            .lock()
+            .map_err(|_| RuntimeError::Internal("agentpod-linux session lock poisoned".into()))?
+            .get(session_id)
+            .map(|session| session.status.clone())
+            .ok_or_else(|| RuntimeError::NotFound(session_id.to_string()))
     }
 
-    async fn destroy(&self, _session_id: &str) -> Result<(), RuntimeError> {
-        Err(self.unavailable())
+    async fn destroy(&self, session_id: &str) -> Result<(), RuntimeError> {
+        if !self.linux_prototype_available() {
+            return Err(match self.kind {
+                AgentPodProviderKind::Linux => self.linux_prototype_unavailable(),
+                AgentPodProviderKind::MacOs | AgentPodProviderKind::Windows => self.unavailable(),
+            });
+        }
+
+        let mut sessions = self
+            .sessions
+            .lock()
+            .map_err(|_| RuntimeError::Internal("agentpod-linux session lock poisoned".into()))?;
+        if let Some(session) = sessions.get_mut(session_id) {
+            session.status = RuntimeStatus::Stopped;
+            session.stopped_at = Some(chrono::Utc::now());
+        }
+        Ok(())
     }
 
     async fn list(&self) -> Result<Vec<RuntimeSession>, RuntimeError> {
-        Err(self.unavailable())
+        if !self.linux_prototype_available() {
+            return Err(match self.kind {
+                AgentPodProviderKind::Linux => self.linux_prototype_unavailable(),
+                AgentPodProviderKind::MacOs | AgentPodProviderKind::Windows => self.unavailable(),
+            });
+        }
+
+        Ok(self
+            .sessions
+            .lock()
+            .map_err(|_| RuntimeError::Internal("agentpod-linux session lock poisoned".into()))?
+            .values()
+            .cloned()
+            .collect())
     }
 }
 
@@ -289,6 +396,44 @@ mod tests {
         assert!(
             provider.network_enforcement_capabilities().is_empty(),
             "unavailable AgentPod descriptors must not claim active network enforcement"
+        );
+    }
+
+    #[tokio::test]
+    async fn linux_agentpod_provider_refuses_without_native_gate() {
+        if std::env::var("AGENTBOX_LINUX_NATIVE").is_ok() {
+            return;
+        }
+        let provider = AgentPodProvider::new(AgentPodProviderKind::Linux);
+        let spec = MinipodSpec::for_agent_task("linux-test", std::env::temp_dir());
+
+        assert!(!provider.is_available().await);
+        let err = provider.create(&spec).await.unwrap_err();
+
+        assert!(err.to_string().contains("AGENTBOX_LINUX_NATIVE"));
+    }
+
+    #[tokio::test]
+    async fn linux_agentpod_provider_lifecycle_is_gated_to_native_hosts() {
+        if !(cfg!(target_os = "linux")
+            && matches!(std::env::var("AGENTBOX_LINUX_NATIVE").as_deref(), Ok("1")))
+        {
+            return;
+        }
+        let provider = AgentPodProvider::new(AgentPodProviderKind::Linux);
+        let spec = MinipodSpec::for_agent_task("linux-test", std::env::temp_dir());
+
+        let session = provider.create(&spec).await.unwrap();
+
+        assert_eq!(session.provider, "agentpod-linux");
+        assert_eq!(
+            provider.status(&session.id).await.unwrap(),
+            RuntimeStatus::Running
+        );
+        provider.destroy(&session.id).await.unwrap();
+        assert_eq!(
+            provider.status(&session.id).await.unwrap(),
+            RuntimeStatus::Stopped
         );
     }
 

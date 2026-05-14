@@ -776,7 +776,7 @@ fn prefixed_command(binary: &str, args: Vec<String>) -> Vec<String> {
     argv
 }
 
-fn linux_native_execution_enabled() -> bool {
+pub fn linux_native_execution_enabled() -> bool {
     matches!(
         std::env::var("AGENTBOX_LINUX_NATIVE").as_deref(),
         Ok("1") | Ok("true") | Ok("yes")

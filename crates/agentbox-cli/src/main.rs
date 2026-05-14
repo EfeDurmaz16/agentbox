@@ -1258,48 +1258,63 @@ async fn cmd_run(options: RunOptions) {
     }
 
     if selection.selected_provider != "podman" {
-        eprintln!(
-            "Error: provider `{}` is not runnable in this build yet.",
-            selection.selected_provider
-        );
-        eprintln!("reason: {}", selection.reason);
-        if selection.selected_provider == "agentpod-linux" {
+        let selected_provider = registry
+            .get(&selection.selected_provider)
+            .unwrap_or_else(|e| {
+                eprintln!("Error: failed to resolve runtime provider: {}", e);
+                std::process::exit(1);
+            });
+        if selection.selected_provider == "agentpod-linux" && selected_provider.is_available().await
+        {
             eprintln!(
-                "hint: inspect the native prototype plan with `agentbox native-plan --provider agentpod-linux -- <cmd>`"
-            );
-            eprintln!(
-                "hint: Linux prototype execution is still gated behind AGENTBOX_LINUX_NATIVE and is not wired into `agentbox run` yet"
+                "warning: using gated agentpod-linux prototype execution; this is not a complete sandbox"
             );
         } else {
-            eprintln!("hint: use `--provider podman` for the current compatibility backend");
-        }
-        std::process::exit(1);
-    }
-
-    // 3. Check whether the current compatibility backend is available.
-    match Command::new("podman").arg("--version").output() {
-        Ok(output) if output.status.success() => {
-            let ver = String::from_utf8_lossy(&output.stdout);
-            eprintln!("Using {}", ver.trim());
-        }
-        _ => {
-            eprintln!("Error: no runnable AgentPod backend is available yet.");
-            eprintln!("The current compatibility backend requires Podman:");
             eprintln!(
-                "  macOS: brew install podman && podman machine init && podman machine start"
+                "Error: provider `{}` is not runnable in this build yet.",
+                selection.selected_provider
             );
-            eprintln!("  Linux: https://podman.io/docs/installation");
+            eprintln!("reason: {}", selection.reason);
+            if selection.selected_provider == "agentpod-linux" {
+                eprintln!(
+                "hint: inspect the native prototype plan with `agentbox native-plan --provider agentpod-linux -- <cmd>`"
+            );
+                eprintln!(
+                "hint: Linux prototype execution runs through `agentbox run` only on Linux with AGENTBOX_LINUX_NATIVE=1"
+            );
+            } else {
+                eprintln!("hint: use `--provider podman` for the current compatibility backend");
+            }
             std::process::exit(1);
         }
     }
 
-    // 4. On macOS, ensure the compatibility backend VM is running.
-    let machine = MachineManager::new();
-    if machine.needs_vm() {
-        eprintln!("Checking AgentPod compatibility VM...");
-        if let Err(e) = machine.ensure_ready().await {
-            eprintln!("Error: failed to start podman machine: {}", e);
-            std::process::exit(1);
+    if selection.selected_provider == "podman" {
+        // 3. Check whether the current compatibility backend is available.
+        match Command::new("podman").arg("--version").output() {
+            Ok(output) if output.status.success() => {
+                let ver = String::from_utf8_lossy(&output.stdout);
+                eprintln!("Using {}", ver.trim());
+            }
+            _ => {
+                eprintln!("Error: no runnable AgentPod backend is available yet.");
+                eprintln!("The current compatibility backend requires Podman:");
+                eprintln!(
+                    "  macOS: brew install podman && podman machine init && podman machine start"
+                );
+                eprintln!("  Linux: https://podman.io/docs/installation");
+                std::process::exit(1);
+            }
+        }
+
+        // 4. On macOS, ensure the compatibility backend VM is running.
+        let machine = MachineManager::new();
+        if machine.needs_vm() {
+            eprintln!("Checking AgentPod compatibility VM...");
+            if let Err(e) = machine.ensure_ready().await {
+                eprintln!("Error: failed to start podman machine: {}", e);
+                std::process::exit(1);
+            }
         }
     }
 
@@ -1378,7 +1393,11 @@ async fn cmd_run(options: RunOptions) {
         );
     }
 
-    println!("  Agentbox: socket + shims injected");
+    if selection.selected_provider == "podman" {
+        println!("  Agentbox: socket + shims injected");
+    } else {
+        println!("  Agentbox: native prototype executor");
+    }
 
     let session = match manager.create(&spec).await {
         Ok(session) => {
@@ -1445,11 +1464,13 @@ async fn cmd_run(options: RunOptions) {
         println!();
         println!("Minipod session running.");
         println!("  Session id: {}", session.id);
-        println!("  Backend container: sb-{}-workspace", session.id);
-        println!(
-            "  Debug shell: podman exec -it sb-{}-workspace bash",
-            session.id
-        );
+        if selection.selected_provider == "podman" {
+            println!("  Backend container: sb-{}-workspace", session.id);
+            println!(
+                "  Debug shell: podman exec -it sb-{}-workspace bash",
+                session.id
+            );
+        }
         println!();
         println!("Stop with:");
         println!("  agentbox stop-pod {}", session.id);
