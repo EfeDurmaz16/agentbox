@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::runtime::provider::RuntimeError;
-use crate::runtime::types::ExecCommand;
+use crate::runtime::types::{ExecCommand, MinipodSpec, MountMode};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LinuxUserNamespacePlan {
@@ -72,10 +72,108 @@ impl LinuxUserNamespaceLauncher {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LinuxMountNamespacePlan {
+    pub schema_version: i64,
+    pub workspace_host_path: String,
+    pub workspace_guest_path: String,
+    pub read_only_mounts: Vec<LinuxMountNamespaceMount>,
+    pub propagation: String,
+    pub requires_linux: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LinuxMountNamespaceMount {
+    pub host_path: String,
+    pub guest_path: String,
+    pub read_only: bool,
+}
+
+impl LinuxMountNamespacePlan {
+    pub fn from_minipod_spec(spec: &MinipodSpec) -> Self {
+        let read_only_mounts = spec
+            .filesystem
+            .mounts
+            .iter()
+            .map(|mount| LinuxMountNamespaceMount {
+                host_path: mount.host_path.display().to_string(),
+                guest_path: mount.guest_path.clone(),
+                read_only: matches!(mount.mode, MountMode::ReadOnly),
+            })
+            .collect();
+
+        Self {
+            schema_version: 1,
+            workspace_host_path: spec.filesystem.workspace_host_path.display().to_string(),
+            workspace_guest_path: spec.filesystem.workspace_guest_path.clone(),
+            read_only_mounts,
+            propagation: "private".to_string(),
+            requires_linux: true,
+        }
+    }
+}
+
+pub struct LinuxMountNamespaceLauncher;
+
+impl LinuxMountNamespaceLauncher {
+    pub fn plan(spec: &MinipodSpec) -> Result<LinuxMountNamespacePlan, RuntimeError> {
+        if spec.filesystem.workspace_guest_path.trim().is_empty() {
+            return Err(RuntimeError::ManifestRejected(
+                "mount namespace workspace guest path cannot be empty".into(),
+            ));
+        }
+
+        Ok(LinuxMountNamespacePlan::from_minipod_spec(spec))
+    }
+
+    pub fn command_args(plan: &LinuxMountNamespacePlan, command: &ExecCommand) -> Vec<String> {
+        let mut args = vec![
+            "--mount".to_string(),
+            "--propagation".to_string(),
+            plan.propagation.clone(),
+            "--".to_string(),
+        ];
+        args.extend(command.argv.clone());
+        args
+    }
+
+    #[cfg(target_os = "linux")]
+    pub fn spawn(
+        spec: &MinipodSpec,
+        command: &ExecCommand,
+    ) -> Result<std::process::Child, Box<dyn std::error::Error + Send + Sync>> {
+        if command.argv.is_empty() {
+            return Err("mount namespace launcher command cannot be empty".into());
+        }
+        let plan = Self::plan(spec)?;
+        let mut child = std::process::Command::new("unshare");
+        child.args(Self::command_args(&plan, command));
+
+        if let Some(working_dir) = &command.working_dir {
+            child.current_dir(working_dir);
+        }
+        for (key, value) in &command.env {
+            child.env(key, value);
+        }
+
+        Ok(child.spawn()?)
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    pub fn spawn(
+        _spec: &MinipodSpec,
+        _command: &ExecCommand,
+    ) -> Result<std::process::Child, Box<dyn std::error::Error + Send + Sync>> {
+        Err("Linux mount namespaces are only available on Linux".into())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::runtime::types::{MountKind, MountRule};
     use std::collections::HashMap;
+    use std::path::PathBuf;
 
     fn command(argv: &[&str]) -> ExecCommand {
         ExecCommand {
@@ -112,6 +210,51 @@ mod tests {
     #[test]
     fn user_namespace_spawn_is_explicitly_linux_only() {
         let err = LinuxUserNamespaceLauncher::spawn(&command(&["/bin/echo", "hello"])).unwrap_err();
+
+        assert!(err.to_string().contains("only available on Linux"));
+    }
+
+    #[test]
+    fn mount_namespace_plan_maps_workspace_and_read_only_mounts() {
+        let mut spec = MinipodSpec::for_agent_task("hermes", "/tmp/agentbox-work");
+        spec.filesystem.workspace_guest_path = "/workspace".into();
+        spec.filesystem.mounts.push(MountRule {
+            host_path: PathBuf::from("/tmp/agentbox-fixtures"),
+            guest_path: "/fixtures".into(),
+            mode: MountMode::ReadOnly,
+            kind: MountKind::ReadOnlyHost,
+        });
+
+        let plan = LinuxMountNamespaceLauncher::plan(&spec).unwrap();
+
+        assert_eq!(plan.schema_version, 1);
+        assert_eq!(plan.workspace_host_path, "/tmp/agentbox-work");
+        assert_eq!(plan.workspace_guest_path, "/workspace");
+        assert_eq!(plan.propagation, "private");
+        assert!(plan.requires_linux);
+        assert_eq!(plan.read_only_mounts.len(), 1);
+        assert_eq!(plan.read_only_mounts[0].guest_path, "/fixtures");
+        assert!(plan.read_only_mounts[0].read_only);
+    }
+
+    #[test]
+    fn mount_namespace_command_args_wrap_command_with_unshare_mount() {
+        let spec = MinipodSpec::for_agent_task("hermes", "/tmp/agentbox-work");
+        let plan = LinuxMountNamespaceLauncher::plan(&spec).unwrap();
+
+        let args = LinuxMountNamespaceLauncher::command_args(&plan, &command(&["/bin/true"]));
+
+        assert_eq!(
+            args,
+            vec!["--mount", "--propagation", "private", "--", "/bin/true"]
+        );
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn mount_namespace_spawn_is_explicitly_linux_only() {
+        let spec = MinipodSpec::for_agent_task("hermes", "/tmp/agentbox-work");
+        let err = LinuxMountNamespaceLauncher::spawn(&spec, &command(&["/bin/true"])).unwrap_err();
 
         assert!(err.to_string().contains("only available on Linux"));
     }
