@@ -79,6 +79,10 @@ enum Commands {
         #[arg(long = "provider", default_value = "auto")]
         provider: String,
 
+        /// Print the AgentPod run plan without starting a backend
+        #[arg(long = "plan")]
+        plan: bool,
+
         /// Add a service sidecar (postgres, redis, mysql, mongo)
         #[arg(long = "with", num_args = 1..)]
         services: Vec<String>,
@@ -870,6 +874,7 @@ struct RunOptions {
     agent_profile: String,
     risk: String,
     provider: String,
+    plan: bool,
     services: Vec<String>,
     mount_cwd: bool,
     workspace_mode: Option<String>,
@@ -896,34 +901,7 @@ async fn cmd_run(options: RunOptions) {
     let risk = parse_agentpod_risk(&options.risk);
     let provider_hint = parse_provider_hint(&options.provider);
 
-    // 1. Check whether the current compatibility backend is available.
-    match Command::new("podman").arg("--version").output() {
-        Ok(output) if output.status.success() => {
-            let ver = String::from_utf8_lossy(&output.stdout);
-            eprintln!("Using {}", ver.trim());
-        }
-        _ => {
-            eprintln!("Error: no runnable AgentPod backend is available yet.");
-            eprintln!("The current compatibility backend requires Podman:");
-            eprintln!(
-                "  macOS: brew install podman && podman machine init && podman machine start"
-            );
-            eprintln!("  Linux: https://podman.io/docs/installation");
-            std::process::exit(1);
-        }
-    }
-
-    // 2. On macOS, ensure the compatibility backend VM is running.
-    let machine = MachineManager::new();
-    if machine.needs_vm() {
-        eprintln!("Checking AgentPod compatibility VM...");
-        if let Err(e) = machine.ensure_ready().await {
-            eprintln!("Error: failed to start podman machine: {}", e);
-            std::process::exit(1);
-        }
-    }
-
-    // 3. Create RuntimeManager with the compatibility RuntimeProvider adapter.
+    // 1. Resolve provider selection before touching any backend.
     let agentbox_sock = socket_path().to_string_lossy().to_string();
     let shim_binary = find_shim_binary()
         .map(|p| p.to_string_lossy().to_string())
@@ -947,34 +925,7 @@ async fn cmd_run(options: RunOptions) {
             eprintln!("Error: failed to select runtime provider: {}", e);
             std::process::exit(1);
         });
-    if selection.selected_provider != "podman" {
-        eprintln!(
-            "Error: provider `{}` is not runnable in this build yet.",
-            selection.selected_provider
-        );
-        eprintln!("reason: {}", selection.reason);
-        eprintln!("hint: use `--provider podman` for the current compatibility backend");
-        std::process::exit(1);
-    }
-    let provider = registry
-        .get(&selection.selected_provider)
-        .unwrap_or_else(|e| {
-            eprintln!(
-                "Error: failed to resolve compatibility runtime provider: {}",
-                e
-            );
-            std::process::exit(1);
-        });
-    let manager = RuntimeManager::new(
-        provider,
-        RuntimeSessionStore::new(config.session_store_path.clone()),
-        AuditStore::new(&config.db_path).unwrap_or_else(|e| {
-            eprintln!("Error: failed to open audit store: {}", e);
-            std::process::exit(1);
-        }),
-    );
-
-    // 4. Build governed MinipodSpec
+    // 2. Build governed AgentPod manifest.
     let workspace = if options.mount_cwd {
         std::env::current_dir().unwrap_or_else(|e| {
             eprintln!("Error: failed to determine current directory: {}", e);
@@ -1054,6 +1005,69 @@ async fn cmd_run(options: RunOptions) {
     if options.deny_localhost {
         spec.network.allow_localhost = false;
     }
+
+    if options.plan {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&spec).expect("failed to serialize AgentPod run plan")
+        );
+        return;
+    }
+
+    if selection.selected_provider != "podman" {
+        eprintln!(
+            "Error: provider `{}` is not runnable in this build yet.",
+            selection.selected_provider
+        );
+        eprintln!("reason: {}", selection.reason);
+        eprintln!("hint: use `--provider podman` for the current compatibility backend");
+        std::process::exit(1);
+    }
+
+    // 3. Check whether the current compatibility backend is available.
+    match Command::new("podman").arg("--version").output() {
+        Ok(output) if output.status.success() => {
+            let ver = String::from_utf8_lossy(&output.stdout);
+            eprintln!("Using {}", ver.trim());
+        }
+        _ => {
+            eprintln!("Error: no runnable AgentPod backend is available yet.");
+            eprintln!("The current compatibility backend requires Podman:");
+            eprintln!(
+                "  macOS: brew install podman && podman machine init && podman machine start"
+            );
+            eprintln!("  Linux: https://podman.io/docs/installation");
+            std::process::exit(1);
+        }
+    }
+
+    // 4. On macOS, ensure the compatibility backend VM is running.
+    let machine = MachineManager::new();
+    if machine.needs_vm() {
+        eprintln!("Checking AgentPod compatibility VM...");
+        if let Err(e) = machine.ensure_ready().await {
+            eprintln!("Error: failed to start podman machine: {}", e);
+            std::process::exit(1);
+        }
+    }
+
+    let provider = registry
+        .get(&selection.selected_provider)
+        .unwrap_or_else(|e| {
+            eprintln!(
+                "Error: failed to resolve compatibility runtime provider: {}",
+                e
+            );
+            std::process::exit(1);
+        });
+    let manager = RuntimeManager::new(
+        provider,
+        RuntimeSessionStore::new(config.session_store_path.clone()),
+        AuditStore::new(&config.db_path).unwrap_or_else(|e| {
+            eprintln!("Error: failed to open audit store: {}", e);
+            std::process::exit(1);
+        }),
+    );
 
     // 5. Print progress and create minipod through RuntimeManager
     let ws_image = spec
@@ -2654,6 +2668,7 @@ async fn main() {
             agent_profile,
             risk,
             provider,
+            plan,
             services,
             mount_cwd,
             workspace_mode,
@@ -2673,6 +2688,7 @@ async fn main() {
                 agent_profile,
                 risk,
                 provider,
+                plan,
                 services,
                 mount_cwd,
                 workspace_mode,
