@@ -69,6 +69,9 @@ Limitations:
 - browser profiles, keychains, wallets, and cloud SDK caches need provider-level
   mediation before they are safe for broad agent access
 
+See [safe credential patterns](safe-credential-patterns.md) for the recommended
+operator flow.
+
 ## Live-Test Policy
 
 A skipped live test is not a pass. Live tests may skip only when a required

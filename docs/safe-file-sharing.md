@@ -95,6 +95,10 @@ Until native provider enforcement is complete:
 
 Host environment inheritance is rejected by manifest validation.
 
+See [safe credential patterns](safe-credential-patterns.md) for the narrower
+operator guidance around one-time credential files, FIDES authority handoff,
+redaction limits, and platform-specific credential boundaries.
+
 ## System Bridges
 
 System bridges are host connections such as:

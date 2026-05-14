@@ -79,6 +79,8 @@ See [macOS minipod limitations](macos-minipod-limitations.md) for the current
 VM-backed boundary and native enforcement gap.
 See [safe file sharing](safe-file-sharing.md) for current workspace, read-only
 mount, credential, and system bridge guidance.
+See [safe credential patterns](safe-credential-patterns.md) for task-scoped
+credential grants, redaction limits, and FIDES authority handoff.
 See [Linux eBPF observability](linux-ebpf-observability.md) for kernel event
 evidence design that is not yet enforcement.
 See [network enforcement limits](network-enforcement-limits.md) for the
