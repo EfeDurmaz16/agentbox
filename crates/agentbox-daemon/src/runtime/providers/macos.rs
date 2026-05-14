@@ -1,9 +1,15 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 
-use crate::runtime::bridge::{HostBridgeDecision, HostBridgeTransportKind};
+use crate::runtime::bridge::{
+    CommandMediationRequest, FileGrantRequest, HostBridgeDecision, HostBridgeRequest,
+    HostBridgeTransportKind,
+};
 use crate::runtime::provider::RuntimeError;
-use crate::runtime::types::{ExecCommand, MinipodSpec, MountKind, MountMode, NetworkMode};
+use crate::runtime::types::{
+    ExecCommand, FileAccessMode, MinipodSpec, MountKind, MountMode, NetworkMode,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MacOsVirtualizationCellPlan {
@@ -308,6 +314,44 @@ impl MacOsEndpointSecurityAuthorizationRequest {
         )
     }
 
+    pub fn to_host_bridge_request(&self) -> Result<HostBridgeRequest, RuntimeError> {
+        match self.event_kind {
+            MacOsEndpointSecurityEventKind::Exec => {
+                if self.command_argv.is_empty() {
+                    return Err(RuntimeError::ManifestRejected(
+                        "macOS Endpoint Security exec bridge request cannot have empty argv".into(),
+                    ));
+                }
+                Ok(HostBridgeRequest::CommandMediation(
+                    CommandMediationRequest {
+                        argv: self.command_argv.clone(),
+                        cwd: "/".into(),
+                        env_keys: vec![],
+                    },
+                ))
+            }
+            MacOsEndpointSecurityEventKind::Open
+            | MacOsEndpointSecurityEventKind::Create
+            | MacOsEndpointSecurityEventKind::Rename
+            | MacOsEndpointSecurityEventKind::Unlink => {
+                let Some(target_path) = self.target_path.as_ref() else {
+                    return Err(RuntimeError::ManifestRejected(
+                        "macOS Endpoint Security file bridge request target path is missing".into(),
+                    ));
+                };
+                Ok(HostBridgeRequest::FileGrant(FileGrantRequest {
+                    host_path: PathBuf::from(target_path),
+                    guest_path: target_path.clone(),
+                    access: macos_access_to_file_access_mode(&self.requested_access),
+                    reason: format!(
+                        "macOS Endpoint Security {:?} event {}",
+                        self.event_kind, self.event_id
+                    ),
+                }))
+            }
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn new(
         session_id: impl Into<String>,
@@ -358,6 +402,27 @@ impl MacOsEndpointSecurityAuthorizationRequest {
             requested_access,
             observed_at: Utc::now(),
         })
+    }
+}
+
+fn macos_access_to_file_access_mode(access: &[MacOsFileAccess]) -> FileAccessMode {
+    let reads = access
+        .iter()
+        .any(|item| matches!(item, MacOsFileAccess::Read | MacOsFileAccess::Execute));
+    let writes = access.iter().any(|item| {
+        matches!(
+            item,
+            MacOsFileAccess::Write
+                | MacOsFileAccess::Create
+                | MacOsFileAccess::Delete
+                | MacOsFileAccess::Rename
+        )
+    });
+
+    match (reads, writes) {
+        (true, true) => FileAccessMode::ReadWrite,
+        (true, false) => FileAccessMode::Read,
+        (false, true) | (false, false) => FileAccessMode::Write,
     }
 }
 
@@ -533,6 +598,56 @@ mod tests {
             Some("/Users/efe/.ssh/id_ed25519")
         );
         assert_eq!(request.requested_access, vec![MacOsFileAccess::Read]);
+    }
+
+    #[test]
+    fn endpoint_security_exec_request_maps_to_host_bridge_command() {
+        let request = MacOsEndpointSecurityAuthorizationRequest::exec(
+            "session-1",
+            "event-bridge-1",
+            MacOsEndpointSecuritySubject::unsigned(45, "/usr/bin/git"),
+            vec!["/usr/bin/git".into(), "status".into()],
+        )
+        .unwrap();
+
+        let bridge = request.to_host_bridge_request().unwrap();
+
+        match bridge {
+            HostBridgeRequest::CommandMediation(command) => {
+                assert_eq!(command.argv, vec!["/usr/bin/git", "status"]);
+                assert_eq!(command.cwd, "/");
+                assert!(command.env_keys.is_empty());
+            }
+            other => panic!("unexpected bridge request: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn endpoint_security_file_request_maps_to_host_bridge_file_grant() {
+        let request = MacOsEndpointSecurityAuthorizationRequest::file(
+            "session-1",
+            "event-bridge-2",
+            MacOsEndpointSecurityEventKind::Create,
+            MacOsEndpointSecuritySubject::unsigned(46, "/usr/bin/python3"),
+            "/Users/efe/project/output.txt",
+            vec![MacOsFileAccess::Create, MacOsFileAccess::Write],
+        )
+        .unwrap();
+
+        let bridge = request.to_host_bridge_request().unwrap();
+
+        match bridge {
+            HostBridgeRequest::FileGrant(file) => {
+                assert_eq!(
+                    file.host_path,
+                    PathBuf::from("/Users/efe/project/output.txt")
+                );
+                assert_eq!(file.guest_path, "/Users/efe/project/output.txt");
+                assert_eq!(file.access, FileAccessMode::Write);
+                assert!(file.reason.contains("event-bridge-2"));
+            }
+            other => panic!("unexpected bridge request: {other:?}"),
+        }
     }
 
     #[test]

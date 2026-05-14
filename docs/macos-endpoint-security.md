@@ -127,6 +127,10 @@ code without installing a system extension:
   requested access such as read/write/delete, and observation time.
 - decisions carry allow/approve/block, reason, optional evidence reference, and
   decision time.
+- exec and file requests can be mapped into existing host bridge
+  `CommandMediation` and `FileGrant` requests, so the future privileged macOS
+  client can reuse the same policy/evidence boundary instead of inventing a
+  separate policy path.
 
 This is protocol shape only. There is still no privileged ES client, no kernel
 authorization callback, and no live allow/deny enforcement on macOS.
