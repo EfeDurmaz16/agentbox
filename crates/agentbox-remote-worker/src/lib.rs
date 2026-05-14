@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -16,6 +17,7 @@ use axum::routing::post;
 use axum::{Json, Router};
 use chrono::Duration;
 use ed25519_dalek::{Signer, SigningKey};
+use serde::{Deserialize, Serialize};
 use tokio::process::Command;
 use tokio::sync::{watch, Mutex};
 use tokio::time;
@@ -25,6 +27,7 @@ pub struct RemoteWorkerConfig {
     pub worker_identity: String,
     pub evidence_endpoint: String,
     pub signing_key: SigningKey,
+    pub state_dir: Option<PathBuf>,
 }
 
 impl RemoteWorkerConfig {
@@ -37,7 +40,13 @@ impl RemoteWorkerConfig {
             worker_identity: worker_identity.into(),
             evidence_endpoint: evidence_endpoint.into(),
             signing_key,
+            state_dir: None,
         }
+    }
+
+    pub fn with_state_dir(mut self, state_dir: impl Into<PathBuf>) -> Self {
+        self.state_dir = Some(state_dir.into());
+        self
     }
 
     pub fn public_key_hex(&self) -> String {
@@ -64,6 +73,20 @@ struct WorkerEvidenceReceipt {
     event_count: u64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct WorkerSessionSnapshot {
+    session_id: String,
+    worker_session_id: String,
+    status: RuntimeStatus,
+    evidence_receipts: Vec<WorkerEvidenceReceiptSnapshot>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct WorkerEvidenceReceiptSnapshot {
+    bundle_sha256: String,
+    event_count: u64,
+}
+
 impl WorkerSession {
     fn new(session_id: String) -> Self {
         let (kill_tx, _kill_rx) = watch::channel(false);
@@ -83,9 +106,43 @@ impl WorkerSession {
         self.status = RuntimeStatus::Stopped;
         let _ = self.kill_tx.send(true);
     }
+
+    fn from_snapshot(snapshot: WorkerSessionSnapshot) -> Self {
+        let (kill_tx, _kill_rx) = watch::channel(matches!(snapshot.status, RuntimeStatus::Stopped));
+        Self {
+            session_id: snapshot.session_id,
+            status: snapshot.status,
+            kill_tx,
+            evidence_receipts: snapshot
+                .evidence_receipts
+                .into_iter()
+                .map(|receipt| WorkerEvidenceReceipt {
+                    bundle_sha256: receipt.bundle_sha256,
+                    event_count: receipt.event_count,
+                })
+                .collect(),
+        }
+    }
+
+    fn to_snapshot(&self, worker_session_id: String) -> WorkerSessionSnapshot {
+        WorkerSessionSnapshot {
+            session_id: self.session_id.clone(),
+            worker_session_id,
+            status: self.status.clone(),
+            evidence_receipts: self
+                .evidence_receipts
+                .iter()
+                .map(|receipt| WorkerEvidenceReceiptSnapshot {
+                    bundle_sha256: receipt.bundle_sha256.clone(),
+                    event_count: receipt.event_count,
+                })
+                .collect(),
+        }
+    }
 }
 
 pub fn router(config: RemoteWorkerConfig) -> Router {
+    let sessions = load_persisted_sessions(&config).unwrap_or_default();
     Router::new()
         .route("/handshake", post(handshake))
         .route("/sessions", post(create_session))
@@ -100,7 +157,7 @@ pub fn router(config: RemoteWorkerConfig) -> Router {
         )
         .with_state(Arc::new(RemoteWorkerState {
             config,
-            sessions: Mutex::new(HashMap::new()),
+            sessions: Mutex::new(sessions),
         }))
 }
 
@@ -150,6 +207,7 @@ async fn create_session(
         .lock()
         .await
         .insert(worker_session_id.clone(), session);
+    persist_sessions(&state).await;
     Json(RemoteAgentPodCreateSessionResponse {
         session_id: request.spec.id.clone(),
         worker_session_id,
@@ -355,6 +413,8 @@ async fn accept_evidence(
         event_count: request.event_count,
     };
     session.evidence_receipts.push(receipt.clone());
+    drop(sessions);
+    persist_sessions(state).await;
     Some(receipt)
 }
 
@@ -370,6 +430,7 @@ async fn destroy_session(
     {
         session.mark_stopped();
     }
+    persist_sessions(&state).await;
     Json(RemoteAgentPodDestroySessionResponse {
         session_id: request.session_id,
         worker_session_id: request.worker_session_id,
@@ -378,6 +439,63 @@ async fn destroy_session(
             RemoteAgentPodLifecycleEvent::KillSwitchAck,
             RemoteAgentPodLifecycleEvent::WorkerDestroyed,
         ],
+    })
+}
+
+fn load_persisted_sessions(
+    config: &RemoteWorkerConfig,
+) -> Result<HashMap<String, WorkerSession>, String> {
+    let Some(path) = worker_state_path(config) else {
+        return Ok(HashMap::new());
+    };
+    if !path.exists() {
+        return Ok(HashMap::new());
+    }
+    let contents = std::fs::read_to_string(&path)
+        .map_err(|err| format!("failed to read remote worker state: {err}"))?;
+    if contents.trim().is_empty() {
+        return Ok(HashMap::new());
+    }
+    let snapshots: Vec<WorkerSessionSnapshot> = serde_json::from_str(&contents)
+        .map_err(|err| format!("failed to parse remote worker state: {err}"))?;
+    Ok(snapshots
+        .into_iter()
+        .map(|snapshot| {
+            (
+                snapshot.worker_session_id.clone(),
+                WorkerSession::from_snapshot(snapshot),
+            )
+        })
+        .collect())
+}
+
+async fn persist_sessions(state: &Arc<RemoteWorkerState>) {
+    let Some(path) = worker_state_path(&state.config) else {
+        return;
+    };
+    let snapshots = {
+        let sessions = state.sessions.lock().await;
+        sessions
+            .iter()
+            .map(|(worker_session_id, session)| session.to_snapshot(worker_session_id.clone()))
+            .collect::<Vec<_>>()
+    };
+    let Ok(contents) = serde_json::to_string_pretty(&snapshots) else {
+        return;
+    };
+    if let Some(parent) = path.parent() {
+        let _ = tokio::fs::create_dir_all(parent).await;
+    }
+    let _ = tokio::fs::write(path, contents).await;
+}
+
+fn worker_state_path(config: &RemoteWorkerConfig) -> Option<PathBuf> {
+    config.state_dir.as_ref().map(|state_dir| {
+        if state_dir.extension().is_some() {
+            state_dir.clone()
+        } else {
+            state_dir.join("worker-sessions.json")
+        }
     })
 }
 
@@ -428,6 +546,15 @@ mod tests {
             config,
             sessions: Mutex::new(HashMap::new()),
         })
+    }
+
+    fn state_file(name: &str) -> PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "agentbox-remote-worker-{}-{name}.json",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        path
     }
 
     #[tokio::test]
@@ -629,5 +756,39 @@ mod tests {
         assert_eq!(session.evidence_receipts.len(), 1);
         assert_eq!(session.evidence_receipts[0].bundle_sha256, "a".repeat(64));
         assert_eq!(session.evidence_receipts[0].event_count, 7);
+    }
+
+    #[tokio::test]
+    async fn worker_state_persists_sessions_and_evidence_receipts() {
+        let path = state_file("roundtrip");
+        let config = RemoteWorkerConfig::new(
+            "worker.local/dev",
+            "https://worker.example.com/agentpod/evidence",
+            SigningKey::from_bytes(&[27_u8; 32]),
+        )
+        .with_state_dir(&path);
+        let state = test_state(config.clone());
+        let mut session = WorkerSession::new("session-1".into());
+        session.evidence_receipts.push(WorkerEvidenceReceipt {
+            bundle_sha256: "b".repeat(64),
+            event_count: 5,
+        });
+        session.mark_stopped();
+        state
+            .sessions
+            .lock()
+            .await
+            .insert("worker-session-1".into(), session);
+
+        persist_sessions(&state).await;
+        let loaded = load_persisted_sessions(&config).unwrap();
+
+        let session = loaded.get("worker-session-1").unwrap();
+        assert_eq!(session.session_id, "session-1");
+        assert_eq!(session.status, RuntimeStatus::Stopped);
+        assert_eq!(session.evidence_receipts.len(), 1);
+        assert_eq!(session.evidence_receipts[0].bundle_sha256, "b".repeat(64));
+        assert_eq!(session.evidence_receipts[0].event_count, 5);
+        let _ = std::fs::remove_file(path);
     }
 }

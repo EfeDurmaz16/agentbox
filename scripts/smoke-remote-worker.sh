@@ -23,6 +23,7 @@ cargo run --locked -q -p agentbox-remote-worker -- \
   --listen "127.0.0.1:${PORT}" \
   --worker worker.local/smoke \
   --evidence-endpoint https://worker.example.com/agentpod/evidence \
+  --state-dir "$TMPDIR/worker-state" \
   --signing-key-hex "$SIGNING_KEY_HEX" >"$TMPDIR/worker.out" 2>"$TMPDIR/worker.err" &
 WORKER_PID="$!"
 
@@ -141,6 +142,24 @@ with open(sys.argv[1], "r", encoding="utf-8") as fh:
 assert data["accepted_bundle_sha256"] == "f" * 64
 assert data["accepted_event_count"] == 2
 assert "EvidenceSealed" in data["lifecycle_events"]
+PY
+
+python3 - "$TMPDIR/worker-state/worker-sessions.json" "$SESSION_ID" "$WORKER_SESSION_ID" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], "r", encoding="utf-8") as fh:
+    sessions = json.load(fh)
+
+matches = [
+    session for session in sessions
+    if session["session_id"] == sys.argv[2]
+    and session["worker_session_id"] == sys.argv[3]
+]
+assert matches
+assert matches[0]["status"] == "Running"
+assert matches[0]["evidence_receipts"][0]["bundle_sha256"] == "f" * 64
+assert matches[0]["evidence_receipts"][0]["event_count"] == 2
 PY
 
 cargo run --locked -q -p agentbox-cli -- minipod-spec remote-smoke-long --risk medium --workspace "$TMPDIR/workspace" \

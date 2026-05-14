@@ -153,6 +153,7 @@ cargo run -p agentbox-remote-worker -- \
   --listen 127.0.0.1:8787 \
   --worker worker.local/dev \
   --evidence-endpoint https://worker.example.com/agentpod/evidence \
+  --state-dir .agentbox/remote-worker \
   --signing-key-hex 0000000000000000000000000000000000000000000000000000000000000001
 ```
 
@@ -161,6 +162,9 @@ acknowledgements using the Ed25519 format described above and exposes the same
 `/handshake`, `/sessions`, `/sessions/{worker_session_id}/exec`,
 `/sessions/{worker_session_id}/evidence`, and
 `/sessions/{worker_session_id}/destroy` routes expected by the HTTPS adapter.
+When `--state-dir` is set, created sessions, stopped status, and evidence
+receipt metadata are written to `worker-sessions.json` and loaded again when the
+worker starts.
 
 This is still a contract worker, not the final sandboxed remote execution
 engine. The `exec` route runs the provided argv directly, without invoking a
@@ -169,12 +173,13 @@ Exec now requires a created, running worker session, so the worker will not
 accept an arbitrary `worker_session_id` before `/sessions` has allocated it.
 Evidence upload validates the evidence metadata and records an in-memory receipt
 on the matching worker session before acknowledging the bundle hash and event
-count.
+count. With `--state-dir`, those receipts are also persisted in the worker state
+snapshot.
 When the daemon-side provider creates a remote session, it persists the worker
 endpoint, worker session id, worker identity, and worker evidence endpoint in
 session labels so later exec/destroy calls can route back to the same worker.
-Workspace materialization, policy enforcement, credential handoff, evidence
-durability, and durable worker supervision remain future work.
+Workspace materialization, policy enforcement, credential handoff, full evidence
+bundle storage, and supervised worker restarts remain future work.
 
 `scripts/smoke-remote-worker.sh` starts this worker on a random loopback port,
 posts a handshake descriptor, checks the Ed25519 acknowledgement shape, creates

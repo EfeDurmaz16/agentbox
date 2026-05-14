@@ -8,5 +8,6 @@ agentbox-daemon = { path = "../agentbox-daemon" }
 axum = { workspace = true }
 chrono = { workspace = true }
 ed25519-dalek = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
 tokio = { workspace = true }
-

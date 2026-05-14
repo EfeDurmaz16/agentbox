@@ -14,6 +14,11 @@ async fn main() {
         options.evidence_endpoint,
         signing_key,
     );
+    let config = if let Some(state_dir) = options.state_dir {
+        config.with_state_dir(state_dir)
+    } else {
+        config
+    };
     if let Err(err) = serve(options.listen, config).await {
         eprintln!("error: remote worker failed: {err}");
         std::process::exit(1);
@@ -25,6 +30,7 @@ struct Options {
     worker_identity: String,
     evidence_endpoint: String,
     signing_key_hex: String,
+    state_dir: Option<String>,
 }
 
 impl Options {
@@ -33,6 +39,7 @@ impl Options {
         let mut worker_identity = "worker.local/dev".to_string();
         let mut evidence_endpoint = "https://worker.example.com/agentpod/evidence".to_string();
         let mut signing_key_hex = None;
+        let mut state_dir = None;
         let mut args = std::env::args().skip(1);
         while let Some(arg) = args.next() {
             match arg.as_str() {
@@ -51,6 +58,9 @@ impl Options {
                 }
                 "--signing-key-hex" => {
                     signing_key_hex = Some(next_value(&mut args, "--signing-key-hex"));
+                }
+                "--state-dir" => {
+                    state_dir = Some(next_value(&mut args, "--state-dir"));
                 }
                 "--help" | "-h" => {
                     print_help();
@@ -73,6 +83,7 @@ impl Options {
             worker_identity,
             evidence_endpoint,
             signing_key_hex,
+            state_dir,
         }
     }
 }
@@ -86,6 +97,6 @@ fn next_value(args: &mut impl Iterator<Item = String>, flag: &str) -> String {
 
 fn print_help() {
     eprintln!(
-        "usage: agentbox-remote-worker --signing-key-hex <64-hex-seed> [--listen 127.0.0.1:8787] [--worker worker.local/dev] [--evidence-endpoint https://worker.example.com/agentpod/evidence]"
+        "usage: agentbox-remote-worker --signing-key-hex <64-hex-seed> [--listen 127.0.0.1:8787] [--worker worker.local/dev] [--evidence-endpoint https://worker.example.com/agentpod/evidence] [--state-dir .agentbox/remote-worker]"
     );
 }
