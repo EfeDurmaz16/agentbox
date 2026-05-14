@@ -317,7 +317,7 @@ async fn create_session(
         .lock()
         .await
         .insert(worker_session_id.clone(), session);
-    persist_sessions(&state).await;
+    persist_sessions(&state).await.map_err(worker_state_error)?;
     Ok(Json(RemoteAgentPodCreateSessionResponse {
         session_id: request.spec.id.clone(),
         worker_session_id,
@@ -718,7 +718,7 @@ async fn record_stored_evidence_bundle(
             });
     }
     drop(sessions);
-    persist_sessions(state).await;
+    persist_sessions(state).await.map_err(worker_state_error)?;
     Ok(())
 }
 
@@ -745,7 +745,7 @@ async fn accept_evidence(
     };
     session.evidence_receipts.push(receipt.clone());
     drop(sessions);
-    persist_sessions(state).await;
+    persist_sessions(state).await.map_err(worker_state_error)?;
     Ok(receipt)
 }
 
@@ -801,7 +801,7 @@ async fn destroy_session(
     }
     session.mark_stopped();
     drop(sessions);
-    persist_sessions(&state).await;
+    persist_sessions(&state).await.map_err(worker_state_error)?;
     Ok(Json(RemoteAgentPodDestroySessionResponse {
         session_id: request.session_id,
         worker_session_id: request.worker_session_id,
@@ -840,9 +840,9 @@ fn load_persisted_sessions(
         .collect())
 }
 
-async fn persist_sessions(state: &Arc<RemoteWorkerState>) {
+async fn persist_sessions(state: &Arc<RemoteWorkerState>) -> Result<(), String> {
     let Some(path) = worker_state_path(&state.config) else {
-        return;
+        return Ok(());
     };
     let snapshots = {
         let sessions = state.sessions.lock().await;
@@ -851,13 +851,29 @@ async fn persist_sessions(state: &Arc<RemoteWorkerState>) {
             .map(|(worker_session_id, session)| session.to_snapshot(worker_session_id.clone()))
             .collect::<Vec<_>>()
     };
-    let Ok(contents) = serde_json::to_string_pretty(&snapshots) else {
-        return;
-    };
+    let contents = serde_json::to_string_pretty(&snapshots)
+        .map_err(|err| format!("failed to serialize remote worker state: {err}"))?;
     if let Some(parent) = path.parent() {
-        let _ = tokio::fs::create_dir_all(parent).await;
+        tokio::fs::create_dir_all(parent).await.map_err(|err| {
+            format!(
+                "failed to prepare remote worker state directory {}: {err}",
+                parent.display()
+            )
+        })?;
     }
-    let _ = tokio::fs::write(path, contents).await;
+    tokio::fs::write(&path, contents).await.map_err(|err| {
+        format!(
+            "failed to write remote worker state {}: {err}",
+            path.display()
+        )
+    })
+}
+
+fn worker_state_error(message: String) -> (StatusCode, Json<WorkerError>) {
+    worker_error(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        format!("agentbox remote worker could not persist session state: {message}"),
+    )
 }
 
 fn worker_state_path(config: &RemoteWorkerConfig) -> Option<PathBuf> {
@@ -1491,7 +1507,7 @@ mod tests {
             .await
             .insert("worker-session-1".into(), session);
 
-        persist_sessions(&state).await;
+        persist_sessions(&state).await.unwrap();
         let loaded = load_persisted_sessions(&config).unwrap();
 
         let session = loaded.get("worker-session-1").unwrap();
@@ -1520,5 +1536,32 @@ mod tests {
             .storage_path
             .ends_with("evidence/worker-session-1/bundle.json"));
         let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn create_session_reports_state_persistence_failures() {
+        let state_dir = std::env::temp_dir().join(format!(
+            "agentbox-remote-worker-state-file-{}.json",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&state_dir);
+        let _ = std::fs::remove_file(&state_dir);
+        std::fs::create_dir_all(&state_dir).unwrap();
+        let config = RemoteWorkerConfig::new(
+            "worker.local/dev",
+            "https://worker.example.com/agentpod/evidence",
+            SigningKey::from_bytes(&[37_u8; 32]),
+        )
+        .with_state_dir(&state_dir);
+        let state = test_state(config);
+        let request = create_session_request(std::env::temp_dir());
+
+        let err = create_session(State(state), Json(request))
+            .await
+            .unwrap_err();
+
+        assert_eq!(err.0, StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(err.1 .0.error.contains("could not persist session state"));
+        let _ = std::fs::remove_dir_all(state_dir);
     }
 }
