@@ -67,4 +67,31 @@ assert data["result"]["stdout"] == "remote-worker-smoke"
 assert "EvidenceSealed" in data["lifecycle_events"]
 PY
 
+curl -fsS "http://127.0.0.1:${PORT}/sessions/worker-smoke-long/exec" \
+  -H 'content-type: application/json' \
+  --data '{"session_id":"session-smoke-long","worker_session_id":"worker-smoke-long","command":{"argv":["sleep","5"],"working_dir":null,"env":{},"timeout_seconds":30}}' \
+  >"$TMPDIR/killed-exec-response.json" &
+EXEC_CURL_PID="$!"
+sleep 0.2
+curl -fsS "http://127.0.0.1:${PORT}/sessions/worker-smoke-long/destroy" \
+  -H 'content-type: application/json' \
+  --data '{"session_id":"session-smoke-long","worker_session_id":"worker-smoke-long","reason":"smoke kill","kill_switch_required":true}' \
+  >"$TMPDIR/destroy-response.json"
+wait "$EXEC_CURL_PID"
+
+python3 - "$TMPDIR/killed-exec-response.json" "$TMPDIR/destroy-response.json" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], "r", encoding="utf-8") as fh:
+    killed = json.load(fh)
+with open(sys.argv[2], "r", encoding="utf-8") as fh:
+    destroyed = json.load(fh)
+
+assert killed["result"]["exit_code"] == 130
+assert "killed" in killed["result"]["stderr"]
+assert "KillSwitchAck" in destroyed["lifecycle_events"]
+assert "WorkerDestroyed" in destroyed["lifecycle_events"]
+PY
+
 echo "remote worker smoke passed on 127.0.0.1:${PORT}"

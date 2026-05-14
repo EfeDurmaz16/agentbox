@@ -173,7 +173,9 @@ storage, and kill-switch process control remain future work.
 
 `scripts/smoke-remote-worker.sh` starts this worker on a random loopback port,
 posts a handshake descriptor, checks the Ed25519 acknowledgement shape, runs a
-direct `printf` exec request, and verifies the returned lifecycle evidence.
+direct `printf` exec request, verifies the returned lifecycle evidence, then
+starts a long-running command and proves destroy sends a kill signal that returns
+exit code `130` plus `KillSwitchAck`.
 
 ## Lifecycle Contract
 

@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Instant;
@@ -16,6 +17,7 @@ use axum::{Json, Router};
 use chrono::Duration;
 use ed25519_dalek::{Signer, SigningKey};
 use tokio::process::Command;
+use tokio::sync::{watch, Mutex};
 use tokio::time;
 
 #[derive(Clone)]
@@ -43,9 +45,14 @@ impl RemoteWorkerConfig {
     }
 }
 
-#[derive(Clone)]
 struct RemoteWorkerState {
     config: RemoteWorkerConfig,
+    sessions: Mutex<HashMap<String, WorkerSessionControl>>,
+}
+
+#[derive(Clone)]
+struct WorkerSessionControl {
+    kill_tx: watch::Sender<bool>,
 }
 
 pub fn router(config: RemoteWorkerConfig) -> Router {
@@ -61,7 +68,10 @@ pub fn router(config: RemoteWorkerConfig) -> Router {
             "/sessions/{worker_session_id}/destroy",
             post(destroy_session),
         )
-        .with_state(Arc::new(RemoteWorkerState { config }))
+        .with_state(Arc::new(RemoteWorkerState {
+            config,
+            sessions: Mutex::new(HashMap::new()),
+        }))
 }
 
 pub async fn serve(addr: SocketAddr, config: RemoteWorkerConfig) -> std::io::Result<()> {
@@ -100,11 +110,19 @@ async fn handshake(
 }
 
 async fn create_session(
+    State(state): State<Arc<RemoteWorkerState>>,
     Json(request): Json<RemoteAgentPodCreateSessionRequest>,
 ) -> Json<RemoteAgentPodCreateSessionResponse> {
+    let worker_session_id = format!("worker-{}", request.spec.id);
+    let (kill_tx, _kill_rx) = watch::channel(false);
+    state
+        .sessions
+        .lock()
+        .await
+        .insert(worker_session_id.clone(), WorkerSessionControl { kill_tx });
     Json(RemoteAgentPodCreateSessionResponse {
         session_id: request.spec.id.clone(),
-        worker_session_id: format!("worker-{}", request.spec.id),
+        worker_session_id,
         status: RuntimeStatus::Running,
         lifecycle_events: vec![
             RemoteAgentPodLifecycleEvent::WorkerAllocated,
@@ -114,10 +132,12 @@ async fn create_session(
 }
 
 async fn exec_command(
+    State(state): State<Arc<RemoteWorkerState>>,
     Json(request): Json<RemoteAgentPodExecRequest>,
 ) -> Json<RemoteAgentPodExecResponse> {
     let started = Instant::now();
-    let result = execute_command(request, started).await;
+    let kill_rx = session_kill_receiver(&state, &request.worker_session_id).await;
+    let result = execute_command(request, started, kill_rx).await;
     Json(RemoteAgentPodExecResponse {
         result,
         lifecycle_events: vec![
@@ -128,7 +148,27 @@ async fn exec_command(
     })
 }
 
-async fn execute_command(request: RemoteAgentPodExecRequest, started: Instant) -> CommandResult {
+async fn session_kill_receiver(
+    state: &Arc<RemoteWorkerState>,
+    worker_session_id: &str,
+) -> watch::Receiver<bool> {
+    let mut sessions = state.sessions.lock().await;
+    if let Some(control) = sessions.get(worker_session_id).cloned() {
+        return control.kill_tx.subscribe();
+    }
+    let (kill_tx, kill_rx) = watch::channel(false);
+    sessions.insert(
+        worker_session_id.to_string(),
+        WorkerSessionControl { kill_tx },
+    );
+    kill_rx
+}
+
+async fn execute_command(
+    request: RemoteAgentPodExecRequest,
+    started: Instant,
+    mut kill_rx: watch::Receiver<bool>,
+) -> CommandResult {
     let Some(program) = request.command.argv.first() else {
         return CommandResult {
             exit_code: 127,
@@ -146,27 +186,47 @@ async fn execute_command(request: RemoteAgentPodExecRequest, started: Instant) -
     }
     command.kill_on_drop(true);
 
-    let output = if let Some(timeout_seconds) = request.command.timeout_seconds {
-        match time::timeout(
-            std::time::Duration::from_secs(timeout_seconds),
-            command.output(),
-        )
-        .await
-        {
-            Ok(output) => output,
-            Err(_) => {
+    if *kill_rx.borrow() {
+        return CommandResult {
+            exit_code: 130,
+            stdout: String::new(),
+            stderr: "agentbox remote worker command killed before start".to_string(),
+            duration_ms: elapsed_ms(started),
+        };
+    }
+
+    let timeout_seconds = request.command.timeout_seconds;
+    let timeout_sleep = time::sleep(std::time::Duration::from_secs(
+        timeout_seconds.unwrap_or(365 * 24 * 60 * 60),
+    ));
+    tokio::pin!(timeout_sleep);
+    let output_future = command.output();
+    tokio::pin!(output_future);
+
+    let output = tokio::select! {
+        output = &mut output_future => output,
+        killed = wait_for_kill(&mut kill_rx) => {
+            if killed {
                 return CommandResult {
-                    exit_code: 124,
+                    exit_code: 130,
                     stdout: String::new(),
-                    stderr: format!(
-                        "agentbox remote worker command timed out after {timeout_seconds}s"
-                    ),
+                    stderr: "agentbox remote worker command killed by session destroy".to_string(),
                     duration_ms: elapsed_ms(started),
                 };
             }
+            output_future.await
         }
-    } else {
-        command.output().await
+        _ = &mut timeout_sleep, if timeout_seconds.is_some() => {
+            return CommandResult {
+                exit_code: 124,
+                stdout: String::new(),
+                stderr: format!(
+                    "agentbox remote worker command timed out after {}s",
+                    timeout_seconds.unwrap_or_default()
+                ),
+                duration_ms: elapsed_ms(started),
+            };
+        }
     };
 
     match output {
@@ -183,6 +243,15 @@ async fn execute_command(request: RemoteAgentPodExecRequest, started: Instant) -
             duration_ms: elapsed_ms(started),
         },
     }
+}
+
+async fn wait_for_kill(kill_rx: &mut watch::Receiver<bool>) -> bool {
+    while kill_rx.changed().await.is_ok() {
+        if *kill_rx.borrow() {
+            return true;
+        }
+    }
+    false
 }
 
 fn elapsed_ms(started: Instant) -> u64 {
@@ -202,8 +271,17 @@ async fn upload_evidence(
 }
 
 async fn destroy_session(
+    State(state): State<Arc<RemoteWorkerState>>,
     Json(request): Json<RemoteAgentPodDestroySessionRequest>,
 ) -> Json<RemoteAgentPodDestroySessionResponse> {
+    if let Some(control) = state
+        .sessions
+        .lock()
+        .await
+        .remove(&request.worker_session_id)
+    {
+        let _ = control.kill_tx.send(true);
+    }
     Json(RemoteAgentPodDestroySessionResponse {
         session_id: request.session_id,
         worker_session_id: request.worker_session_id,
@@ -251,10 +329,18 @@ fn decode_hex_nibble(value: u8) -> Result<u8, String> {
 mod tests {
     use super::*;
     use agentbox_daemon::runtime::providers::remote::{
-        Ed25519HandshakeVerifier, RemoteAgentPodAuthKind, RemoteAgentPodHandshakeVerifier,
+        Ed25519HandshakeVerifier, RemoteAgentPodAuthKind, RemoteAgentPodDestroySessionRequest,
+        RemoteAgentPodHandshakeVerifier,
     };
     use agentbox_daemon::runtime::types::ExecCommand;
     use std::collections::HashMap;
+
+    fn test_state(config: RemoteWorkerConfig) -> Arc<RemoteWorkerState> {
+        Arc::new(RemoteWorkerState {
+            config,
+            sessions: Mutex::new(HashMap::new()),
+        })
+    }
 
     #[tokio::test]
     async fn handshake_response_is_ed25519_verifiable() {
@@ -271,11 +357,7 @@ mod tests {
         )
         .unwrap();
 
-        let Json(ack) = handshake(
-            State(Arc::new(RemoteWorkerState { config })),
-            Json(descriptor.clone()),
-        )
-        .await;
+        let Json(ack) = handshake(State(test_state(config)), Json(descriptor.clone())).await;
 
         let verified = Ed25519HandshakeVerifier
             .verify(&descriptor, &ack, descriptor.created_at)
@@ -304,7 +386,14 @@ mod tests {
             },
         };
 
-        let response = exec_command(Json(request)).await.0;
+        let config = RemoteWorkerConfig::new(
+            "worker.local/dev",
+            "https://worker.example.com/agentpod/evidence",
+            SigningKey::from_bytes(&[22_u8; 32]),
+        );
+        let response = exec_command(State(test_state(config)), Json(request))
+            .await
+            .0;
 
         assert_eq!(response.result.exit_code, 0);
         assert_eq!(response.result.stdout, "hello-agentbox");
@@ -327,9 +416,63 @@ mod tests {
             },
         };
 
-        let response = exec_command(Json(request)).await.0;
+        let config = RemoteWorkerConfig::new(
+            "worker.local/dev",
+            "https://worker.example.com/agentpod/evidence",
+            SigningKey::from_bytes(&[23_u8; 32]),
+        );
+        let response = exec_command(State(test_state(config)), Json(request))
+            .await
+            .0;
 
         assert_eq!(response.result.exit_code, 127);
         assert!(response.result.stderr.contains("empty argv"));
+    }
+
+    #[tokio::test]
+    async fn destroy_session_kills_running_command() {
+        let config = RemoteWorkerConfig::new(
+            "worker.local/dev",
+            "https://worker.example.com/agentpod/evidence",
+            SigningKey::from_bytes(&[24_u8; 32]),
+        );
+        let state = test_state(config);
+        let (kill_tx, _kill_rx) = watch::channel(false);
+        state
+            .sessions
+            .lock()
+            .await
+            .insert("worker-session-1".into(), WorkerSessionControl { kill_tx });
+        let request = RemoteAgentPodExecRequest {
+            session_id: "session-1".into(),
+            worker_session_id: "worker-session-1".into(),
+            command: ExecCommand {
+                argv: vec!["sleep".into(), "5".into()],
+                working_dir: None,
+                env: HashMap::new(),
+                timeout_seconds: Some(30),
+            },
+        };
+        let exec_state = state.clone();
+        let exec =
+            tokio::spawn(async move { exec_command(State(exec_state), Json(request)).await });
+
+        time::sleep(std::time::Duration::from_millis(100)).await;
+        let destroy = destroy_session(
+            State(state),
+            Json(RemoteAgentPodDestroySessionRequest {
+                session_id: "session-1".into(),
+                worker_session_id: "worker-session-1".into(),
+                reason: "test kill".into(),
+                kill_switch_required: true,
+            }),
+        )
+        .await
+        .0;
+        let response = exec.await.unwrap().0;
+
+        assert_eq!(destroy.status, RuntimeStatus::Stopped);
+        assert_eq!(response.result.exit_code, 130);
+        assert!(response.result.stderr.contains("killed"));
     }
 }
