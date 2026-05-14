@@ -2,25 +2,36 @@ use crate::classify::{Bucket, Classification, CommandContext, PolicyConfig};
 
 /// Extract domain from a URL string. Returns None if parsing fails.
 fn extract_domain(url: &str) -> Option<String> {
-    let without_scheme = if let Some(rest) = url.strip_prefix("https://") {
-        rest
+    let url = url.trim();
+    let (scheme, rest) = url.split_once("://")?;
+    if !matches!(scheme.to_ascii_lowercase().as_str(), "http" | "https") {
+        return None;
+    }
+
+    let authority = rest
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or(rest)
+        .rsplit('@')
+        .next()
+        .unwrap_or("");
+
+    let host = if let Some(bracketed) = authority.strip_prefix('[') {
+        bracketed.split_once(']')?.0
     } else {
-        url.strip_prefix("http://")?
+        let mut parts = authority.split(':');
+        let host = parts.next().unwrap_or("");
+        match (host, parts.next(), parts.next()) {
+            (host, None, None) | (host, Some(_), None) => host,
+            _ => return None,
+        }
     };
-    let host_port = without_scheme.split('/').next().unwrap_or(without_scheme);
-    let host_port = host_port.split('?').next().unwrap_or(host_port);
-    let host = if host_port.contains(':') {
-        host_port
-            .rsplit_once(':')
-            .map(|(h, _)| h)
-            .unwrap_or(host_port)
-    } else {
-        host_port
-    };
-    if host.is_empty() {
+
+    let host = host.trim().trim_end_matches('.').to_ascii_lowercase();
+    if host.is_empty() || host.chars().any(char::is_whitespace) {
         None
     } else {
-        Some(host.to_lowercase())
+        Some(host)
     }
 }
 
@@ -889,5 +900,46 @@ mod tests {
             extract_domain("https://example.com"),
             Some("example.com".into())
         );
+    }
+
+    #[test]
+    fn test_extract_domain_edge_cases() {
+        assert_eq!(
+            extract_domain("HTTPS://Example.COM:443/path?q=https://evil.example"),
+            Some("example.com".into())
+        );
+        assert_eq!(
+            extract_domain("https://user:pass@api.github.com/repos#readme"),
+            Some("api.github.com".into())
+        );
+        assert_eq!(extract_domain("http://[::1]:8080/path"), Some("::1".into()));
+        assert_eq!(
+            extract_domain("https://example.com."),
+            Some("example.com".into())
+        );
+        assert_eq!(extract_domain("ftp://example.com"), None);
+        assert_eq!(extract_domain("https:///missing-host"), None);
+        assert_eq!(extract_domain("https://exa mple.com"), None);
+        assert_eq!(extract_domain("https://2001:db8::1/path"), None);
+    }
+
+    #[test]
+    fn test_domain_allowlist_does_not_match_suffix_tricks() {
+        let config = PolicyConfig {
+            allowed_domains: vec!["github.com".into()],
+            ..Default::default()
+        };
+
+        let c = classify(&ctx("curl", &["https://evilgithub.com/repos"]), &config);
+        assert_eq!(c.bucket, Bucket::Approve);
+
+        let c = classify(
+            &ctx("curl", &["https://github.com.evil.com/repos"]),
+            &config,
+        );
+        assert_eq!(c.bucket, Bucket::Approve);
+
+        let c = classify(&ctx("curl", &["https://api.github.com/repos"]), &config);
+        assert_eq!(c.bucket, Bucket::Allow);
     }
 }
