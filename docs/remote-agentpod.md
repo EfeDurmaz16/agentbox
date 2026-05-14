@@ -142,6 +142,31 @@ Agentbox rejects evidence upload metadata that embeds secret material, carries a
 invalid bundle hash, or accepts a different bundle than the one submitted. The
 actual evidence stream/storage backend is still future work.
 
+## Contract Worker Binary
+
+The repository now includes `agentbox-remote-worker`, a minimal Axum worker
+server for exercising the remote contract:
+
+```sh
+cargo run -p agentbox-remote-worker -- \
+  --listen 127.0.0.1:8787 \
+  --worker worker.local/dev \
+  --evidence-endpoint https://worker.example.com/agentpod/evidence \
+  --signing-key-hex 0000000000000000000000000000000000000000000000000000000000000001
+```
+
+The worker requires an explicit 32-byte hex Ed25519 seed. It signs handshake
+acknowledgements using the Ed25519 format described above and exposes the same
+`/handshake`, `/sessions`, `/sessions/{worker_session_id}/exec`,
+`/sessions/{worker_session_id}/evidence`, and
+`/sessions/{worker_session_id}/destroy` routes expected by the HTTPS adapter.
+
+This is still a contract worker, not the final remote execution engine. The
+`exec` route returns lifecycle evidence and a non-zero command result instead of
+running arbitrary commands. Real command execution, workspace materialization,
+credential handoff, evidence storage, and kill-switch process control remain
+future work.
+
 ## Lifecycle Contract
 
 Remote workers must eventually prove lifecycle events rather than only returning

@@ -5,6 +5,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
 CLI=(cargo run --locked -q -p agentbox-cli --)
+REMOTE_WORKER=(cargo run --locked -q -p agentbox-remote-worker --)
 TMPDIR="$(mktemp -d)"
 trap 'rm -rf "$TMPDIR"' EXIT
 
@@ -134,6 +135,13 @@ if "${CLI[@]}" remote-evidence \
   --bundle-sha256 not-a-sha256 \
   --event-count 3 >/tmp/agentbox-invalid-remote-evidence.out 2>/tmp/agentbox-invalid-remote-evidence.err; then
   echo "remote-evidence accepted an invalid bundle digest" >&2
+  exit 1
+fi
+
+log "checking remote worker binary contract"
+"${REMOTE_WORKER[@]}" --help >/tmp/agentbox-remote-worker-help.out 2>/tmp/agentbox-remote-worker-help.err
+if "${REMOTE_WORKER[@]}" >/tmp/agentbox-remote-worker-missing-key.out 2>/tmp/agentbox-remote-worker-missing-key.err; then
+  echo "remote worker started without an explicit signing key" >&2
   exit 1
 fi
 
