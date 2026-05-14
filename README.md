@@ -231,6 +231,8 @@ Runtime sessions can also capture Git workspace diff snapshots as evidence
 references for later AGIT lineage attachment.
 Session evidence bundles include redacted command transcripts so operators can
 inspect what ran without storing raw credential-like output.
+They also include metadata-only replay steps linked to audit hashes; Agentbox
+does not automatically rerun side-effecting commands from evidence bundles.
 For macOS specifically, see
 [docs/macos-minipod-limitations.md](docs/macos-minipod-limitations.md).
 For file boundaries, see

@@ -644,6 +644,7 @@ pub struct SessionEvidenceBundle {
     pub boundary_events: Vec<SessionEvidenceEvent>,
     #[serde(default)]
     pub transcripts: Vec<CommandTranscript>,
+    pub replay: SessionReplayMetadata,
     pub generated_at: DateTime<Utc>,
 }
 
@@ -662,6 +663,8 @@ impl SessionEvidenceBundle {
             }
         }
 
+        let replay = SessionReplayMetadata::from_session_events(session, events);
+
         Self {
             schema_version: 1,
             bundle_id: Ulid::new().to_string(),
@@ -675,7 +678,80 @@ impl SessionEvidenceBundle {
             commands,
             boundary_events,
             transcripts: session.transcripts.clone(),
+            replay,
             generated_at: Utc::now(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionReplayMetadata {
+    pub schema_version: i64,
+    pub replay_id: String,
+    pub session_id: String,
+    pub provider: String,
+    pub platform: String,
+    pub replayable: bool,
+    pub limitations: Vec<String>,
+    pub steps: Vec<SessionReplayStep>,
+    pub generated_at: DateTime<Utc>,
+}
+
+impl SessionReplayMetadata {
+    pub fn from_session_events(session: &RuntimeSession, events: &[AuditEvent]) -> Self {
+        let steps = events
+            .iter()
+            .enumerate()
+            .map(|(index, event)| SessionReplayStep::from_audit_event(index as i64 + 1, event))
+            .collect();
+
+        Self {
+            schema_version: 1,
+            replay_id: Ulid::new().to_string(),
+            session_id: session.id.clone(),
+            provider: session.provider.clone(),
+            platform: session.platform.clone(),
+            replayable: false,
+            limitations: vec![
+                "metadata-only: Agentbox does not rerun commands from evidence bundles".into(),
+                "external side effects require operator review before manual replay".into(),
+                "transcripts are redacted and may be truncated".into(),
+            ],
+            steps,
+            generated_at: Utc::now(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionReplayStep {
+    pub schema_version: i64,
+    pub sequence: i64,
+    pub timestamp: String,
+    pub audit_event_id: String,
+    pub event_hash: Option<String>,
+    pub previous_event_hash: Option<String>,
+    pub command: String,
+    pub working_dir: String,
+    pub policy_bucket: String,
+    pub decision: String,
+    pub parent_process: Option<String>,
+}
+
+impl SessionReplayStep {
+    pub fn from_audit_event(sequence: i64, event: &AuditEvent) -> Self {
+        Self {
+            schema_version: 1,
+            sequence,
+            timestamp: event.timestamp.clone(),
+            audit_event_id: event.id.clone(),
+            event_hash: event.event_hash.clone(),
+            previous_event_hash: event.prev_hash.clone(),
+            command: event.command.clone(),
+            working_dir: event.cwd.clone(),
+            policy_bucket: event.bucket.clone(),
+            decision: event.decision.clone(),
+            parent_process: event.parent_process.clone(),
         }
     }
 }
@@ -1125,7 +1201,64 @@ mod tests {
         assert_eq!(bundle.boundary_events.len(), 1);
         assert_eq!(bundle.transcripts.len(), 1);
         assert_eq!(bundle.transcripts[0].stdout.text, "hello");
+        assert_eq!(bundle.replay.session_id, session.id);
+        assert_eq!(bundle.replay.steps.len(), 3);
+        assert!(!bundle.replay.replayable);
+        assert_eq!(bundle.replay.steps[0].sequence, 1);
+        assert_eq!(bundle.replay.steps[1].policy_bucket, "approve");
         assert_eq!(bundle.manifest.agent.name, "openclaw");
+    }
+
+    #[test]
+    fn session_replay_metadata_preserves_hash_chain_references() {
+        let spec = MinipodSpec::for_agent_task("openclaw", "/tmp/agentbox-work");
+        let session = RuntimeSession::new(
+            spec.name.clone(),
+            "agentpod-linux".into(),
+            "linux".into(),
+            spec,
+        );
+        let mut first = AuditEvent::new(
+            1,
+            Some("openclaw".into()),
+            format!("runtime.create {}", session.id),
+            "/tmp/agentbox-work".into(),
+            "runtime".into(),
+            "created".into(),
+            None,
+            Some("agentpod-linux".into()),
+        );
+        first.event_hash = Some("hash-1".into());
+        let mut second = AuditEvent::new(
+            1,
+            Some("openclaw".into()),
+            format!("runtime.exec {} echo hello", session.id),
+            "/tmp/agentbox-work".into(),
+            "runtime".into(),
+            "exit_code:0".into(),
+            None,
+            Some("agentpod-linux".into()),
+        );
+        second.prev_hash = first.event_hash.clone();
+        second.event_hash = Some("hash-2".into());
+
+        let replay = SessionReplayMetadata::from_session_events(&session, &[first, second]);
+
+        assert_eq!(replay.schema_version, 1);
+        assert_eq!(replay.session_id, session.id);
+        assert_eq!(replay.provider, "agentpod-linux");
+        assert!(!replay.replayable);
+        assert_eq!(replay.steps.len(), 2);
+        assert_eq!(replay.steps[1].sequence, 2);
+        assert_eq!(replay.steps[1].event_hash.as_deref(), Some("hash-2"));
+        assert_eq!(
+            replay.steps[1].previous_event_hash.as_deref(),
+            Some("hash-1")
+        );
+        assert!(replay
+            .limitations
+            .iter()
+            .any(|limitation| limitation.contains("metadata-only")));
     }
 
     #[test]
