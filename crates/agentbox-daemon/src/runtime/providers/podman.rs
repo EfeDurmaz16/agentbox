@@ -9,7 +9,9 @@ use crate::pod::types::{
     NetworkMode as PodNetworkMode, NetworkPolicy as PodNetworkPolicy, PodSession, PodSpec,
     PodStatus, ReadinessProbe, ResourceLimits,
 };
-use crate::runtime::provider::{RuntimeError, RuntimeProvider};
+use crate::runtime::provider::{
+    ProviderFamily, ProviderImplementationStatus, RuntimeError, RuntimeProvider,
+};
 use crate::runtime::types::{
     CommandResult, CredentialGrantKind, ExecCommand, MinipodSpec, MountKind, MountMode,
     NetworkMode, RuntimeCapability, RuntimeSession, RuntimeStatus,
@@ -35,6 +37,14 @@ impl RuntimeProvider for PodmanRuntimeProvider {
 
     fn platform(&self) -> &str {
         "linux-vm"
+    }
+
+    fn family(&self) -> ProviderFamily {
+        ProviderFamily::Compatibility
+    }
+
+    fn implementation_status(&self) -> ProviderImplementationStatus {
+        ProviderImplementationStatus::Experimental
     }
 
     fn capabilities(&self) -> &[RuntimeCapability] {
@@ -316,6 +326,11 @@ mod tests {
             "podman compatibility adapter must not claim domain or packet enforcement"
         );
         assert_network_enforcement_metadata(&provider, &[]);
+        assert_eq!(provider.family(), ProviderFamily::Compatibility);
+        assert_eq!(
+            provider.implementation_status(),
+            ProviderImplementationStatus::Experimental
+        );
     }
 
     #[test]

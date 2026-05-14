@@ -2204,12 +2204,13 @@ fn cmd_providers() {
     use agentbox_daemon::runtime::registry::RuntimeProviderRegistry;
 
     println!(
-        "{:<18} {:<10} {:<14} {:<24} CAPABILITIES",
-        "PROVIDER", "PLATFORM", "STATUS", "NETWORK"
+        "{:<18} {:<14} {:<10} {:<18} {:<24} CAPABILITIES",
+        "PROVIDER", "FAMILY", "PLATFORM", "STATUS", "NETWORK"
     );
-    println!("{}", "-".repeat(116));
+    println!("{}", "-".repeat(132));
     println!(
-        "{:<18} {:<10} {:<14} {:<24} shim, policy, approval, audit",
+        "{:<18} {:<14} {:<10} {:<18} {:<24} shim, policy, approval, audit",
+        "direct-host",
         "direct-host",
         std::env::consts::OS,
         "shipped",
@@ -2236,10 +2237,11 @@ fn cmd_providers() {
             .collect::<Vec<_>>()
             .join(", ");
         println!(
-            "{:<18} {:<10} {:<14} {:<24} {}",
+            "{:<18} {:<14} {:<10} {:<18} {:<24} {}",
             provider.name(),
+            format_provider_family(provider.family()),
             provider.platform(),
-            "planned",
+            format_provider_status(provider.implementation_status()),
             format_network_enforcement(provider.network_enforcement_capabilities()),
             capabilities
         );
@@ -2256,9 +2258,38 @@ fn cmd_providers() {
         "unavailable"
     };
     println!(
-        "{:<18} {:<10} {:<14} {:<24} container isolation, shim bridge",
-        "podman", "linux-vm", podman_status, "none"
+        "{:<18} {:<14} {:<10} {:<18} {:<24} container isolation, shim bridge",
+        "podman", "compat", "linux-vm", podman_status, "none"
     );
+}
+
+fn format_provider_family(
+    family: agentbox_daemon::runtime::provider::ProviderFamily,
+) -> &'static str {
+    use agentbox_daemon::runtime::provider::ProviderFamily;
+
+    match family {
+        ProviderFamily::DirectHost => "direct-host",
+        ProviderFamily::NativeSandbox => "native",
+        ProviderFamily::VmBacked => "vm-backed",
+        ProviderFamily::Remote => "remote",
+        ProviderFamily::Compatibility => "compat",
+    }
+}
+
+fn format_provider_status(
+    status: agentbox_daemon::runtime::provider::ProviderImplementationStatus,
+) -> &'static str {
+    use agentbox_daemon::runtime::provider::ProviderImplementationStatus;
+
+    match status {
+        ProviderImplementationStatus::Shipped => "shipped",
+        ProviderImplementationStatus::Experimental => "experimental",
+        ProviderImplementationStatus::PrototypePrimitive => "prototype",
+        ProviderImplementationStatus::DescriptorOnly => "descriptor-only",
+        ProviderImplementationStatus::Planned => "planned",
+        ProviderImplementationStatus::Unavailable => "unavailable",
+    }
 }
 
 fn format_network_enforcement(

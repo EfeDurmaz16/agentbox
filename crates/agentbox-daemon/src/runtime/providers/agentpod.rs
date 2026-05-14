@@ -1,6 +1,8 @@
 use async_trait::async_trait;
 
-use crate::runtime::provider::{RuntimeError, RuntimeProvider};
+use crate::runtime::provider::{
+    ProviderFamily, ProviderImplementationStatus, RuntimeError, RuntimeProvider,
+};
 use crate::runtime::types::{
     CommandResult, ExecCommand, MinipodSpec, RuntimeCapability, RuntimeSession, RuntimeStatus,
 };
@@ -151,6 +153,18 @@ impl RuntimeProvider for AgentPodProvider {
         self.kind.platform()
     }
 
+    fn family(&self) -> ProviderFamily {
+        match self.kind {
+            AgentPodProviderKind::MacOs => ProviderFamily::VmBacked,
+            AgentPodProviderKind::Linux => ProviderFamily::NativeSandbox,
+            AgentPodProviderKind::Windows => ProviderFamily::NativeSandbox,
+        }
+    }
+
+    fn implementation_status(&self) -> ProviderImplementationStatus {
+        ProviderImplementationStatus::DescriptorOnly
+    }
+
     fn capabilities(&self) -> &[RuntimeCapability] {
         self.kind.capabilities()
     }
@@ -243,6 +257,11 @@ mod tests {
             ],
         );
         assert_unavailable_provider_contract(&provider).await;
+        assert_eq!(provider.family(), ProviderFamily::NativeSandbox);
+        assert_eq!(
+            provider.implementation_status(),
+            ProviderImplementationStatus::DescriptorOnly
+        );
         assert!(
             provider.network_enforcement_capabilities().is_empty(),
             "unavailable AgentPod descriptors must not claim active network enforcement"

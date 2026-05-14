@@ -7,6 +7,25 @@ use crate::runtime::types::{
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderFamily {
+    DirectHost,
+    NativeSandbox,
+    VmBacked,
+    Remote,
+    Compatibility,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderImplementationStatus {
+    Shipped,
+    Experimental,
+    PrototypePrimitive,
+    DescriptorOnly,
+    Planned,
+    Unavailable,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuntimeErrorKind {
     NotFound,
     AlreadyExists,
@@ -84,6 +103,14 @@ pub trait RuntimeProvider: Send + Sync {
     fn name(&self) -> &str;
 
     fn platform(&self) -> &str;
+
+    fn family(&self) -> ProviderFamily {
+        ProviderFamily::Compatibility
+    }
+
+    fn implementation_status(&self) -> ProviderImplementationStatus {
+        ProviderImplementationStatus::Experimental
+    }
 
     fn capabilities(&self) -> &[RuntimeCapability];
 
@@ -268,5 +295,14 @@ mod tests {
             assert_eq!(error.is_retryable(), retryable, "{error:?}");
             assert_eq!(error.is_user_actionable(), user_actionable, "{error:?}");
         }
+    }
+
+    #[test]
+    fn provider_truth_metadata_has_stable_debug_labels() {
+        assert_eq!(format!("{:?}", ProviderFamily::DirectHost), "DirectHost");
+        assert_eq!(
+            format!("{:?}", ProviderImplementationStatus::DescriptorOnly),
+            "DescriptorOnly"
+        );
     }
 }
