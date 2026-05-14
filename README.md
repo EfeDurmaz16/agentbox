@@ -235,6 +235,8 @@ See [docs/glossary.md](docs/glossary.md) for the Agentbox vocabulary:
 AgentPod, minipod, boundary, provider, authority, evidence, and host bridge.
 See [docs/mac-mini-replacement-wedge.md](docs/mac-mini-replacement-wedge.md)
 for the local-software-boundary wedge and its limits.
+See [docs/release-readiness.md](docs/release-readiness.md) for the release
+gate before tagging public builds.
 Evidence records can now be mapped into FIDES-style signed action drafts and
 AGIT-style lineage drafts, but both intentionally require external authority or
 adapter code before claiming live integration.

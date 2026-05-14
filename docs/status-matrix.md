@@ -79,6 +79,8 @@ See [glossary](glossary.md) for the canonical meanings of AgentPod, minipod,
 boundary, policy, authority, evidence, provider, and host bridge.
 See [Mac mini replacement wedge](mac-mini-replacement-wedge.md) for the local
 software-boundary positioning and its limits.
+See [release readiness](release-readiness.md) for the checklist before tagging
+public builds.
 See [macOS minipod limitations](macos-minipod-limitations.md) for the current
 VM-backed boundary and native enforcement gap.
 See [safe file sharing](safe-file-sharing.md) for current workspace, read-only
