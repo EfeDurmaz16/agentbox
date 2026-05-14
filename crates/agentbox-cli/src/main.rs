@@ -83,6 +83,10 @@ enum Commands {
         #[arg(long = "mount-ro")]
         read_only_mounts: Vec<String>,
 
+        /// Add an explicit credential file grant as name=host_path:guest_path
+        #[arg(long = "credential-file")]
+        credential_files: Vec<String>,
+
         /// Network domain allowed without first-contact approval
         #[arg(long = "allow-domain")]
         allow_domains: Vec<String>,
@@ -152,6 +156,10 @@ enum Commands {
         /// Add a read-only host mount as host_path:guest_path
         #[arg(long = "mount-ro")]
         read_only_mounts: Vec<String>,
+
+        /// Add an explicit credential file grant as name=host_path:guest_path
+        #[arg(long = "credential-file")]
+        credential_files: Vec<String>,
     },
     /// List runtime providers and their current implementation status
     Providers,
@@ -784,15 +792,18 @@ fn cmd_install() {
     println!("  source ~/.zshrc");
 }
 
-async fn cmd_run(
+struct RunOptions {
     command: Vec<String>,
     runtime: Option<String>,
     services: Vec<String>,
     mount_cwd: bool,
     memory: u64,
     read_only_mounts: Vec<String>,
+    credential_files: Vec<String>,
     allow_domains: Vec<String>,
-) {
+}
+
+async fn cmd_run(options: RunOptions) {
     use agentbox_daemon::audit::AuditStore;
     use agentbox_daemon::config;
     use agentbox_daemon::pod::machine::MachineManager;
@@ -860,7 +871,7 @@ async fn cmd_run(
     );
 
     // 4. Build governed MinipodSpec
-    let workspace = if mount_cwd {
+    let workspace = if options.mount_cwd {
         std::env::current_dir().unwrap_or_else(|e| {
             eprintln!("Error: failed to determine current directory: {}", e);
             std::process::exit(1);
@@ -868,22 +879,23 @@ async fn cmd_run(
     } else {
         std::env::temp_dir()
     };
-    let agent_name = command
+    let agent_name = options
+        .command
         .first()
         .cloned()
-        .or_else(|| runtime.clone())
+        .or_else(|| options.runtime.clone())
         .unwrap_or_else(|| "agent".to_string());
     let mut spec = MinipodSpec::for_agent_task(agent_name, workspace);
-    spec.agent.command = if command.is_empty() {
+    spec.agent.command = if options.command.is_empty() {
         vec!["sleep".to_string(), "infinity".to_string()]
     } else {
-        command.clone()
+        options.command.clone()
     };
     spec.resources = ResourcePolicy {
-        memory_bytes: memory * 1024 * 1024,
+        memory_bytes: options.memory * 1024 * 1024,
         ..ResourcePolicy::default()
     };
-    if let Some(runtime) = runtime.as_deref() {
+    if let Some(runtime) = options.runtime.as_deref() {
         spec.labels
             .insert("agentbox.runtime".to_string(), runtime.to_string());
         spec.labels.insert(
@@ -891,16 +903,22 @@ async fn cmd_run(
             runtime_image(runtime).to_string(),
         );
     }
-    spec.services = services
+    spec.services = options
+        .services
         .iter()
         .filter_map(|service| service_spec(service))
         .collect();
-    for mount in read_only_mounts {
+    for mount in options.read_only_mounts {
         spec.filesystem.mounts.push(parse_read_only_mount(&mount));
     }
-    if !allow_domains.is_empty() {
+    for grant in options.credential_files {
+        let (mount, credential_grant) = parse_credential_file_grant(&grant);
+        spec.filesystem.mounts.push(mount);
+        spec.credentials.grants.push(credential_grant);
+    }
+    if !options.allow_domains.is_empty() {
         spec.network.mode = NetworkMode::AllowListed;
-        spec.network.allowed_domains = allow_domains;
+        spec.network.allowed_domains = options.allow_domains;
     }
 
     // 5. Print progress and create minipod through RuntimeManager
@@ -957,13 +975,13 @@ async fn cmd_run(
     };
 
     // 6. If command was provided, run it
-    if !command.is_empty() {
+    if !options.command.is_empty() {
         println!();
-        println!("Running: {}", command.join(" "));
+        println!("Running: {}", options.command.join(" "));
         println!("--- output ---");
 
         let exec_req = ExecCommand {
-            argv: command.clone(),
+            argv: options.command.clone(),
             working_dir: Some("/workspace".to_string()),
             env: HashMap::new(),
             timeout_seconds: None,
@@ -1919,6 +1937,7 @@ fn cmd_minipod_spec(
     workspace: Option<PathBuf>,
     allow_domains: Vec<String>,
     read_only_mounts: Vec<String>,
+    credential_files: Vec<String>,
 ) {
     use agentbox_daemon::runtime::policy::validate_minipod_spec;
     use agentbox_daemon::runtime::types::{MinipodSpec, NetworkMode};
@@ -1937,6 +1956,11 @@ fn cmd_minipod_spec(
     }
     for mount in read_only_mounts {
         spec.filesystem.mounts.push(parse_read_only_mount(&mount));
+    }
+    for grant in credential_files {
+        let (mount, credential_grant) = parse_credential_file_grant(&grant);
+        spec.filesystem.mounts.push(mount);
+        spec.credentials.grants.push(credential_grant);
     }
 
     if let Err(e) = validate_minipod_spec(&spec) {
@@ -1970,6 +1994,55 @@ fn parse_read_only_mount(raw: &str) -> agentbox_daemon::runtime::types::MountRul
         mode: MountMode::ReadOnly,
         kind: MountKind::ReadOnlyHost,
     }
+}
+
+fn parse_credential_file_grant(
+    raw: &str,
+) -> (
+    agentbox_daemon::runtime::types::MountRule,
+    agentbox_daemon::runtime::types::CredentialGrant,
+) {
+    use agentbox_daemon::runtime::types::{
+        CredentialGrant, CredentialGrantKind, MountKind, MountMode, MountRule,
+    };
+
+    let Some((name, paths)) = raw.split_once('=') else {
+        eprintln!("error: invalid --credential-file value `{}`", raw);
+        eprintln!("hint: expected name=host_path:guest_path");
+        std::process::exit(1);
+    };
+    let Some((host_path, guest_path)) = paths.split_once(':') else {
+        eprintln!("error: invalid --credential-file value `{}`", raw);
+        eprintln!("hint: expected name=host_path:guest_path");
+        std::process::exit(1);
+    };
+    if name.trim().is_empty() || host_path.trim().is_empty() || guest_path.trim().is_empty() {
+        eprintln!("error: invalid --credential-file value `{}`", raw);
+        eprintln!("hint: name, host_path, and guest_path must all be non-empty");
+        std::process::exit(1);
+    }
+    if host_path.ends_with('/') || PathBuf::from(host_path).is_dir() {
+        eprintln!("error: --credential-file must point to a single credential file");
+        eprintln!("hint: do not grant whole credential directories");
+        std::process::exit(1);
+    }
+
+    let host_path = PathBuf::from(host_path);
+    (
+        MountRule {
+            host_path: host_path.clone(),
+            guest_path: guest_path.to_string(),
+            mode: MountMode::ReadOnly,
+            kind: MountKind::Credential,
+        },
+        CredentialGrant {
+            name: name.to_string(),
+            kind: CredentialGrantKind::FileMount,
+            target: host_path.display().to_string(),
+            one_time: true,
+            requires_approval: true,
+        },
+    )
 }
 
 fn cmd_providers() {
@@ -2197,17 +2270,19 @@ async fn main() {
             mount_cwd,
             memory,
             read_only_mounts,
+            credential_files,
             allow_domains,
         } => {
-            cmd_run(
+            cmd_run(RunOptions {
                 command,
                 runtime,
                 services,
                 mount_cwd,
                 memory,
                 read_only_mounts,
+                credential_files,
                 allow_domains,
-            )
+            })
             .await
         }
         Commands::StopPod { pod_id } => cmd_stop_pod(pod_id).await,
@@ -2227,7 +2302,14 @@ async fn main() {
             workspace,
             allow_domains,
             read_only_mounts,
-        } => cmd_minipod_spec(agent, workspace, allow_domains, read_only_mounts),
+            credential_files,
+        } => cmd_minipod_spec(
+            agent,
+            workspace,
+            allow_domains,
+            read_only_mounts,
+            credential_files,
+        ),
         Commands::Providers => cmd_providers(),
         Commands::MinipodInspect { session_id, json } => cmd_minipod_inspect(session_id, json),
         Commands::MinipodLogs {
