@@ -12,6 +12,25 @@ pub enum AgentPodProviderKind {
     Windows,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentPodPrimitive {
+    AppleVirtualization,
+    EndpointSecurity,
+    NetworkExtension,
+    UserNamespaces,
+    MountNamespaces,
+    PidNamespaces,
+    CgroupsV2,
+    Landlock,
+    Seccomp,
+    EBpf,
+    Nftables,
+    JobObjects,
+    AppContainer,
+    Wfp,
+    Etw,
+}
+
 impl AgentPodProviderKind {
     pub fn current_platform_candidate() -> Self {
         if cfg!(target_os = "macos") {
@@ -69,6 +88,32 @@ impl AgentPodProviderKind {
             ],
         }
     }
+
+    fn planned_primitives(&self) -> &'static [AgentPodPrimitive] {
+        match self {
+            Self::MacOs => &[
+                AgentPodPrimitive::AppleVirtualization,
+                AgentPodPrimitive::EndpointSecurity,
+                AgentPodPrimitive::NetworkExtension,
+            ],
+            Self::Linux => &[
+                AgentPodPrimitive::UserNamespaces,
+                AgentPodPrimitive::MountNamespaces,
+                AgentPodPrimitive::PidNamespaces,
+                AgentPodPrimitive::CgroupsV2,
+                AgentPodPrimitive::Landlock,
+                AgentPodPrimitive::Seccomp,
+                AgentPodPrimitive::EBpf,
+                AgentPodPrimitive::Nftables,
+            ],
+            Self::Windows => &[
+                AgentPodPrimitive::JobObjects,
+                AgentPodPrimitive::AppContainer,
+                AgentPodPrimitive::Wfp,
+                AgentPodPrimitive::Etw,
+            ],
+        }
+    }
 }
 
 pub struct AgentPodProvider {
@@ -82,6 +127,10 @@ impl AgentPodProvider {
 
     pub fn current_platform_candidate() -> Self {
         Self::new(AgentPodProviderKind::current_platform_candidate())
+    }
+
+    pub fn planned_primitives(&self) -> &[AgentPodPrimitive] {
+        self.kind.planned_primitives()
     }
 
     fn unavailable(&self) -> RuntimeError {
@@ -188,5 +237,28 @@ mod tests {
             ],
         );
         assert_unavailable_provider_contract(&provider).await;
+    }
+
+    #[test]
+    fn linux_agentpod_scaffold_names_kernel_primitives_without_claiming_execution() {
+        let provider = AgentPodProvider::new(AgentPodProviderKind::Linux);
+
+        assert_eq!(provider.name(), "agentpod-linux");
+        assert!(!provider.planned_primitives().is_empty());
+        assert!(provider
+            .planned_primitives()
+            .contains(&AgentPodPrimitive::UserNamespaces));
+        assert!(provider
+            .planned_primitives()
+            .contains(&AgentPodPrimitive::CgroupsV2));
+        assert!(provider
+            .planned_primitives()
+            .contains(&AgentPodPrimitive::Landlock));
+        assert!(provider
+            .planned_primitives()
+            .contains(&AgentPodPrimitive::Seccomp));
+        assert!(provider
+            .planned_primitives()
+            .contains(&AgentPodPrimitive::EBpf));
     }
 }
