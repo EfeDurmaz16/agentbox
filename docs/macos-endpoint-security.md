@@ -131,6 +131,10 @@ code without installing a system extension:
   `CommandMediation` and `FileGrant` requests, so the future privileged macOS
   client can reuse the same policy/evidence boundary instead of inventing a
   separate policy path.
+- Network Extension outbound flow requests carry destination host, protocol,
+  port, process subject, and flow id, and map into the existing host bridge
+  `NetworkFirstContact` request.
 
 This is protocol shape only. There is still no privileged ES client, no kernel
-authorization callback, and no live allow/deny enforcement on macOS.
+authorization callback, no Network Extension provider, and no live allow/deny
+enforcement on macOS.

@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use crate::runtime::bridge::{
     CommandMediationRequest, FileGrantRequest, HostBridgeDecision, HostBridgeRequest,
-    HostBridgeTransportKind,
+    HostBridgeTransportKind, NetworkFirstContactRequest,
 };
 use crate::runtime::provider::RuntimeError;
 use crate::runtime::types::{
@@ -213,6 +213,83 @@ impl MacOsAgentPodExecutionPlan {
 
 pub fn macos_native_execution_enabled() -> bool {
     matches!(std::env::var("AGENTBOX_MACOS_NATIVE").as_deref(), Ok("1"))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MacOsNetworkFlowDirection {
+    Outbound,
+    Inbound,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MacOsNetworkExtensionFlowRequest {
+    pub schema_version: i64,
+    pub session_id: String,
+    pub flow_id: String,
+    pub direction: MacOsNetworkFlowDirection,
+    pub destination_host: String,
+    pub protocol: Option<String>,
+    pub port: Option<u16>,
+    pub process: MacOsEndpointSecuritySubject,
+    pub observed_at: DateTime<Utc>,
+}
+
+impl MacOsNetworkExtensionFlowRequest {
+    pub fn outbound(
+        session_id: impl Into<String>,
+        flow_id: impl Into<String>,
+        destination_host: impl Into<String>,
+        protocol: Option<String>,
+        port: Option<u16>,
+        process: MacOsEndpointSecuritySubject,
+    ) -> Result<Self, RuntimeError> {
+        let session_id = session_id.into();
+        if session_id.trim().is_empty() {
+            return Err(RuntimeError::ManifestRejected(
+                "macOS Network Extension flow session id cannot be empty".into(),
+            ));
+        }
+        let flow_id = flow_id.into();
+        if flow_id.trim().is_empty() {
+            return Err(RuntimeError::ManifestRejected(
+                "macOS Network Extension flow id cannot be empty".into(),
+            ));
+        }
+        let destination_host = destination_host.into();
+        if destination_host.trim().is_empty() {
+            return Err(RuntimeError::ManifestRejected(
+                "macOS Network Extension destination host cannot be empty".into(),
+            ));
+        }
+
+        Ok(Self {
+            schema_version: 1,
+            session_id,
+            flow_id,
+            direction: MacOsNetworkFlowDirection::Outbound,
+            destination_host,
+            protocol,
+            port,
+            process,
+            observed_at: Utc::now(),
+        })
+    }
+
+    pub fn to_host_bridge_request(&self) -> Result<HostBridgeRequest, RuntimeError> {
+        if !matches!(self.direction, MacOsNetworkFlowDirection::Outbound) {
+            return Err(RuntimeError::ManifestRejected(
+                "macOS Network Extension bridge request only supports outbound flows".into(),
+            ));
+        }
+        Ok(HostBridgeRequest::NetworkFirstContact(
+            NetworkFirstContactRequest {
+                destination: self.destination_host.clone(),
+                protocol: self.protocol.clone(),
+                port: self.port,
+                classified_risk: Some(format!("macos-ne-flow:{}", self.flow_id)),
+            },
+        ))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -673,5 +750,48 @@ mod tests {
 
         assert!(exec_err.to_string().contains("empty argv"));
         assert!(file_err.to_string().contains("target path"));
+    }
+
+    #[test]
+    fn network_extension_flow_maps_to_host_bridge_first_contact() {
+        let flow = MacOsNetworkExtensionFlowRequest::outbound(
+            "session-1",
+            "flow-1",
+            "api.openai.com",
+            Some("https".into()),
+            Some(443),
+            MacOsEndpointSecuritySubject::unsigned(47, "/usr/bin/curl"),
+        )
+        .unwrap();
+
+        let bridge = flow.to_host_bridge_request().unwrap();
+
+        match bridge {
+            HostBridgeRequest::NetworkFirstContact(network) => {
+                assert_eq!(network.destination, "api.openai.com");
+                assert_eq!(network.protocol.as_deref(), Some("https"));
+                assert_eq!(network.port, Some(443));
+                assert_eq!(
+                    network.classified_risk.as_deref(),
+                    Some("macos-ne-flow:flow-1")
+                );
+            }
+            other => panic!("unexpected bridge request: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn network_extension_flow_rejects_empty_destination() {
+        let err = MacOsNetworkExtensionFlowRequest::outbound(
+            "session-1",
+            "flow-2",
+            "",
+            Some("https".into()),
+            Some(443),
+            MacOsEndpointSecuritySubject::unsigned(48, "/usr/bin/curl"),
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("destination host"));
     }
 }
