@@ -239,6 +239,14 @@ impl MinipodSpec {
         let id = Ulid::new().to_string().to_lowercase();
         let short = &id[..12];
         let agent_name = agent_name.into();
+        let workspace = workspace.into();
+        let mut labels = HashMap::new();
+        labels.insert("agentbox.agent".to_string(), agent_name.clone());
+        labels.insert("agentbox.task".to_string(), id.clone());
+        labels.insert(
+            "agentbox.workspace".to_string(),
+            workspace.display().to_string(),
+        );
 
         Self {
             id: id.clone(),
@@ -253,7 +261,7 @@ impl MinipodSpec {
             credentials: CredentialPolicy::default(),
             resources: ResourcePolicy::default(),
             services: vec![],
-            labels: HashMap::new(),
+            labels,
             created_at: Utc::now(),
         }
     }
@@ -273,6 +281,17 @@ pub struct RuntimeSession {
 
 impl RuntimeSession {
     pub fn new(name: String, provider: String, platform: String, spec: MinipodSpec) -> Self {
+        let mut spec = spec;
+        spec.labels
+            .entry("agentbox.session".to_string())
+            .or_insert_with(|| spec.id.clone());
+        spec.labels
+            .entry("agentbox.provider".to_string())
+            .or_insert_with(|| provider.clone());
+        spec.labels
+            .entry("agentbox.platform".to_string())
+            .or_insert_with(|| platform.clone());
+
         Self {
             id: spec.id.clone(),
             name,
@@ -357,6 +376,18 @@ mod tests {
     }
 
     #[test]
+    fn minipod_spec_carries_standard_task_labels() {
+        let spec = MinipodSpec::for_agent_task("openclaw", "/tmp/agentbox-work");
+
+        assert_eq!(spec.labels.get("agentbox.agent"), Some(&"openclaw".into()));
+        assert_eq!(spec.labels.get("agentbox.task"), Some(&spec.id));
+        assert_eq!(
+            spec.labels.get("agentbox.workspace"),
+            Some(&"/tmp/agentbox-work".into())
+        );
+    }
+
+    #[test]
     fn protected_paths_include_common_credentials() {
         let spec = MinipodSpec::for_agent_task("hermes", "/tmp/agentbox-work");
         let classes: Vec<&SensitivePathClass> = spec
@@ -386,6 +417,18 @@ mod tests {
         assert_eq!(session.id, spec.id);
         assert_eq!(session.name, spec.name);
         assert_eq!(session.provider, "podman");
+        assert_eq!(
+            session.spec.labels.get("agentbox.session"),
+            Some(&session.id)
+        );
+        assert_eq!(
+            session.spec.labels.get("agentbox.provider"),
+            Some(&"podman".to_string())
+        );
+        assert_eq!(
+            session.spec.labels.get("agentbox.platform"),
+            Some(&"macos".to_string())
+        );
         assert!(matches!(session.status, RuntimeStatus::Creating));
     }
 
