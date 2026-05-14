@@ -6,7 +6,9 @@ use std::process::Command;
 use std::thread;
 use std::time::Duration;
 
-use agentbox_policy::classify::{Bucket, Classification, CommandContext};
+use agentbox_policy::classify::{
+    Bucket, Classification, CommandContext, PolicyConfig, PolicyNetworkMode,
+};
 use chrono::{NaiveDateTime, Utc};
 use clap::{Parser, Subcommand};
 use rusqlite::Connection;
@@ -59,6 +61,27 @@ enum Commands {
     Allow {
         /// Domain to allow (e.g. api.example.com)
         domain: String,
+    },
+    /// Explain network policy for a URL without making the request
+    NetworkExplain {
+        /// URL to classify, e.g. https://api.example.com/v1
+        url: String,
+
+        /// Network policy mode: deny-by-default, allowlisted, first-contact, open-with-guardrails
+        #[arg(long = "mode", default_value = "open-with-guardrails")]
+        mode: String,
+
+        /// Network domain allowed without first-contact approval
+        #[arg(long = "allow-domain")]
+        allow_domains: Vec<String>,
+
+        /// Network domain blocked by policy
+        #[arg(long = "deny-domain")]
+        deny_domains: Vec<String>,
+
+        /// Disable localhost/loopback service access
+        #[arg(long = "deny-localhost")]
+        deny_localhost: bool,
     },
     /// Run a command inside an isolated Agentbox minipod
     Run {
@@ -1524,6 +1547,88 @@ fn cmd_allow(domain: String) {
     println!("added {} to allowlist", domain);
 }
 
+fn cmd_network_explain(
+    url: String,
+    mode: String,
+    allow_domains: Vec<String>,
+    deny_domains: Vec<String>,
+    deny_localhost: bool,
+) {
+    let network_mode = parse_policy_network_mode(&mode);
+    let cwd = std::env::current_dir()
+        .map(|path| path.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| ".".to_string());
+    let ctx = CommandContext {
+        binary: "curl".to_string(),
+        args: vec![url.clone()],
+        cwd,
+        parent_process: Some("agentbox-cli".to_string()),
+        pid: std::process::id(),
+    };
+    let classification = agentbox_policy::classify::classify(
+        &ctx,
+        &PolicyConfig {
+            workspace: None,
+            allowed_domains: allow_domains,
+            denied_domains: deny_domains,
+            allow_localhost: !deny_localhost,
+            network_mode,
+            always_allow: vec![],
+            always_block: vec![],
+        },
+    );
+    let decision = match classification.bucket {
+        Bucket::Allow => "allowed",
+        Bucket::Approve => "approval required",
+        Bucket::Block => "blocked",
+    };
+
+    println!("Network explain");
+    println!("{}", "-".repeat(64));
+    println!("url:      {}", url);
+    println!("mode:     {}", format_policy_network_mode(network_mode));
+    println!("bucket:   {}", bucket_name(classification.bucket));
+    println!("decision: {}", decision);
+    println!("reason:   {}", classification.reason);
+    println!("scope:    command mediation only; no packet filtering is claimed");
+    if let Some(summary) = classification.notification_summary {
+        println!("prompt:   {}", summary);
+    }
+}
+
+fn parse_policy_network_mode(raw: &str) -> PolicyNetworkMode {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "none" => PolicyNetworkMode::None,
+        "deny" | "deny-by-default" | "deny_by_default" => PolicyNetworkMode::DenyByDefault,
+        "allowlist" | "allowlisted" | "allow-listed" => PolicyNetworkMode::AllowListed,
+        "first-contact" | "first_contact" | "approval-on-first-contact" => {
+            PolicyNetworkMode::ApprovalOnFirstContact
+        }
+        "open" | "open-with-guardrails" | "open_with_guardrails" => {
+            PolicyNetworkMode::OpenWithGuardrails
+        }
+        "host" => PolicyNetworkMode::Host,
+        other => {
+            eprintln!("error: invalid network mode `{}`", other);
+            eprintln!(
+                "hint: expected deny-by-default, allowlisted, first-contact, open-with-guardrails, none, or host"
+            );
+            std::process::exit(2);
+        }
+    }
+}
+
+fn format_policy_network_mode(mode: PolicyNetworkMode) -> &'static str {
+    match mode {
+        PolicyNetworkMode::None => "none",
+        PolicyNetworkMode::DenyByDefault => "deny-by-default",
+        PolicyNetworkMode::AllowListed => "allowlisted",
+        PolicyNetworkMode::ApprovalOnFirstContact => "first-contact",
+        PolicyNetworkMode::OpenWithGuardrails => "open-with-guardrails",
+        PolicyNetworkMode::Host => "host",
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
@@ -2971,6 +3076,13 @@ async fn main() {
         } => cmd_audit(limit, bucket, tail),
         Commands::Install => cmd_install(),
         Commands::Allow { domain } => cmd_allow(domain),
+        Commands::NetworkExplain {
+            url,
+            mode,
+            allow_domains,
+            deny_domains,
+            deny_localhost,
+        } => cmd_network_explain(url, mode, allow_domains, deny_domains, deny_localhost),
         Commands::Run {
             command,
             runtime,
