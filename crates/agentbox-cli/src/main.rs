@@ -138,6 +138,10 @@ enum Commands {
         #[arg(long = "plan")]
         plan: bool,
 
+        /// Emit machine-readable JSON for session/run output
+        #[arg(long)]
+        json: bool,
+
         /// Add a service sidecar (postgres, redis, mysql, mongo)
         #[arg(long = "with", num_args = 1..)]
         services: Vec<String>,
@@ -1120,6 +1124,7 @@ struct RunOptions {
     risk: String,
     provider: String,
     plan: bool,
+    json: bool,
     services: Vec<String>,
     mount_cwd: bool,
     workspace_mode: Option<String>,
@@ -1167,6 +1172,16 @@ struct RunPlanCandidate {
     name: String,
     family: String,
     status: String,
+}
+
+#[derive(Serialize)]
+struct RunJsonOutput {
+    schema_version: i64,
+    session: agentbox_daemon::runtime::types::RuntimeSession,
+    command_result: Option<agentbox_daemon::runtime::types::CommandResult>,
+    destroyed: bool,
+    cleanup_error: Option<String>,
+    cleanup_command: Option<String>,
 }
 
 async fn cmd_run(options: RunOptions) {
@@ -1483,60 +1498,64 @@ async fn cmd_run(options: RunOptions) {
         .get("agentbox.runtime_image")
         .cloned()
         .unwrap_or_else(|| "ubuntu:24.04".to_string());
-    println!("Creating governed minipod {}...", spec.name);
-    println!("  Risk: {}", spec.risk.label());
-    println!("  Workspace mode: {}", spec.workspace_mode.label());
-    println!("  Provider: {}", selection.selected_provider);
-    println!("  Selection: {}", selection.reason);
-    println!("  Image: {}", ws_image);
-    if let Some(projection) = &workspace_projection {
-        println!("  Review lower: {}", projection.lower_host_path.display());
+    if !options.json {
+        println!("Creating governed minipod {}...", spec.name);
+        println!("  Risk: {}", spec.risk.label());
+        println!("  Workspace mode: {}", spec.workspace_mode.label());
+        println!("  Provider: {}", selection.selected_provider);
+        println!("  Selection: {}", selection.reason);
+        println!("  Image: {}", ws_image);
+        if let Some(projection) = &workspace_projection {
+            println!("  Review lower: {}", projection.lower_host_path.display());
+            println!(
+                "  Review workspace: {}",
+                projection.projected_host_path.display()
+            );
+        }
+
+        if !spec.services.is_empty() {
+            let sidecars: Vec<String> = spec
+                .services
+                .iter()
+                .map(|service| format!("{} ({})", service.name, service.image))
+                .collect();
+            println!("  Sidecars: {}", sidecars.join(", "));
+        }
+
         println!(
-            "  Review workspace: {}",
-            projection.projected_host_path.display()
+            "  Mount: {} -> {} (rw)",
+            spec.filesystem.workspace_host_path.display(),
+            spec.filesystem.workspace_guest_path
         );
-    }
+        for mount in &spec.filesystem.mounts {
+            let ro = if matches!(
+                mount.mode,
+                agentbox_daemon::runtime::types::MountMode::ReadOnly
+            ) {
+                " (ro)"
+            } else {
+                " (rw)"
+            };
+            println!(
+                "  Mount: {} -> {}{}",
+                mount.host_path.display(),
+                mount.guest_path,
+                ro
+            );
+        }
 
-    if !spec.services.is_empty() {
-        let sidecars: Vec<String> = spec
-            .services
-            .iter()
-            .map(|service| format!("{} ({})", service.name, service.image))
-            .collect();
-        println!("  Sidecars: {}", sidecars.join(", "));
-    }
-
-    println!(
-        "  Mount: {} -> {} (rw)",
-        spec.filesystem.workspace_host_path.display(),
-        spec.filesystem.workspace_guest_path
-    );
-    for mount in &spec.filesystem.mounts {
-        let ro = if matches!(
-            mount.mode,
-            agentbox_daemon::runtime::types::MountMode::ReadOnly
-        ) {
-            " (ro)"
+        if selection.selected_provider == "podman" {
+            println!("  Agentbox: socket + shims injected");
         } else {
-            " (rw)"
-        };
-        println!(
-            "  Mount: {} -> {}{}",
-            mount.host_path.display(),
-            mount.guest_path,
-            ro
-        );
-    }
-
-    if selection.selected_provider == "podman" {
-        println!("  Agentbox: socket + shims injected");
-    } else {
-        println!("  Agentbox: native prototype executor");
+            println!("  Agentbox: native prototype executor");
+        }
     }
 
     let session = match manager.create(&spec).await {
         Ok(session) => {
-            println!("Minipod {} created and running.", session.name);
+            if !options.json {
+                println!("Minipod {} created and running.", session.name);
+            }
             session
         }
         Err(e) => {
@@ -1547,9 +1566,11 @@ async fn cmd_run(options: RunOptions) {
 
     // 6. If command was provided, run it
     if !options.command.is_empty() {
-        println!();
-        println!("Running: {}", options.command.join(" "));
-        println!("--- output ---");
+        if !options.json {
+            println!();
+            println!("Running: {}", options.command.join(" "));
+            println!("--- output ---");
+        }
 
         let exec_req = ExecCommand {
             argv: options.command.clone(),
@@ -1560,28 +1581,48 @@ async fn cmd_run(options: RunOptions) {
 
         match manager.exec(&session.id, &exec_req).await {
             Ok(result) => {
-                if !result.stdout.is_empty() {
-                    print!("{}", result.stdout);
-                }
-                if !result.stderr.is_empty() {
-                    eprint!("{}", result.stderr);
-                }
-                println!("--- exit code: {} ---", result.exit_code);
+                if options.json {
+                    let cleanup_error = manager
+                        .destroy(&session.id)
+                        .await
+                        .err()
+                        .map(|e| e.to_string());
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&RunJsonOutput {
+                            schema_version: 1,
+                            session: session.clone(),
+                            command_result: Some(result.clone()),
+                            destroyed: cleanup_error.is_none(),
+                            cleanup_error,
+                            cleanup_command: Some(format!("agentbox stop-pod {}", session.id)),
+                        })
+                        .expect("failed to serialize run JSON output")
+                    );
+                } else {
+                    if !result.stdout.is_empty() {
+                        print!("{}", result.stdout);
+                    }
+                    if !result.stderr.is_empty() {
+                        eprint!("{}", result.stderr);
+                    }
+                    println!("--- exit code: {} ---", result.exit_code);
 
-                // Cleanup prompt
-                eprint!("Destroy minipod {}? [Y/n] ", session.name);
-                io::stderr().flush().ok();
-                let mut input = String::new();
-                if io::stdin().read_line(&mut input).is_ok() {
-                    let answer = input.trim().to_lowercase();
-                    if answer.is_empty() || answer == "y" || answer == "yes" {
-                        if let Err(e) = manager.destroy(&session.id).await {
-                            eprintln!("Warning: failed to destroy minipod: {}", e);
+                    // Cleanup prompt
+                    eprint!("Destroy minipod {}? [Y/n] ", session.name);
+                    io::stderr().flush().ok();
+                    let mut input = String::new();
+                    if io::stdin().read_line(&mut input).is_ok() {
+                        let answer = input.trim().to_lowercase();
+                        if answer.is_empty() || answer == "y" || answer == "yes" {
+                            if let Err(e) = manager.destroy(&session.id).await {
+                                eprintln!("Warning: failed to destroy minipod: {}", e);
+                            } else {
+                                println!("Minipod {} destroyed.", session.name);
+                            }
                         } else {
-                            println!("Minipod {} destroyed.", session.name);
+                            println!("Minipod {} left running.", session.name);
                         }
-                    } else {
-                        println!("Minipod {} left running.", session.name);
                     }
                 }
 
@@ -1595,6 +1636,21 @@ async fn cmd_run(options: RunOptions) {
             }
         }
     } else {
+        if options.json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&RunJsonOutput {
+                    schema_version: 1,
+                    session: session.clone(),
+                    command_result: None,
+                    destroyed: false,
+                    cleanup_error: None,
+                    cleanup_command: Some(format!("agentbox stop-pod {}", session.id)),
+                })
+                .expect("failed to serialize run JSON output")
+            );
+            return;
+        }
         // 7. No command: print interactive instructions
         println!();
         println!("Minipod session running.");
@@ -3997,6 +4053,7 @@ async fn main() {
             risk,
             provider,
             plan,
+            json,
             services,
             mount_cwd,
             workspace_mode,
@@ -4021,6 +4078,7 @@ async fn main() {
                 risk,
                 provider,
                 plan,
+                json,
                 services,
                 mount_cwd,
                 workspace_mode,
