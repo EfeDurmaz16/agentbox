@@ -173,6 +173,9 @@ are being built. Podman is not the architecture; it is the bootstrap backend.
 # Run an agent in a governed local minipod
 agentbox run "openclaw start"
 
+# Preview the AgentPod run plan without requiring a runnable backend
+agentbox run --plan --risk high --workspace-mode overlay-review "codex"
+
 # Generate the governed minipod manifest without starting a backend
 agentbox minipod-spec hermes --workspace . --allow-domain api.openai.com
 
