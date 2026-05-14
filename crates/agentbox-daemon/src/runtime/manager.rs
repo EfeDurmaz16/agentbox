@@ -91,9 +91,17 @@ impl RuntimeManager {
         }
 
         let mut hydrated_command = command.clone();
-        hydrate_env_credential_grants(&session, &mut hydrated_command)?;
+        let consumed_credentials = hydrate_env_credential_grants(&session, &mut hydrated_command)?;
 
         let result = self.provider.exec(session_id, &hydrated_command).await?;
+        for grant in &consumed_credentials {
+            session.spec.credentials.grants.retain(|existing| {
+                !(existing.name == grant.name
+                    && existing.kind == grant.kind
+                    && existing.target == grant.target)
+            });
+            self.audit_credential_revocation(&session, grant, "one_time_exec")?;
+        }
         session
             .transcripts
             .push(CommandTranscript::from_command_result(
@@ -606,7 +614,8 @@ fn is_network_http_command(command: &ExecCommand) -> bool {
 fn hydrate_env_credential_grants(
     session: &RuntimeSession,
     command: &mut ExecCommand,
-) -> Result<(), RuntimeError> {
+) -> Result<Vec<CredentialGrant>, RuntimeError> {
+    let mut consumed = Vec::new();
     for grant in session
         .spec
         .credentials
@@ -621,8 +630,11 @@ fn hydrate_env_credential_grants(
             ))
         })?;
         command.env.insert(grant.name.clone(), value);
+        if grant.one_time {
+            consumed.push(grant.clone());
+        }
     }
-    Ok(())
+    Ok(consumed)
 }
 
 fn policy_network_mode(mode: &crate::runtime::types::NetworkMode) -> PolicyNetworkMode {
@@ -856,7 +868,48 @@ mod tests {
             let json = serde_json::to_string(transcript).unwrap();
             assert!(json.contains("<redacted>"));
             assert!(!json.contains("sk-test-secret"));
+            assert!(
+                saved.spec.credentials.grants.is_empty(),
+                "one-time env grants should be consumed after exposure"
+            );
+            let audit = manager.audit.recent(4).unwrap();
+            assert!(audit.iter().any(|event| event.bucket == "credential"
+                && event.command.contains("credential.revoke OPENAI_API_KEY")
+                && event.decision.contains("one_time_exec")));
         })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn exec_does_not_reuse_consumed_one_time_env_credential_grants() {
+        let manager = manager("exec-env-credential-once");
+        temp_env_var(
+            "AGENTBOX_TEST_ONCE_SECRET",
+            Some("sk-test-secret"),
+            || async {
+                let mut spec = MinipodSpec::for_agent_task("openclaw", "/tmp/agentbox-work");
+                spec.credentials.grants.push(CredentialGrant {
+                    name: "OPENAI_API_KEY".into(),
+                    kind: CredentialGrantKind::EnvVar,
+                    target: "AGENTBOX_TEST_ONCE_SECRET".into(),
+                    one_time: true,
+                    requires_approval: true,
+                });
+                let session = manager.create(&spec).await.unwrap();
+                let command = ExecCommand {
+                    argv: vec!["printenv".into(), "OPENAI_API_KEY".into()],
+                    working_dir: Some("/workspace".into()),
+                    env: Default::default(),
+                    timeout_seconds: None,
+                };
+
+                let first = manager.exec(&session.id, &command).await.unwrap();
+                let second = manager.exec(&session.id, &command).await.unwrap();
+
+                assert_eq!(first.stdout, "sk-test-secret");
+                assert_eq!(second.stdout, "");
+            },
+        )
         .await;
     }
 
