@@ -73,6 +73,8 @@ a network adapter yet. A conforming worker must:
 - emit `WorkerAllocated` and `SessionCreated` for session creation
 - emit `CommandStarted`, `CommandFinished`, and `EvidenceSealed` for command
   execution
+- emit `KillSwitchAck` and `WorkerDestroyed` for session destruction when the
+  kill switch is required
 
 The current test suite uses an in-memory fake transport to prove this schema and
 lifecycle ordering. `RemoteAgentPodProvider` still returns unavailable until a
@@ -84,6 +86,7 @@ API. It posts:
 - `POST /handshake`
 - `POST /sessions`
 - `POST /sessions/{worker_session_id}/exec`
+- `POST /sessions/{worker_session_id}/destroy`
 
 The adapter validates the same handshake, create, exec, and lifecycle evidence
 contracts before returning responses, and the handshake path now requires the

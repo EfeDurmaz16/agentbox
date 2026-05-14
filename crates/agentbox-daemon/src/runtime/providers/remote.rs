@@ -376,6 +376,51 @@ impl RemoteAgentPodExecResponse {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteAgentPodDestroySessionRequest {
+    pub session_id: String,
+    pub worker_session_id: String,
+    pub reason: String,
+    pub kill_switch_required: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteAgentPodDestroySessionResponse {
+    pub session_id: String,
+    pub worker_session_id: String,
+    pub status: RuntimeStatus,
+    pub lifecycle_events: Vec<RemoteAgentPodLifecycleEvent>,
+}
+
+impl RemoteAgentPodDestroySessionResponse {
+    pub fn validate_for(
+        &self,
+        request: &RemoteAgentPodDestroySessionRequest,
+    ) -> Result<(), RuntimeError> {
+        if self.session_id != request.session_id
+            || self.worker_session_id != request.worker_session_id
+        {
+            return Err(RuntimeError::ManifestRejected(
+                "remote AgentPod destroy response session ids do not match request".into(),
+            ));
+        }
+        if !matches!(self.status, RuntimeStatus::Stopped) {
+            return Err(RuntimeError::ManifestRejected(
+                "remote AgentPod destroy response must report stopped status".into(),
+            ));
+        }
+        let required = if request.kill_switch_required {
+            vec![
+                RemoteAgentPodLifecycleEvent::KillSwitchAck,
+                RemoteAgentPodLifecycleEvent::WorkerDestroyed,
+            ]
+        } else {
+            vec![RemoteAgentPodLifecycleEvent::WorkerDestroyed]
+        };
+        require_lifecycle_events(&self.lifecycle_events, &required, "destroy response")
+    }
+}
+
 #[async_trait]
 pub trait RemoteAgentPodTransport: Send + Sync {
     async fn handshake(
@@ -392,6 +437,11 @@ pub trait RemoteAgentPodTransport: Send + Sync {
         &self,
         request: RemoteAgentPodExecRequest,
     ) -> Result<RemoteAgentPodExecResponse, RuntimeError>;
+
+    async fn destroy_session(
+        &self,
+        request: RemoteAgentPodDestroySessionRequest,
+    ) -> Result<RemoteAgentPodDestroySessionResponse, RuntimeError>;
 }
 
 #[derive(Debug, Clone)]
@@ -500,6 +550,30 @@ impl RemoteAgentPodTransport for HttpRemoteAgentPodTransport {
                 ))
             })?;
         response.validate()?;
+        Ok(response)
+    }
+
+    async fn destroy_session(
+        &self,
+        request: RemoteAgentPodDestroySessionRequest,
+    ) -> Result<RemoteAgentPodDestroySessionResponse, RuntimeError> {
+        let response = self
+            .client
+            .post(self.route(format!("sessions/{}/destroy", request.worker_session_id)))
+            .json(&request)
+            .send()
+            .await
+            .map_err(|err| RuntimeError::Unavailable(format!("remote destroy failed: {err}")))?
+            .error_for_status()
+            .map_err(|err| RuntimeError::Unavailable(format!("remote destroy rejected: {err}")))?
+            .json::<RemoteAgentPodDestroySessionResponse>()
+            .await
+            .map_err(|err| {
+                RuntimeError::ManifestRejected(format!(
+                    "remote destroy response was invalid JSON: {err}"
+                ))
+            })?;
+        response.validate_for(&request)?;
         Ok(response)
     }
 }
@@ -726,6 +800,23 @@ mod tests {
             response.validate()?;
             Ok(response)
         }
+
+        async fn destroy_session(
+            &self,
+            request: RemoteAgentPodDestroySessionRequest,
+        ) -> Result<RemoteAgentPodDestroySessionResponse, RuntimeError> {
+            let response = RemoteAgentPodDestroySessionResponse {
+                session_id: request.session_id.clone(),
+                worker_session_id: request.worker_session_id.clone(),
+                status: RuntimeStatus::Stopped,
+                lifecycle_events: vec![
+                    RemoteAgentPodLifecycleEvent::KillSwitchAck,
+                    RemoteAgentPodLifecycleEvent::WorkerDestroyed,
+                ],
+            };
+            response.validate_for(&request)?;
+            Ok(response)
+        }
     }
 
     #[tokio::test]
@@ -808,6 +899,10 @@ mod tests {
         assert_eq!(
             transport.route("/sessions/worker-1/exec"),
             "https://worker.example.com/agentpod/sessions/worker-1/exec"
+        );
+        assert_eq!(
+            transport.route("sessions/worker-1/destroy"),
+            "https://worker.example.com/agentpod/sessions/worker-1/destroy"
         );
     }
 
@@ -1029,6 +1124,59 @@ mod tests {
         assert!(err.to_string().contains("EvidenceSealed"));
     }
 
+    #[test]
+    fn remote_destroy_response_requires_kill_switch_ack_when_requested() {
+        let request = RemoteAgentPodDestroySessionRequest {
+            session_id: "session-1".into(),
+            worker_session_id: "worker-session-1".into(),
+            reason: "operator stop".into(),
+            kill_switch_required: true,
+        };
+        let response = RemoteAgentPodDestroySessionResponse {
+            session_id: "session-1".into(),
+            worker_session_id: "worker-session-1".into(),
+            status: RuntimeStatus::Stopped,
+            lifecycle_events: vec![RemoteAgentPodLifecycleEvent::WorkerDestroyed],
+        };
+
+        let err = response.validate_for(&request).unwrap_err();
+
+        assert!(err.to_string().contains("KillSwitchAck"));
+    }
+
+    #[test]
+    fn remote_destroy_response_requires_stopped_status_and_matching_session() {
+        let request = RemoteAgentPodDestroySessionRequest {
+            session_id: "session-1".into(),
+            worker_session_id: "worker-session-1".into(),
+            reason: "operator stop".into(),
+            kill_switch_required: false,
+        };
+        let running_response = RemoteAgentPodDestroySessionResponse {
+            session_id: "session-1".into(),
+            worker_session_id: "worker-session-1".into(),
+            status: RuntimeStatus::Running,
+            lifecycle_events: vec![RemoteAgentPodLifecycleEvent::WorkerDestroyed],
+        };
+        let mismatched_response = RemoteAgentPodDestroySessionResponse {
+            session_id: "session-2".into(),
+            worker_session_id: "worker-session-1".into(),
+            status: RuntimeStatus::Stopped,
+            lifecycle_events: vec![RemoteAgentPodLifecycleEvent::WorkerDestroyed],
+        };
+
+        assert!(running_response
+            .validate_for(&request)
+            .unwrap_err()
+            .to_string()
+            .contains("stopped"));
+        assert!(mismatched_response
+            .validate_for(&request)
+            .unwrap_err()
+            .to_string()
+            .contains("session ids"));
+    }
+
     #[tokio::test]
     async fn fake_remote_transport_proves_contract_without_provider_execution() {
         let transport = RemoteAgentPodTransportDescriptor::new(
@@ -1046,6 +1194,7 @@ mod tests {
         let fake = FakeRemoteAgentPodTransport;
         let handshake_ack = fake.handshake(&handshake).await.unwrap();
         let spec = MinipodSpec::for_agent_task("remote-test", std::env::temp_dir());
+        let kill_switch_required = transport.kill_switch_required;
         let create = fake
             .create_session(RemoteAgentPodCreateSessionRequest {
                 transport,
@@ -1056,8 +1205,8 @@ mod tests {
             .unwrap();
         let exec = fake
             .exec_command(RemoteAgentPodExecRequest {
-                session_id: create.session_id,
-                worker_session_id: create.worker_session_id,
+                session_id: create.session_id.clone(),
+                worker_session_id: create.worker_session_id.clone(),
                 command: ExecCommand {
                     argv: vec!["true".into()],
                     working_dir: None,
@@ -1072,6 +1221,20 @@ mod tests {
         assert!(exec
             .lifecycle_events
             .contains(&RemoteAgentPodLifecycleEvent::EvidenceSealed));
+        let destroyed = fake
+            .destroy_session(RemoteAgentPodDestroySessionRequest {
+                session_id: create.session_id,
+                worker_session_id: create.worker_session_id,
+                reason: "test teardown".into(),
+                kill_switch_required,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(destroyed.status, RuntimeStatus::Stopped);
+        assert!(destroyed
+            .lifecycle_events
+            .contains(&RemoteAgentPodLifecycleEvent::KillSwitchAck));
 
         let provider = RemoteAgentPodProvider;
         assert_eq!(
