@@ -402,6 +402,104 @@ impl LinuxSeccompProfileLoader {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LinuxLandlockPlan {
+    pub schema_version: i64,
+    pub ruleset_name: String,
+    pub rules: Vec<LinuxLandlockRule>,
+    pub default_deny: bool,
+    pub requires_loader: bool,
+    pub requires_linux: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LinuxLandlockRule {
+    pub path: String,
+    pub access: Vec<LinuxLandlockAccess>,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LinuxLandlockAccess {
+    ReadFile,
+    ReadDir,
+    WriteFile,
+    MakeDir,
+    RemoveFile,
+    RemoveDir,
+    Execute,
+}
+
+pub struct LinuxLandlockRuleset;
+
+impl LinuxLandlockRuleset {
+    pub fn plan(spec: &MinipodSpec) -> Result<LinuxLandlockPlan, RuntimeError> {
+        if spec.filesystem.workspace_host_path.as_os_str().is_empty() {
+            return Err(RuntimeError::ManifestRejected(
+                "landlock workspace path cannot be empty".into(),
+            ));
+        }
+
+        let mut rules = vec![LinuxLandlockRule {
+            path: spec.filesystem.workspace_host_path.display().to_string(),
+            access: vec![
+                LinuxLandlockAccess::ReadFile,
+                LinuxLandlockAccess::ReadDir,
+                LinuxLandlockAccess::WriteFile,
+                LinuxLandlockAccess::MakeDir,
+                LinuxLandlockAccess::RemoveFile,
+                LinuxLandlockAccess::RemoveDir,
+                LinuxLandlockAccess::Execute,
+            ],
+            reason: "task workspace is the writable execution boundary".into(),
+        }];
+
+        for mount in &spec.filesystem.mounts {
+            let mut access = vec![
+                LinuxLandlockAccess::ReadFile,
+                LinuxLandlockAccess::ReadDir,
+                LinuxLandlockAccess::Execute,
+            ];
+            if matches!(mount.mode, MountMode::ReadWrite) {
+                access.extend([
+                    LinuxLandlockAccess::WriteFile,
+                    LinuxLandlockAccess::MakeDir,
+                    LinuxLandlockAccess::RemoveFile,
+                    LinuxLandlockAccess::RemoveDir,
+                ]);
+            }
+            rules.push(LinuxLandlockRule {
+                path: mount.host_path.display().to_string(),
+                access,
+                reason: format!("explicit {:?} mount", mount.kind),
+            });
+        }
+
+        Ok(LinuxLandlockPlan {
+            schema_version: 1,
+            ruleset_name: format!("agentbox-{}", spec.id),
+            rules,
+            default_deny: true,
+            requires_loader: true,
+            requires_linux: true,
+        })
+    }
+
+    #[cfg(target_os = "linux")]
+    pub fn apply(
+        _plan: &LinuxLandlockPlan,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        Err("Landlock rules are modeled but not wired to a Linux loader yet".into())
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    pub fn apply(
+        _plan: &LinuxLandlockPlan,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        Err("Linux Landlock is only available on Linux".into())
+    }
+}
+
 fn cpu_shares_to_cgroup_weight(cpu_shares: u32) -> u32 {
     let weight = ((cpu_shares.max(2) as u64 * 10_000) / 262_144).max(1);
     weight.min(10_000) as u32
@@ -642,6 +740,55 @@ mod tests {
     fn seccomp_apply_is_explicitly_linux_only() {
         let plan = LinuxSeccompProfileLoader::plan(&SeccompProfile::default()).unwrap();
         let err = LinuxSeccompProfileLoader::apply(&plan).unwrap_err();
+
+        assert!(err.to_string().contains("only available on Linux"));
+    }
+
+    #[test]
+    fn landlock_plan_allows_workspace_and_explicit_mounts_only() {
+        let mut spec = MinipodSpec::for_agent_task("hermes", "/tmp/agentbox-work");
+        spec.filesystem.mounts.push(MountRule {
+            host_path: PathBuf::from("/tmp/agentbox-fixtures"),
+            guest_path: "/fixtures".into(),
+            mode: MountMode::ReadOnly,
+            kind: MountKind::ReadOnlyHost,
+        });
+
+        let plan = LinuxLandlockRuleset::plan(&spec).unwrap();
+
+        assert_eq!(plan.schema_version, 1);
+        assert!(plan.default_deny);
+        assert!(plan.requires_loader);
+        assert_eq!(plan.rules.len(), 2);
+        assert_eq!(plan.rules[0].path, "/tmp/agentbox-work");
+        assert!(plan.rules[0]
+            .access
+            .contains(&LinuxLandlockAccess::WriteFile));
+        assert_eq!(plan.rules[1].path, "/tmp/agentbox-fixtures");
+        assert!(plan.rules[1]
+            .access
+            .contains(&LinuxLandlockAccess::ReadFile));
+        assert!(!plan.rules[1]
+            .access
+            .contains(&LinuxLandlockAccess::WriteFile));
+    }
+
+    #[test]
+    fn landlock_plan_rejects_empty_workspace() {
+        let mut spec = MinipodSpec::for_agent_task("hermes", "/tmp/agentbox-work");
+        spec.filesystem.workspace_host_path = PathBuf::new();
+
+        let err = LinuxLandlockRuleset::plan(&spec).unwrap_err();
+
+        assert!(matches!(err, RuntimeError::ManifestRejected(_)));
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn landlock_apply_is_explicitly_linux_only() {
+        let spec = MinipodSpec::for_agent_task("hermes", "/tmp/agentbox-work");
+        let plan = LinuxLandlockRuleset::plan(&spec).unwrap();
+        let err = LinuxLandlockRuleset::apply(&plan).unwrap_err();
 
         assert!(err.to_string().contains("only available on Linux"));
     }
