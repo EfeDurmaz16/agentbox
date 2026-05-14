@@ -67,11 +67,12 @@ agentbox run deploy-agent \
 ```
 
 Agentbox does not inherit the host environment by default. A runtime exec
-injects only the named host env target into the command environment, and denies
-the command if the host env target is missing. This is command-level mediation,
-not a complete secret manager: a process that receives the env value can still
-print it, copy it, or pass it to children. Transcripts are redacted, but the
-main control is explicit least-privilege exposure.
+injects only the named host env target into the command environment, denies the
+command if the host env target is missing, and consumes one-time env grants
+after exposure. This is command-level mediation, not a complete secret manager:
+a process that receives the env value can still print it, copy it, or pass it
+to children. Transcripts are redacted, but the main control is explicit
+least-privilege exposure.
 
 ## Listing And Revoking Grants
 
