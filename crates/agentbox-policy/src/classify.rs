@@ -37,7 +37,7 @@ pub struct Classification {
 }
 
 /// Policy configuration for context-rich classification.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct PolicyConfig {
     /// Current workspace/project root (commands within this are less risky)
     pub workspace: Option<String>,
@@ -45,10 +45,25 @@ pub struct PolicyConfig {
     pub allowed_domains: Vec<String>,
     /// Domains that are always blocked for network commands
     pub denied_domains: Vec<String>,
+    /// Whether localhost and loopback HTTP targets are available without approval
+    pub allow_localhost: bool,
     /// Commands that are always allowed (user overrides)
     pub always_allow: Vec<String>,
     /// Commands that are always blocked (user overrides)
     pub always_block: Vec<String>,
+}
+
+impl Default for PolicyConfig {
+    fn default() -> Self {
+        Self {
+            workspace: None,
+            allowed_domains: vec![],
+            denied_domains: vec![],
+            allow_localhost: true,
+            always_allow: vec![],
+            always_block: vec![],
+        }
+    }
 }
 
 /// Classify a command into a policy bucket using default (empty) config.

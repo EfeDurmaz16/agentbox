@@ -241,6 +241,7 @@ impl RuntimeManager {
                     .or_else(|| Some(session.spec.filesystem.workspace_guest_path.clone())),
                 allowed_domains: session.spec.network.allowed_domains.clone(),
                 denied_domains: session.spec.network.denied_domains.clone(),
+                allow_localhost: session.spec.network.allow_localhost,
                 always_allow: vec![],
                 always_block: vec![],
             },
@@ -595,6 +596,45 @@ mod tests {
             manager.session_approval_grants(&session.id).unwrap().len(),
             1
         );
+    }
+
+    #[tokio::test]
+    async fn exec_allows_localhost_when_minipod_policy_allows_it() {
+        let manager = manager("exec-localhost-allow");
+        let mut spec = MinipodSpec::for_agent_task("openclaw", "/tmp/agentbox-work");
+        spec.network.allow_localhost = true;
+        let session = manager.create(&spec).await.unwrap();
+        let command = ExecCommand {
+            argv: vec!["curl".into(), "http://localhost:3000/health".into()],
+            working_dir: Some("/workspace".into()),
+            env: Default::default(),
+            timeout_seconds: None,
+        };
+
+        let result = manager.exec(&session.id, &command).await.unwrap();
+
+        assert_eq!(result.exit_code, 0);
+    }
+
+    #[tokio::test]
+    async fn exec_blocks_localhost_when_minipod_policy_disables_it() {
+        let manager = manager("exec-localhost-block");
+        let mut spec = MinipodSpec::for_agent_task("openclaw", "/tmp/agentbox-work");
+        spec.network.allow_localhost = false;
+        let session = manager.create(&spec).await.unwrap();
+        let command = ExecCommand {
+            argv: vec!["curl".into(), "http://127.0.0.1:3000/health".into()],
+            working_dir: Some("/workspace".into()),
+            env: Default::default(),
+            timeout_seconds: None,
+        };
+
+        let err = manager.exec(&session.id, &command).await.unwrap_err();
+
+        assert!(matches!(err, RuntimeError::PolicyDenied(_)));
+        assert!(err
+            .to_string()
+            .contains("localhost service access disabled"));
     }
 
     #[tokio::test]

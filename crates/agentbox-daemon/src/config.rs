@@ -88,6 +88,7 @@ impl Config {
             workspace: self.workspace.clone(),
             allowed_domains: self.allowed_domains.clone(),
             denied_domains: self.denied_domains.clone(),
+            allow_localhost: true,
             always_allow: self.always_allow.clone(),
             always_block: self.always_block.clone(),
         }

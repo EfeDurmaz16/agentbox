@@ -106,6 +106,10 @@ enum Commands {
         /// Network domain blocked for this minipod task
         #[arg(long = "deny-domain")]
         deny_domains: Vec<String>,
+
+        /// Disable localhost/loopback service access for this minipod task
+        #[arg(long = "deny-localhost")]
+        deny_localhost: bool,
     },
     /// Stop and remove a minipod
     StopPod {
@@ -180,6 +184,10 @@ enum Commands {
         /// Network domain blocked for this minipod task
         #[arg(long = "deny-domain")]
         deny_domains: Vec<String>,
+
+        /// Disable localhost/loopback service access in the generated manifest
+        #[arg(long = "deny-localhost")]
+        deny_localhost: bool,
 
         /// Add a read-only host mount as host_path:guest_path
         #[arg(long = "mount-ro")]
@@ -837,6 +845,7 @@ struct RunOptions {
     allow_domains: Vec<String>,
     network_mode: Option<String>,
     deny_domains: Vec<String>,
+    deny_localhost: bool,
 }
 
 async fn cmd_run(options: RunOptions) {
@@ -966,6 +975,9 @@ async fn cmd_run(options: RunOptions) {
     }
     if !options.deny_domains.is_empty() {
         spec.network.denied_domains = options.deny_domains;
+    }
+    if options.deny_localhost {
+        spec.network.allow_localhost = false;
     }
 
     // 5. Print progress and create minipod through RuntimeManager
@@ -1989,6 +2001,7 @@ struct MinipodSpecOptions {
     policy_bundles: Vec<PathBuf>,
     network_mode: Option<String>,
     deny_domains: Vec<String>,
+    deny_localhost: bool,
 }
 
 fn cmd_minipod_spec(options: MinipodSpecOptions) {
@@ -2025,6 +2038,9 @@ fn cmd_minipod_spec(options: MinipodSpecOptions) {
     }
     if !options.deny_domains.is_empty() {
         spec.network.denied_domains = options.deny_domains;
+    }
+    if options.deny_localhost {
+        spec.network.allow_localhost = false;
     }
 
     if let Err(e) = validate_minipod_spec(&spec) {
@@ -2382,6 +2398,7 @@ async fn main() {
             allow_domains,
             network_mode,
             deny_domains,
+            deny_localhost,
         } => {
             cmd_run(RunOptions {
                 command,
@@ -2396,6 +2413,7 @@ async fn main() {
                 allow_domains,
                 network_mode,
                 deny_domains,
+                deny_localhost,
             })
             .await
         }
@@ -2421,6 +2439,7 @@ async fn main() {
             credential_files,
             policy_bundles,
             deny_domains,
+            deny_localhost,
         } => cmd_minipod_spec(MinipodSpecOptions {
             agent,
             workspace,
@@ -2431,6 +2450,7 @@ async fn main() {
             policy_bundles,
             network_mode,
             deny_domains,
+            deny_localhost,
         }),
         Commands::Providers => cmd_providers(),
         Commands::MinipodInspect { session_id, json } => cmd_minipod_inspect(session_id, json),

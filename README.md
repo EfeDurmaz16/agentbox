@@ -181,6 +181,9 @@ agentbox minipod-spec hermes --workspace . --deny-domain metadata.google.interna
 # Require approval on first contact for unknown external destinations
 agentbox minipod-spec hermes --workspace . --network-mode first-contact
 
+# Disable localhost/loopback service access for a task
+agentbox minipod-spec hermes --workspace . --deny-localhost
+
 # Bind a task-scoped policy bundle into the manifest
 agentbox minipod-spec hermes --workspace . --policy-bundle ./agentbox.task-policy.json
 

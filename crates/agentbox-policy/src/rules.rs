@@ -35,6 +35,12 @@ fn extract_domain(url: &str) -> Option<String> {
     }
 }
 
+fn is_loopback_domain(domain: &str) -> bool {
+    matches!(domain, "localhost" | "127.0.0.1" | "::1")
+        || domain.starts_with("127.")
+        || domain == "0.0.0.0"
+}
+
 /// Check if a command matches a pattern from always_allow / always_block.
 /// Patterns: "ls" (exact binary), "git push" (binary + subcommand), "npm *" (any npm invocation).
 fn command_matches_pattern(ctx: &CommandContext, pattern: &str) -> bool {
@@ -85,6 +91,28 @@ pub fn check_config_overrides(
                     return Some(Classification {
                         bucket: Bucket::Block,
                         reason: format!("{} to {} — domain in denylist", ctx.binary, domain),
+                        notification_summary: None,
+                    });
+                }
+
+                if is_loopback_domain(&domain) {
+                    if config.allow_localhost {
+                        return Some(Classification {
+                            bucket: Bucket::Allow,
+                            reason: format!(
+                                "{} to {} — localhost service allowed",
+                                ctx.binary, domain
+                            ),
+                            notification_summary: None,
+                        });
+                    }
+
+                    return Some(Classification {
+                        bucket: Bucket::Block,
+                        reason: format!(
+                            "{} to {} — localhost service access disabled",
+                            ctx.binary, domain
+                        ),
                         notification_summary: None,
                     });
                 }
@@ -754,6 +782,36 @@ mod tests {
         };
         let c = classify(&ctx("curl", &["https://api.github.com/repos"]), &config);
         assert_eq!(c.bucket, Bucket::Allow);
+    }
+
+    #[test]
+    fn test_curl_loopback_is_allowed_when_localhost_services_are_enabled() {
+        let config = PolicyConfig {
+            allow_localhost: true,
+            ..Default::default()
+        };
+
+        let c = classify(&ctx("curl", &["http://localhost:3000/health"]), &config);
+        assert_eq!(c.bucket, Bucket::Allow);
+        assert!(c.reason.contains("localhost service allowed"));
+
+        let c = classify(&ctx("wget", &["http://127.0.0.1:8080/status"]), &config);
+        assert_eq!(c.bucket, Bucket::Allow);
+    }
+
+    #[test]
+    fn test_curl_loopback_is_blocked_when_localhost_services_are_disabled() {
+        let config = PolicyConfig {
+            allow_localhost: false,
+            ..Default::default()
+        };
+
+        let c = classify(&ctx("curl", &["http://localhost:3000/health"]), &config);
+        assert_eq!(c.bucket, Bucket::Block);
+        assert!(c.reason.contains("localhost service access disabled"));
+
+        let c = classify(&ctx("curl", &["http://[::1]:8080/health"]), &config);
+        assert_eq!(c.bucket, Bucket::Block);
     }
 
     #[test]
