@@ -248,6 +248,8 @@ so the daemon-side transport treats them as rejected remote operations.
 Mutating routes also bind the `{worker_session_id}` URL path to the JSON body
 worker session id before applying exec, evidence, bundle, or destroy side
 effects.
+Create-session rejects duplicate worker session ids instead of replacing an
+existing session snapshot.
 
 This is still a contract worker, not the final sandboxed remote execution
 engine. The `exec` route runs the provided argv directly, without invoking a

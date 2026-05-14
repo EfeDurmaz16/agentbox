@@ -519,6 +519,7 @@ async fn create_session(
 ) -> WorkerRouteResult<RemoteAgentPodCreateSessionResponse> {
     validate_create_material(&request)?;
     let worker_session_id = format!("worker-{}", request.spec.id);
+    reject_duplicate_worker_session(&state, &worker_session_id).await?;
     let workspace_host_path = request.spec.filesystem.workspace_host_path.clone();
     prepare_worker_workspace(&workspace_host_path).await?;
     if let Some(bundle) = request.workspace_bundle.as_ref() {
@@ -546,6 +547,19 @@ async fn create_session(
             RemoteAgentPodLifecycleEvent::SessionCreated,
         ],
     }))
+}
+
+async fn reject_duplicate_worker_session(
+    state: &Arc<RemoteWorkerState>,
+    worker_session_id: &str,
+) -> Result<(), (StatusCode, Json<WorkerError>)> {
+    if state.sessions.lock().await.contains_key(worker_session_id) {
+        return Err(worker_error(
+            StatusCode::CONFLICT,
+            format!("agentbox remote worker session {worker_session_id} already exists"),
+        ));
+    }
+    Ok(())
 }
 
 fn validate_create_material(
@@ -2581,6 +2595,34 @@ mod tests {
         assert_eq!(response.status, RuntimeStatus::Running);
         let materialized = std::fs::read_to_string(workspace.join("src/main.rs")).unwrap();
         assert_eq!(materialized, "fn main() {}\n");
+        assert_eq!(state.sessions.lock().await.len(), 1);
+        let _ = std::fs::remove_dir_all(workspace);
+    }
+
+    #[tokio::test]
+    async fn create_session_rejects_duplicate_worker_session_id() {
+        let config = RemoteWorkerConfig::new(
+            "worker.local/dev",
+            "https://worker.example.com/agentpod/evidence",
+            SigningKey::from_bytes(&[46_u8; 32]),
+        );
+        let state = test_state(config);
+        let workspace = std::env::temp_dir().join(format!(
+            "agentbox-remote-worker-duplicate-create-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&workspace);
+        let request = create_session_request(workspace.clone());
+
+        let _ = create_session(State(state.clone()), Json(request.clone()))
+            .await
+            .unwrap();
+        let err = create_session(State(state.clone()), Json(request))
+            .await
+            .unwrap_err();
+
+        assert_eq!(err.0, StatusCode::CONFLICT);
+        assert!(err.1 .0.error.contains("already exists"));
         assert_eq!(state.sessions.lock().await.len(), 1);
         let _ = std::fs::remove_dir_all(workspace);
     }
