@@ -165,6 +165,9 @@ acknowledgements using the Ed25519 format described above and exposes the same
 When `--state-dir` is set, created sessions, stopped status, and evidence
 receipt metadata are written to `worker-sessions.json` and loaded again when the
 worker starts.
+Worker contract violations such as unknown worker sessions, mismatched session
+ids, stopped-session exec, or invalid evidence metadata return HTTP error
+statuses so the daemon-side transport treats them as rejected remote operations.
 
 This is still a contract worker, not the final sandboxed remote execution
 engine. The `exec` route runs the provided argv directly, without invoking a

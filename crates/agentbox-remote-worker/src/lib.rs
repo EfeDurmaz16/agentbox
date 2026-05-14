@@ -13,6 +13,7 @@ use agentbox_daemon::runtime::providers::remote::{
 };
 use agentbox_daemon::runtime::types::{CommandResult, RuntimeCapability, RuntimeStatus};
 use axum::extract::State;
+use axum::http::StatusCode;
 use axum::routing::post;
 use axum::{Json, Router};
 use chrono::Duration;
@@ -85,6 +86,22 @@ struct WorkerSessionSnapshot {
 struct WorkerEvidenceReceiptSnapshot {
     bundle_sha256: String,
     event_count: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct WorkerError {
+    error: String,
+}
+
+type WorkerRouteResult<T> = Result<Json<T>, (StatusCode, Json<WorkerError>)>;
+
+fn worker_error(status: StatusCode, message: impl Into<String>) -> (StatusCode, Json<WorkerError>) {
+    (
+        status,
+        Json(WorkerError {
+            error: message.into(),
+        }),
+    )
 }
 
 impl WorkerSession {
@@ -222,62 +239,48 @@ async fn create_session(
 async fn exec_command(
     State(state): State<Arc<RemoteWorkerState>>,
     Json(request): Json<RemoteAgentPodExecRequest>,
-) -> Json<RemoteAgentPodExecResponse> {
+) -> WorkerRouteResult<RemoteAgentPodExecResponse> {
     let started = Instant::now();
-    let kill_rx = match session_kill_receiver(&state, &request).await {
-        Ok(kill_rx) => kill_rx,
-        Err(result) => {
-            return Json(RemoteAgentPodExecResponse {
-                result,
-                lifecycle_events: vec![RemoteAgentPodLifecycleEvent::CommandFinished],
-            });
-        }
-    };
+    let kill_rx = session_kill_receiver(&state, &request).await?;
     let result = execute_command(request, started, kill_rx).await;
-    Json(RemoteAgentPodExecResponse {
+    Ok(Json(RemoteAgentPodExecResponse {
         result,
         lifecycle_events: vec![
             RemoteAgentPodLifecycleEvent::CommandStarted,
             RemoteAgentPodLifecycleEvent::CommandFinished,
             RemoteAgentPodLifecycleEvent::EvidenceSealed,
         ],
-    })
+    }))
 }
 
 async fn session_kill_receiver(
     state: &Arc<RemoteWorkerState>,
     request: &RemoteAgentPodExecRequest,
-) -> Result<watch::Receiver<bool>, CommandResult> {
+) -> Result<watch::Receiver<bool>, (StatusCode, Json<WorkerError>)> {
     let mut sessions = state.sessions.lock().await;
     let Some(session) = sessions.get_mut(&request.worker_session_id) else {
-        return Err(CommandResult {
-            exit_code: 128,
-            stdout: String::new(),
-            stderr: format!(
+        return Err(worker_error(
+            StatusCode::NOT_FOUND,
+            format!(
                 "agentbox remote worker session {} has not been created",
                 request.worker_session_id
             ),
-            duration_ms: 0,
-        });
+        ));
     };
     if session.session_id != request.session_id {
-        return Err(CommandResult {
-            exit_code: 128,
-            stdout: String::new(),
-            stderr: "agentbox remote worker session id does not match worker session".to_string(),
-            duration_ms: 0,
-        });
+        return Err(worker_error(
+            StatusCode::CONFLICT,
+            "agentbox remote worker session id does not match worker session",
+        ));
     }
     if !matches!(session.status, RuntimeStatus::Running) {
-        return Err(CommandResult {
-            exit_code: 130,
-            stdout: String::new(),
-            stderr: format!(
+        return Err(worker_error(
+            StatusCode::CONFLICT,
+            format!(
                 "agentbox remote worker session {} is not running",
                 request.worker_session_id
             ),
-            duration_ms: 0,
-        });
+        ));
     }
     Ok(session.kill_receiver())
 }
@@ -379,34 +382,39 @@ fn elapsed_ms(started: Instant) -> u64 {
 async fn upload_evidence(
     State(state): State<Arc<RemoteWorkerState>>,
     Json(request): Json<RemoteAgentPodEvidenceUploadRequest>,
-) -> Json<RemoteAgentPodEvidenceUploadResponse> {
-    let accepted = accept_evidence(&state, &request).await;
-    Json(RemoteAgentPodEvidenceUploadResponse {
+) -> WorkerRouteResult<RemoteAgentPodEvidenceUploadResponse> {
+    let accepted = accept_evidence(&state, &request).await?;
+    Ok(Json(RemoteAgentPodEvidenceUploadResponse {
         session_id: request.session_id,
         worker_session_id: request.worker_session_id,
-        accepted_bundle_sha256: accepted
-            .as_ref()
-            .map(|receipt| receipt.bundle_sha256.clone())
-            .unwrap_or_else(|| request.bundle_sha256.clone()),
-        accepted_event_count: accepted
-            .as_ref()
-            .map(|receipt| receipt.event_count)
-            .unwrap_or(0),
+        accepted_bundle_sha256: accepted.bundle_sha256,
+        accepted_event_count: accepted.event_count,
         lifecycle_events: vec![RemoteAgentPodLifecycleEvent::EvidenceSealed],
-    })
+    }))
 }
 
 async fn accept_evidence(
     state: &Arc<RemoteWorkerState>,
     request: &RemoteAgentPodEvidenceUploadRequest,
-) -> Option<WorkerEvidenceReceipt> {
-    if request.validate().is_err() {
-        return None;
-    }
+) -> Result<WorkerEvidenceReceipt, (StatusCode, Json<WorkerError>)> {
+    request
+        .validate()
+        .map_err(|err| worker_error(StatusCode::BAD_REQUEST, err.to_string()))?;
     let mut sessions = state.sessions.lock().await;
-    let session = sessions.get_mut(&request.worker_session_id)?;
+    let Some(session) = sessions.get_mut(&request.worker_session_id) else {
+        return Err(worker_error(
+            StatusCode::NOT_FOUND,
+            format!(
+                "agentbox remote worker session {} has not been created",
+                request.worker_session_id
+            ),
+        ));
+    };
     if session.session_id != request.session_id {
-        return None;
+        return Err(worker_error(
+            StatusCode::CONFLICT,
+            "agentbox remote worker session id does not match worker session",
+        ));
     }
     let receipt = WorkerEvidenceReceipt {
         bundle_sha256: request.bundle_sha256.clone(),
@@ -415,23 +423,33 @@ async fn accept_evidence(
     session.evidence_receipts.push(receipt.clone());
     drop(sessions);
     persist_sessions(state).await;
-    Some(receipt)
+    Ok(receipt)
 }
 
 async fn destroy_session(
     State(state): State<Arc<RemoteWorkerState>>,
     Json(request): Json<RemoteAgentPodDestroySessionRequest>,
-) -> Json<RemoteAgentPodDestroySessionResponse> {
-    if let Some(session) = state
-        .sessions
-        .lock()
-        .await
-        .get_mut(&request.worker_session_id)
-    {
-        session.mark_stopped();
+) -> WorkerRouteResult<RemoteAgentPodDestroySessionResponse> {
+    let mut sessions = state.sessions.lock().await;
+    let Some(session) = sessions.get_mut(&request.worker_session_id) else {
+        return Err(worker_error(
+            StatusCode::NOT_FOUND,
+            format!(
+                "agentbox remote worker session {} has not been created",
+                request.worker_session_id
+            ),
+        ));
+    };
+    if session.session_id != request.session_id {
+        return Err(worker_error(
+            StatusCode::CONFLICT,
+            "agentbox remote worker session id does not match worker session",
+        ));
     }
+    session.mark_stopped();
+    drop(sessions);
     persist_sessions(&state).await;
-    Json(RemoteAgentPodDestroySessionResponse {
+    Ok(Json(RemoteAgentPodDestroySessionResponse {
         session_id: request.session_id,
         worker_session_id: request.worker_session_id,
         status: RuntimeStatus::Stopped,
@@ -439,7 +457,7 @@ async fn destroy_session(
             RemoteAgentPodLifecycleEvent::KillSwitchAck,
             RemoteAgentPodLifecycleEvent::WorkerDestroyed,
         ],
-    })
+    }))
 }
 
 fn load_persisted_sessions(
@@ -611,7 +629,7 @@ mod tests {
             },
         };
 
-        let response = exec_command(State(state), Json(request)).await.0;
+        let response = exec_command(State(state), Json(request)).await.unwrap().0;
 
         assert_eq!(response.result.exit_code, 0);
         assert_eq!(response.result.stdout, "hello-agentbox");
@@ -644,7 +662,7 @@ mod tests {
             },
         };
 
-        let response = exec_command(State(state), Json(request)).await.0;
+        let response = exec_command(State(state), Json(request)).await.unwrap().0;
 
         assert_eq!(response.result.exit_code, 127);
         assert!(response.result.stderr.contains("empty argv"));
@@ -669,13 +687,10 @@ mod tests {
             },
         };
 
-        let response = exec_command(State(state), Json(request)).await.0;
+        let err = exec_command(State(state), Json(request)).await.unwrap_err();
 
-        assert_eq!(response.result.exit_code, 128);
-        assert!(response.result.stderr.contains("has not been created"));
-        assert!(!response
-            .lifecycle_events
-            .contains(&RemoteAgentPodLifecycleEvent::CommandStarted));
+        assert_eq!(err.0, StatusCode::NOT_FOUND);
+        assert!(err.1 .0.error.contains("has not been created"));
     }
 
     #[tokio::test]
@@ -715,8 +730,9 @@ mod tests {
             }),
         )
         .await
+        .unwrap()
         .0;
-        let response = exec.await.unwrap().0;
+        let response = exec.await.unwrap().unwrap().0;
 
         assert_eq!(destroy.status, RuntimeStatus::Stopped);
         assert_eq!(response.result.exit_code, 130);
@@ -748,7 +764,10 @@ mod tests {
             secret_material_included: false,
         };
 
-        let response = upload_evidence(State(state.clone()), Json(request)).await.0;
+        let response = upload_evidence(State(state.clone()), Json(request))
+            .await
+            .unwrap()
+            .0;
 
         assert_eq!(response.accepted_event_count, 7);
         let sessions = state.sessions.lock().await;
@@ -756,6 +775,60 @@ mod tests {
         assert_eq!(session.evidence_receipts.len(), 1);
         assert_eq!(session.evidence_receipts[0].bundle_sha256, "a".repeat(64));
         assert_eq!(session.evidence_receipts[0].event_count, 7);
+    }
+
+    #[tokio::test]
+    async fn upload_evidence_rejects_unknown_session() {
+        let config = RemoteWorkerConfig::new(
+            "worker.local/dev",
+            "https://worker.example.com/agentpod/evidence",
+            SigningKey::from_bytes(&[28_u8; 32]),
+        );
+        let state = test_state(config);
+        let request = RemoteAgentPodEvidenceUploadRequest {
+            session_id: "session-1".into(),
+            worker_session_id: "worker-session-1".into(),
+            evidence_mode: RemoteAgentPodEvidenceMode::BundleUpload,
+            bundle_sha256: "a".repeat(64),
+            derived_from_bundle: false,
+            bundle_id: None,
+            bundle_root_sha256: None,
+            event_count: 7,
+            sealed_at: chrono::Utc::now(),
+            secret_material_included: false,
+        };
+
+        let err = upload_evidence(State(state), Json(request))
+            .await
+            .unwrap_err();
+
+        assert_eq!(err.0, StatusCode::NOT_FOUND);
+        assert!(err.1 .0.error.contains("has not been created"));
+    }
+
+    #[tokio::test]
+    async fn destroy_session_rejects_unknown_session() {
+        let config = RemoteWorkerConfig::new(
+            "worker.local/dev",
+            "https://worker.example.com/agentpod/evidence",
+            SigningKey::from_bytes(&[29_u8; 32]),
+        );
+        let state = test_state(config);
+
+        let err = destroy_session(
+            State(state),
+            Json(RemoteAgentPodDestroySessionRequest {
+                session_id: "session-1".into(),
+                worker_session_id: "worker-session-1".into(),
+                reason: "test missing".into(),
+                kill_switch_required: true,
+            }),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(err.0, StatusCode::NOT_FOUND);
+        assert!(err.1 .0.error.contains("has not been created"));
     }
 
     #[tokio::test]
