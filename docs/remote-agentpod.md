@@ -161,11 +161,11 @@ acknowledgements using the Ed25519 format described above and exposes the same
 `/sessions/{worker_session_id}/evidence`, and
 `/sessions/{worker_session_id}/destroy` routes expected by the HTTPS adapter.
 
-This is still a contract worker, not the final remote execution engine. The
-`exec` route returns lifecycle evidence and a non-zero command result instead of
-running arbitrary commands. Real command execution, workspace materialization,
-credential handoff, evidence storage, and kill-switch process control remain
-future work.
+This is still a contract worker, not the final sandboxed remote execution
+engine. The `exec` route runs the provided argv directly, without invoking a
+shell, and returns exit code, stdout, stderr, duration, and lifecycle evidence.
+Workspace materialization, policy enforcement, credential handoff, evidence
+storage, and kill-switch process control remain future work.
 
 ## Lifecycle Contract
 

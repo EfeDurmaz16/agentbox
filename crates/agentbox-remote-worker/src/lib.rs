@@ -1,5 +1,6 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Instant;
 
 use agentbox_daemon::runtime::providers::remote::{
     Ed25519HandshakeVerifier, RemoteAgentPodCreateSessionRequest,
@@ -14,6 +15,8 @@ use axum::routing::post;
 use axum::{Json, Router};
 use chrono::Duration;
 use ed25519_dalek::{Signer, SigningKey};
+use tokio::process::Command;
+use tokio::time;
 
 #[derive(Clone)]
 pub struct RemoteWorkerConfig {
@@ -111,22 +114,79 @@ async fn create_session(
 }
 
 async fn exec_command(
-    Json(_request): Json<RemoteAgentPodExecRequest>,
+    Json(request): Json<RemoteAgentPodExecRequest>,
 ) -> Json<RemoteAgentPodExecResponse> {
+    let started = Instant::now();
+    let result = execute_command(request, started).await;
     Json(RemoteAgentPodExecResponse {
-        result: CommandResult {
-            exit_code: 126,
-            stdout: String::new(),
-            stderr: "agentbox remote worker contract server does not execute commands yet"
-                .to_string(),
-            duration_ms: 0,
-        },
+        result,
         lifecycle_events: vec![
             RemoteAgentPodLifecycleEvent::CommandStarted,
             RemoteAgentPodLifecycleEvent::CommandFinished,
             RemoteAgentPodLifecycleEvent::EvidenceSealed,
         ],
     })
+}
+
+async fn execute_command(request: RemoteAgentPodExecRequest, started: Instant) -> CommandResult {
+    let Some(program) = request.command.argv.first() else {
+        return CommandResult {
+            exit_code: 127,
+            stdout: String::new(),
+            stderr: "agentbox remote worker received an empty argv".to_string(),
+            duration_ms: elapsed_ms(started),
+        };
+    };
+    let mut command = Command::new(program);
+    command.args(request.command.argv.iter().skip(1));
+    command.env_clear();
+    command.envs(&request.command.env);
+    if let Some(working_dir) = &request.command.working_dir {
+        command.current_dir(working_dir);
+    }
+    command.kill_on_drop(true);
+
+    let output = if let Some(timeout_seconds) = request.command.timeout_seconds {
+        match time::timeout(
+            std::time::Duration::from_secs(timeout_seconds),
+            command.output(),
+        )
+        .await
+        {
+            Ok(output) => output,
+            Err(_) => {
+                return CommandResult {
+                    exit_code: 124,
+                    stdout: String::new(),
+                    stderr: format!(
+                        "agentbox remote worker command timed out after {timeout_seconds}s"
+                    ),
+                    duration_ms: elapsed_ms(started),
+                };
+            }
+        }
+    } else {
+        command.output().await
+    };
+
+    match output {
+        Ok(output) => CommandResult {
+            exit_code: output.status.code().unwrap_or(128),
+            stdout: String::from_utf8_lossy(&output.stdout).to_string(),
+            stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+            duration_ms: elapsed_ms(started),
+        },
+        Err(err) => CommandResult {
+            exit_code: 127,
+            stdout: String::new(),
+            stderr: format!("agentbox remote worker failed to start command: {err}"),
+            duration_ms: elapsed_ms(started),
+        },
+    }
+}
+
+fn elapsed_ms(started: Instant) -> u64 {
+    started.elapsed().as_millis().try_into().unwrap_or(u64::MAX)
 }
 
 async fn upload_evidence(
@@ -193,6 +253,8 @@ mod tests {
     use agentbox_daemon::runtime::providers::remote::{
         Ed25519HandshakeVerifier, RemoteAgentPodAuthKind, RemoteAgentPodHandshakeVerifier,
     };
+    use agentbox_daemon::runtime::types::ExecCommand;
+    use std::collections::HashMap;
 
     #[tokio::test]
     async fn handshake_response_is_ed25519_verifiable() {
@@ -227,5 +289,47 @@ mod tests {
         assert!(signing_key_from_hex_seed(&"a".repeat(64)).is_ok());
         assert!(signing_key_from_hex_seed("abc").is_err());
         assert!(signing_key_from_hex_seed(&"z".repeat(64)).is_err());
+    }
+
+    #[tokio::test]
+    async fn exec_command_runs_argv_without_shell() {
+        let request = RemoteAgentPodExecRequest {
+            session_id: "session-1".into(),
+            worker_session_id: "worker-session-1".into(),
+            command: ExecCommand {
+                argv: vec!["printf".into(), "hello-agentbox".into()],
+                working_dir: None,
+                env: HashMap::new(),
+                timeout_seconds: Some(5),
+            },
+        };
+
+        let response = exec_command(Json(request)).await.0;
+
+        assert_eq!(response.result.exit_code, 0);
+        assert_eq!(response.result.stdout, "hello-agentbox");
+        assert!(response.result.stderr.is_empty());
+        assert!(response
+            .lifecycle_events
+            .contains(&RemoteAgentPodLifecycleEvent::EvidenceSealed));
+    }
+
+    #[tokio::test]
+    async fn exec_command_rejects_empty_argv() {
+        let request = RemoteAgentPodExecRequest {
+            session_id: "session-1".into(),
+            worker_session_id: "worker-session-1".into(),
+            command: ExecCommand {
+                argv: Vec::new(),
+                working_dir: None,
+                env: HashMap::new(),
+                timeout_seconds: Some(5),
+            },
+        };
+
+        let response = exec_command(Json(request)).await.0;
+
+        assert_eq!(response.result.exit_code, 127);
+        assert!(response.result.stderr.contains("empty argv"));
     }
 }
