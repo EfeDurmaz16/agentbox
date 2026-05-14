@@ -52,6 +52,26 @@ pub enum RuntimeStatus {
     Failed(String),
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AgentPodRiskLevel {
+    Low,
+    #[default]
+    Medium,
+    High,
+    VeryHigh,
+}
+
+impl AgentPodRiskLevel {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::VeryHigh => "very-high",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MountMode {
     ReadOnly,
@@ -663,6 +683,8 @@ pub struct MinipodSpec {
     pub name: String,
     pub agent: AgentProfile,
     #[serde(default)]
+    pub risk: AgentPodRiskLevel,
+    #[serde(default)]
     pub policy_profile: AgentPolicyProfile,
     pub filesystem: FilesystemPolicy,
     pub network: NetworkPolicy,
@@ -712,6 +734,7 @@ impl MinipodSpec {
                 kind: "autonomous-agent".to_string(),
                 command: vec![agent_name],
             },
+            risk: AgentPodRiskLevel::Medium,
             policy_profile: policy_profile.clone(),
             filesystem: FilesystemPolicy::workspace(workspace),
             network: policy_profile.network.clone(),
@@ -1098,6 +1121,7 @@ mod tests {
 
         assert_eq!(spec.schema_version, AGENTPOD_SPEC_SCHEMA_VERSION);
         assert_eq!(spec.kind, AGENTPOD_SPEC_KIND);
+        assert_eq!(spec.risk, AgentPodRiskLevel::Medium);
         assert!(spec.name.starts_with("agentbox-"));
         assert_eq!(spec.agent.name, "openclaw");
         assert_eq!(spec.filesystem.workspace_guest_path, "/workspace");
@@ -1126,6 +1150,14 @@ mod tests {
             spec.labels.get("agentbox.workspace"),
             Some(&"/tmp/agentbox-work".into())
         );
+    }
+
+    #[test]
+    fn agentpod_risk_levels_have_stable_labels() {
+        assert_eq!(AgentPodRiskLevel::Low.label(), "low");
+        assert_eq!(AgentPodRiskLevel::Medium.label(), "medium");
+        assert_eq!(AgentPodRiskLevel::High.label(), "high");
+        assert_eq!(AgentPodRiskLevel::VeryHigh.label(), "very-high");
     }
 
     #[test]
@@ -1619,6 +1651,7 @@ mod tests {
 
         assert_eq!(spec.schema_version, AGENTPOD_SPEC_SCHEMA_VERSION);
         assert_eq!(spec.kind, AGENTPOD_SPEC_KIND);
+        assert_eq!(spec.risk, AgentPodRiskLevel::Medium);
         assert!(matches!(
             spec.filesystem.mounts[0].kind,
             MountKind::ReadOnlyHost
