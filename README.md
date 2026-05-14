@@ -175,6 +175,9 @@ agentbox run "openclaw start"
 # Generate the governed minipod manifest without starting a backend
 agentbox minipod-spec hermes --workspace . --allow-domain api.openai.com
 
+# Run a safe OpenClaw/Hermes-style manifest demo
+scripts/demo-autonomous-agent.sh
+
 # Block high-risk destinations for the task
 agentbox minipod-spec hermes --workspace . --deny-domain metadata.google.internal
 
