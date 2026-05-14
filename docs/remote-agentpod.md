@@ -245,6 +245,9 @@ Worker contract violations such as unknown worker sessions, mismatched session
 ids, unsupported credential grant kinds, unpreparable workspace paths,
 stopped-session exec, or invalid evidence metadata return HTTP error statuses
 so the daemon-side transport treats them as rejected remote operations.
+Mutating routes also bind the `{worker_session_id}` URL path to the JSON body
+worker session id before applying exec, evidence, bundle, or destroy side
+effects.
 
 This is still a contract worker, not the final sandboxed remote execution
 engine. The `exec` route runs the provided argv directly, without invoking a

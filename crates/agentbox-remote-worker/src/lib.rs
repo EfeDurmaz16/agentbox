@@ -688,8 +688,10 @@ fn safe_worker_bundle_path(path: &str) -> Result<PathBuf, (StatusCode, Json<Work
 
 async fn exec_command(
     State(state): State<Arc<RemoteWorkerState>>,
+    AxumPath(route_worker_session_id): AxumPath<String>,
     Json(request): Json<RemoteAgentPodExecRequest>,
 ) -> WorkerRouteResult<RemoteAgentPodExecResponse> {
+    require_route_worker_session_id(&route_worker_session_id, &request.worker_session_id)?;
     let started = Instant::now();
     let context = session_exec_context(&state, &request).await?;
     validate_exec_material(&request, &context)?;
@@ -726,6 +728,19 @@ fn validate_exec_material(
         return Err(worker_error(
             StatusCode::BAD_REQUEST,
             "agentbox remote worker refuses command environment material without a matching session credential grant",
+        ));
+    }
+    Ok(())
+}
+
+fn require_route_worker_session_id(
+    route_worker_session_id: &str,
+    body_worker_session_id: &str,
+) -> Result<(), (StatusCode, Json<WorkerError>)> {
+    if route_worker_session_id != body_worker_session_id {
+        return Err(worker_error(
+            StatusCode::CONFLICT,
+            "agentbox remote worker route worker session id does not match request body",
         ));
     }
     Ok(())
@@ -1094,8 +1109,10 @@ fn normalize_path(path: PathBuf) -> PathBuf {
 
 async fn upload_evidence(
     State(state): State<Arc<RemoteWorkerState>>,
+    AxumPath(route_worker_session_id): AxumPath<String>,
     Json(request): Json<RemoteAgentPodEvidenceUploadRequest>,
 ) -> WorkerRouteResult<RemoteAgentPodEvidenceUploadResponse> {
+    require_route_worker_session_id(&route_worker_session_id, &request.worker_session_id)?;
     let accepted = accept_evidence(&state, &request).await?;
     Ok(Json(RemoteAgentPodEvidenceUploadResponse {
         session_id: request.session_id,
@@ -1108,8 +1125,10 @@ async fn upload_evidence(
 
 async fn upload_evidence_bundle(
     State(state): State<Arc<RemoteWorkerState>>,
+    AxumPath(route_worker_session_id): AxumPath<String>,
     Json(request): Json<WorkerEvidenceBundleUploadRequest>,
 ) -> WorkerRouteResult<WorkerEvidenceBundleUploadResponse> {
+    require_route_worker_session_id(&route_worker_session_id, &request.worker_session_id)?;
     validate_evidence_bundle_upload(&request)?;
     require_matching_session(&state, &request.worker_session_id, &request.session_id).await?;
     let path = persist_evidence_bundle(&state.config, &request).await?;
@@ -1654,8 +1673,10 @@ fn get_matching_session_mut<'a>(
 
 async fn destroy_session(
     State(state): State<Arc<RemoteWorkerState>>,
+    AxumPath(route_worker_session_id): AxumPath<String>,
     Json(request): Json<RemoteAgentPodDestroySessionRequest>,
 ) -> WorkerRouteResult<RemoteAgentPodDestroySessionResponse> {
+    require_route_worker_session_id(&route_worker_session_id, &request.worker_session_id)?;
     let mut sessions = state.sessions.lock().await;
     let Some(session) = sessions.get_mut(&request.worker_session_id) else {
         return Err(worker_error(
@@ -1859,6 +1880,10 @@ mod tests {
         path
     }
 
+    fn worker_session_path() -> AxumPath<String> {
+        AxumPath("worker-session-1".into())
+    }
+
     fn create_session_request(workspace: PathBuf) -> RemoteAgentPodCreateSessionRequest {
         RemoteAgentPodCreateSessionRequest {
             transport: RemoteAgentPodTransportDescriptor::new(
@@ -2020,7 +2045,7 @@ mod tests {
             },
         };
 
-        let response = exec_command(State(state.clone()), Json(request))
+        let response = exec_command(State(state.clone()), worker_session_path(), Json(request))
             .await
             .unwrap()
             .0;
@@ -2067,7 +2092,10 @@ mod tests {
             },
         };
 
-        let response = exec_command(State(state), Json(request)).await.unwrap().0;
+        let response = exec_command(State(state), worker_session_path(), Json(request))
+            .await
+            .unwrap()
+            .0;
 
         assert_eq!(response.result.exit_code, 127);
         assert!(response.result.stderr.contains("empty argv"));
@@ -2092,10 +2120,97 @@ mod tests {
             },
         };
 
-        let err = exec_command(State(state), Json(request)).await.unwrap_err();
+        let err = exec_command(State(state), worker_session_path(), Json(request))
+            .await
+            .unwrap_err();
 
         assert_eq!(err.0, StatusCode::NOT_FOUND);
         assert!(err.1 .0.error.contains("has not been created"));
+    }
+
+    #[tokio::test]
+    async fn mutating_routes_reject_worker_session_path_mismatch() {
+        let config = RemoteWorkerConfig::new(
+            "worker.local/dev",
+            "https://worker.example.com/agentpod/evidence",
+            SigningKey::from_bytes(&[45_u8; 32]),
+        )
+        .with_state_dir(std::env::temp_dir());
+        let state = test_state(config);
+        state.sessions.lock().await.insert(
+            "worker-session-1".into(),
+            WorkerSession::new(
+                "session-1".into(),
+                std::env::temp_dir(),
+                WorkerPolicy::default(),
+            ),
+        );
+        let exec_err = exec_command(
+            State(state.clone()),
+            AxumPath("worker-session-other".into()),
+            Json(RemoteAgentPodExecRequest {
+                session_id: "session-1".into(),
+                worker_session_id: "worker-session-1".into(),
+                command: ExecCommand {
+                    argv: vec!["printf".into(), "hello".into()],
+                    working_dir: None,
+                    env: HashMap::new(),
+                    timeout_seconds: Some(5),
+                },
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(exec_err.0, StatusCode::CONFLICT);
+
+        let evidence_err = upload_evidence(
+            State(state.clone()),
+            AxumPath("worker-session-other".into()),
+            Json(RemoteAgentPodEvidenceUploadRequest {
+                session_id: "session-1".into(),
+                worker_session_id: "worker-session-1".into(),
+                evidence_mode: RemoteAgentPodEvidenceMode::BundleUpload,
+                bundle_sha256: "a".repeat(64),
+                derived_from_bundle: false,
+                bundle_id: None,
+                bundle_root_sha256: None,
+                event_count: 1,
+                sealed_at: chrono::Utc::now(),
+                secret_material_included: false,
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(evidence_err.0, StatusCode::CONFLICT);
+
+        let bundle_err = upload_evidence_bundle(
+            State(state.clone()),
+            AxumPath("worker-session-other".into()),
+            Json(WorkerEvidenceBundleUploadRequest {
+                session_id: "session-1".into(),
+                worker_session_id: "worker-session-1".into(),
+                bundle_sha256: "0".repeat(64),
+                bundle_json: "{}".into(),
+                secret_material_included: false,
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(bundle_err.0, StatusCode::CONFLICT);
+
+        let destroy_err = destroy_session(
+            State(state),
+            AxumPath("worker-session-other".into()),
+            Json(RemoteAgentPodDestroySessionRequest {
+                session_id: "session-1".into(),
+                worker_session_id: "worker-session-1".into(),
+                reason: "route mismatch".into(),
+                kill_switch_required: true,
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(destroy_err.0, StatusCode::CONFLICT);
     }
 
     #[tokio::test]
@@ -2125,7 +2240,10 @@ mod tests {
             },
         };
 
-        let response = exec_command(State(state), Json(request)).await.unwrap().0;
+        let response = exec_command(State(state), worker_session_path(), Json(request))
+            .await
+            .unwrap()
+            .0;
 
         assert_eq!(response.result.exit_code, 126);
         assert!(response.result.stderr.contains("outside workspace"));
@@ -2158,7 +2276,9 @@ mod tests {
             },
         };
 
-        let err = exec_command(State(state), Json(request)).await.unwrap_err();
+        let err = exec_command(State(state), worker_session_path(), Json(request))
+            .await
+            .unwrap_err();
 
         assert_eq!(err.0, StatusCode::BAD_REQUEST);
         assert!(err.1 .0.error.contains("matching session credential grant"));
@@ -2200,7 +2320,10 @@ mod tests {
             },
         };
 
-        let response = exec_command(State(state), Json(request)).await.unwrap().0;
+        let response = exec_command(State(state), worker_session_path(), Json(request))
+            .await
+            .unwrap()
+            .0;
 
         assert_eq!(response.result.exit_code, 0);
         assert_eq!(response.result.stdout, "remote-secret");
@@ -2236,7 +2359,10 @@ mod tests {
             },
         };
 
-        let response = exec_command(State(state), Json(request)).await.unwrap().0;
+        let response = exec_command(State(state), worker_session_path(), Json(request))
+            .await
+            .unwrap()
+            .0;
 
         assert_eq!(response.result.exit_code, 126);
         assert!(response.result.stderr.contains("policy denied"));
@@ -2640,12 +2766,14 @@ mod tests {
             },
         };
         let exec_state = state.clone();
-        let exec =
-            tokio::spawn(async move { exec_command(State(exec_state), Json(request)).await });
+        let exec = tokio::spawn(async move {
+            exec_command(State(exec_state), worker_session_path(), Json(request)).await
+        });
 
         time::sleep(std::time::Duration::from_millis(100)).await;
         let destroy = destroy_session(
             State(state),
+            worker_session_path(),
             Json(RemoteAgentPodDestroySessionRequest {
                 session_id: "session-1".into(),
                 worker_session_id: "worker-session-1".into(),
@@ -2693,7 +2821,7 @@ mod tests {
             secret_material_included: false,
         };
 
-        let response = upload_evidence(State(state.clone()), Json(request))
+        let response = upload_evidence(State(state.clone()), worker_session_path(), Json(request))
             .await
             .unwrap()
             .0;
@@ -2748,10 +2876,11 @@ mod tests {
             secret_material_included: false,
         };
 
-        let response = upload_evidence_bundle(State(state.clone()), Json(request))
-            .await
-            .unwrap()
-            .0;
+        let response =
+            upload_evidence_bundle(State(state.clone()), worker_session_path(), Json(request))
+                .await
+                .unwrap()
+                .0;
 
         assert_eq!(response.stored_bundle_sha256, bundle_sha256);
         assert_eq!(response.stored_bytes, bundle_json.len() as u64);
@@ -2897,7 +3026,7 @@ mod tests {
             secret_material_included: false,
         };
 
-        let err = upload_evidence_bundle(State(state), Json(request))
+        let err = upload_evidence_bundle(State(state), worker_session_path(), Json(request))
             .await
             .unwrap_err();
 
@@ -2931,7 +3060,7 @@ mod tests {
             secret_material_included: false,
         };
 
-        let err = upload_evidence_bundle(State(state), Json(request))
+        let err = upload_evidence_bundle(State(state), worker_session_path(), Json(request))
             .await
             .unwrap_err();
 
@@ -2960,7 +3089,7 @@ mod tests {
             secret_material_included: false,
         };
 
-        let err = upload_evidence(State(state), Json(request))
+        let err = upload_evidence(State(state), worker_session_path(), Json(request))
             .await
             .unwrap_err();
 
@@ -2979,6 +3108,7 @@ mod tests {
 
         let err = destroy_session(
             State(state),
+            worker_session_path(),
             Json(RemoteAgentPodDestroySessionRequest {
                 session_id: "session-1".into(),
                 worker_session_id: "worker-session-1".into(),
