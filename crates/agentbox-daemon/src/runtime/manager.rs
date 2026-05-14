@@ -15,8 +15,8 @@ use crate::runtime::types::{
     RuntimeStatus,
 };
 use crate::runtime::workspace::{
-    WorkspaceDiffSnapshot, WorkspaceDiffSnapshotter, WorkspaceProjectionDiscard,
-    WorkspaceProjectionDiscarder,
+    WorkspaceDiffSnapshot, WorkspaceDiffSnapshotter, WorkspaceProjectionApplier,
+    WorkspaceProjectionApply, WorkspaceProjectionDiscard, WorkspaceProjectionDiscarder,
 };
 
 pub struct RuntimeManager {
@@ -283,6 +283,36 @@ impl RuntimeManager {
         }
 
         Ok(discard)
+    }
+
+    pub fn apply_workspace_projection(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<WorkspaceProjectionApply>, RuntimeError> {
+        let session = self
+            .sessions
+            .get(session_id)
+            .map_err(|e| RuntimeError::Internal(e.to_string()))?
+            .ok_or_else(|| RuntimeError::NotFound(session_id.to_string()))?;
+        let apply = WorkspaceProjectionApplier::apply(&session)
+            .map_err(|e| RuntimeError::Internal(e.to_string()))?;
+
+        if let Some(apply) = &apply {
+            self.audit_runtime_event(
+                "workspace.projection_apply",
+                &session,
+                "workspace",
+                &format!(
+                    "applied:{}:bytes:{}",
+                    apply.lower_host_path.display(),
+                    apply.patch_bytes
+                ),
+                None,
+                Some(self.provider.name().to_string()),
+            )?;
+        }
+
+        Ok(apply)
     }
 
     fn enforce_exec_policy(
@@ -1053,6 +1083,65 @@ mod tests {
         assert_eq!(audit[0].bucket, "workspace");
         assert!(audit[0].command.contains("workspace.projection_discard"));
         assert!(audit[0].decision.contains("discarded:"));
+
+        let _ = fs::remove_dir_all(&workspace);
+        let _ = fs::remove_dir_all(&overlay);
+    }
+
+    #[tokio::test]
+    async fn apply_workspace_projection_records_workspace_evidence() {
+        let workspace = std::env::temp_dir().join(format!(
+            "agentbox-manager-apply-workspace-{}",
+            std::process::id()
+        ));
+        let overlay = std::env::temp_dir().join(format!(
+            "agentbox-manager-apply-overlay-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&workspace);
+        let _ = fs::remove_dir_all(&overlay);
+        fs::create_dir_all(&workspace).unwrap();
+        run_git(&workspace, &["init"]);
+        run_git(
+            &workspace,
+            &["config", "user.email", "agentbox@example.test"],
+        );
+        run_git(&workspace, &["config", "user.name", "Agentbox Test"]);
+        fs::write(workspace.join("README.md"), "lower\n").unwrap();
+        run_git(&workspace, &["add", "README.md"]);
+        run_git(&workspace, &["commit", "-m", "initial"]);
+        let manager = manager("workspace-apply");
+        let mut spec = MinipodSpec::for_agent_task("openclaw", &workspace);
+        spec.workspace_mode = crate::runtime::types::AgentPodWorkspaceMode::OverlayReview;
+        spec.filesystem.workspace_write_policy =
+            crate::runtime::types::WorkspaceWritePolicy::WritableOverlay;
+        spec.filesystem.workspace_overlay =
+            crate::runtime::types::WorkspaceOverlayPolicy::review_required(Some(overlay.clone()));
+        let projection =
+            crate::runtime::workspace::WorkspaceProjectionMaterializer::materialize(&mut spec)
+                .unwrap()
+                .expect("workspace projection should be prepared");
+        fs::write(
+            projection.projected_host_path.join("README.md"),
+            "lower\napplied\n",
+        )
+        .unwrap();
+        let session = manager.create(&spec).await.unwrap();
+
+        let apply = manager
+            .apply_workspace_projection(&session.id)
+            .unwrap()
+            .expect("projection should apply");
+
+        assert!(apply.patch_bytes > 0);
+        assert_eq!(
+            fs::read_to_string(workspace.join("README.md")).unwrap(),
+            "lower\napplied\n"
+        );
+        let audit = manager.audit.recent(1).unwrap();
+        assert_eq!(audit[0].bucket, "workspace");
+        assert!(audit[0].command.contains("workspace.projection_apply"));
+        assert!(audit[0].decision.contains("applied:"));
 
         let _ = fs::remove_dir_all(&workspace);
         let _ = fs::remove_dir_all(&overlay);

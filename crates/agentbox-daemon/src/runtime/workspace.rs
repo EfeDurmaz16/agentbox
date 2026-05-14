@@ -1,7 +1,8 @@
 use std::fmt;
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -222,6 +223,54 @@ impl WorkspaceProjectionDiscarder {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceProjectionApply {
+    pub lower_host_path: PathBuf,
+    pub projected_host_path: PathBuf,
+    pub patch_bytes: usize,
+}
+
+pub struct WorkspaceProjectionApplier;
+
+impl WorkspaceProjectionApplier {
+    pub fn apply(
+        session: &RuntimeSession,
+    ) -> Result<Option<WorkspaceProjectionApply>, WorkspaceOverlayError> {
+        let Some(projected) = session.spec.labels.get("agentbox.workspace.projected") else {
+            return Ok(None);
+        };
+        let Some(lower) = session.spec.labels.get("agentbox.workspace.lower") else {
+            return Ok(None);
+        };
+
+        let projected_host_path = canonicalize_existing(Path::new(projected))?;
+        let lower_host_path = canonicalize_existing(Path::new(lower))?;
+        if projected_host_path == lower_host_path
+            || projected_host_path.starts_with(&lower_host_path)
+        {
+            return Err(WorkspaceOverlayError::OverlayInsideWorkspace {
+                overlay_path: projected_host_path,
+                workspace_path: lower_host_path,
+            });
+        }
+
+        let mut projected_session = session.clone();
+        projected_session.spec.filesystem.workspace_host_path = projected_host_path.clone();
+        let snapshot = WorkspaceDiffSnapshotter::capture(&projected_session);
+        let Some(patch) = snapshot.diff_patch else {
+            return Ok(None);
+        };
+
+        apply_patch_to_workspace(&lower_host_path, &patch)?;
+
+        Ok(Some(WorkspaceProjectionApply {
+            lower_host_path,
+            projected_host_path,
+            patch_bytes: patch.len(),
+        }))
+    }
+}
+
 fn canonicalize_existing(path: &Path) -> Result<PathBuf, WorkspaceOverlayError> {
     path.canonicalize().map_err(|err| {
         WorkspaceOverlayError::Io(format!(
@@ -297,6 +346,47 @@ fn remove_dir_if_exists(path: &Path) -> Result<(), WorkspaceOverlayError> {
             path.display()
         ))
     })
+}
+
+fn apply_patch_to_workspace(workspace: &Path, patch: &str) -> Result<(), WorkspaceOverlayError> {
+    let mut child = Command::new("git")
+        .arg("-C")
+        .arg(workspace)
+        .arg("apply")
+        .arg("--whitespace=nowarn")
+        .arg("-")
+        .stdin(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|err| {
+            WorkspaceOverlayError::Io(format!(
+                "failed to start git apply in {}: {err}",
+                workspace.display()
+            ))
+        })?;
+
+    child
+        .stdin
+        .as_mut()
+        .ok_or_else(|| WorkspaceOverlayError::Io("failed to open git apply stdin".into()))?
+        .write_all(patch.as_bytes())
+        .map_err(|err| WorkspaceOverlayError::Io(format!("failed to write patch: {err}")))?;
+
+    let output = child.wait_with_output().map_err(|err| {
+        WorkspaceOverlayError::Io(format!(
+            "failed to wait for git apply in {}: {err}",
+            workspace.display()
+        ))
+    })?;
+    if !output.status.success() {
+        return Err(WorkspaceOverlayError::Io(format!(
+            "git apply failed in {}: {}",
+            workspace.display(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+
+    Ok(())
 }
 
 fn ensure_empty_dir(path: &Path) -> Result<(), WorkspaceOverlayError> {
@@ -470,9 +560,8 @@ impl WorkspaceDiffSnapshotter {
         snapshot.diff_name_status = git_output(workspace, &["diff", "--name-status"])
             .map(lines)
             .unwrap_or_default();
-        snapshot.diff_patch = git_output(workspace, &["diff", "--binary"])
-            .map(|value| value.trim_end().to_string())
-            .filter(|value| !value.is_empty());
+        snapshot.diff_patch =
+            git_output(workspace, &["diff", "--binary"]).filter(|value| !value.trim().is_empty());
         snapshot.changed_files = changed_files_from_status(&snapshot.status_porcelain);
 
         snapshot
@@ -791,6 +880,61 @@ mod tests {
         );
         assert!(!discard.projected_host_path.exists());
         assert!(!discard.work_host_path.unwrap().exists());
+        let _ = fs::remove_dir_all(&workspace);
+        let _ = fs::remove_dir_all(&overlay);
+    }
+
+    #[test]
+    fn projection_applier_applies_projected_patch_to_lower_workspace() {
+        let workspace = unique_dir("apply-workspace");
+        let overlay = unique_dir("apply-overlay");
+        let _ = fs::remove_dir_all(&workspace);
+        let _ = fs::remove_dir_all(&overlay);
+        fs::create_dir_all(&workspace).unwrap();
+        run_git(&workspace, &["init"]);
+        run_git(
+            &workspace,
+            &["config", "user.email", "agentbox@example.test"],
+        );
+        run_git(&workspace, &["config", "user.name", "Agentbox Test"]);
+        fs::write(workspace.join("README.md"), "lower\n").unwrap();
+        run_git(&workspace, &["add", "README.md"]);
+        run_git(&workspace, &["commit", "-m", "initial"]);
+        let mut spec = MinipodSpec::for_agent_task("hermes", &workspace);
+        spec.workspace_mode = AgentPodWorkspaceMode::OverlayReview;
+        spec.filesystem.workspace_overlay =
+            WorkspaceOverlayPolicy::review_required(Some(overlay.clone()));
+        let projection = WorkspaceProjectionMaterializer::materialize(&mut spec)
+            .unwrap()
+            .expect("workspace should be projected");
+        fs::write(
+            projection.projected_host_path.join("README.md"),
+            "lower\napplied\n",
+        )
+        .unwrap();
+        let session = RuntimeSession {
+            id: "01agentboxsession".into(),
+            name: spec.name.clone(),
+            provider: "podman".into(),
+            platform: "linux-vm".into(),
+            status: RuntimeStatus::Stopped,
+            spec,
+            approval_grants: vec![],
+            transcripts: vec![],
+            started_at: Utc::now(),
+            stopped_at: Some(Utc::now()),
+        };
+
+        let applied = WorkspaceProjectionApplier::apply(&session)
+            .unwrap()
+            .expect("patch should be applied");
+
+        assert!(applied.patch_bytes > 0);
+        assert_eq!(
+            fs::read_to_string(workspace.join("README.md")).unwrap(),
+            "lower\napplied\n"
+        );
+        assert!(applied.projected_host_path.exists());
         let _ = fs::remove_dir_all(&workspace);
         let _ = fs::remove_dir_all(&overlay);
     }

@@ -315,6 +315,11 @@ enum Commands {
         /// Session id whose projected review workspace should be discarded
         session_id: String,
     },
+    /// Apply projected workspace output to the lower workspace
+    ReviewApply {
+        /// Session id whose projected review workspace should be applied
+        session_id: String,
+    },
     /// Show logs for a minipod session backed by the compatibility backend
     MinipodLogs {
         /// Minipod session id; legacy sb-* backend ids are still accepted
@@ -3044,6 +3049,31 @@ fn cmd_review_discard(session_id: String) {
     }
 }
 
+fn cmd_review_apply(session_id: String) {
+    let (manager, _session) = runtime_manager_for_session(&session_id, "apply");
+    let apply = manager
+        .apply_workspace_projection(&session_id)
+        .unwrap_or_else(|e| {
+            eprintln!("error: failed to apply workspace projection: {}", e);
+            std::process::exit(1);
+        });
+
+    let Some(apply) = apply else {
+        println!(
+            "No projected workspace patch recorded for session {}.",
+            session_id
+        );
+        return;
+    };
+
+    println!("Applied projected workspace output.");
+    println!("session:   {}", session_id);
+    println!("lower:     {}", apply.lower_host_path.display());
+    println!("projected: {}", apply.projected_host_path.display());
+    println!("patch:     {} bytes", apply.patch_bytes);
+    println!("note:      projected workspace was kept; run review-discard to remove it");
+}
+
 fn runtime_manager_for_session(
     session_id: &str,
     action: &str,
@@ -3300,6 +3330,7 @@ async fn main() {
             patch,
         } => cmd_review(session_id, json, patch),
         Commands::ReviewDiscard { session_id } => cmd_review_discard(session_id),
+        Commands::ReviewApply { session_id } => cmd_review_apply(session_id),
         Commands::MinipodLogs {
             session_id,
             follow,
