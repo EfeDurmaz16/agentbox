@@ -657,6 +657,115 @@ mod tests {
     }
 
     #[test]
+    fn migrates_legacy_audit_schema_without_losing_rows() {
+        let path = std::env::temp_dir().join(format!(
+            "agentbox-legacy-audit-{}.sqlite",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE audit_log (
+                    id                TEXT PRIMARY KEY,
+                    timestamp         TEXT NOT NULL,
+                    agent_pid         INTEGER NOT NULL,
+                    agent_name        TEXT,
+                    command           TEXT NOT NULL,
+                    cwd               TEXT NOT NULL,
+                    bucket            TEXT NOT NULL,
+                    decision          TEXT NOT NULL,
+                    user_response_ms  INTEGER,
+                    parent_process    TEXT
+                );",
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO audit_log
+                    (id, timestamp, agent_pid, agent_name, command, cwd, bucket, decision, user_response_ms, parent_process)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                params![
+                    "legacy-event",
+                    "2026-05-14T00:00:00Z",
+                    1234,
+                    "codex",
+                    "git push origin main",
+                    "/tmp/project",
+                    "approve",
+                    "approved",
+                    1500,
+                    "agentbox-shim",
+                ],
+            )
+            .unwrap();
+        }
+
+        let store = AuditStore::new(&path.to_string_lossy()).unwrap();
+        let columns = {
+            let conn = store.pool.get().unwrap();
+            table_columns(&conn).unwrap()
+        };
+        assert!(columns.iter().any(|column| column == "schema_version"));
+        assert!(columns.iter().any(|column| column == "prev_hash"));
+        assert!(columns.iter().any(|column| column == "event_hash"));
+
+        let rows = store.recent(10).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, "legacy-event");
+        assert_eq!(rows[0].schema_version, 1);
+        assert!(rows[0].prev_hash.is_none());
+        assert!(rows[0].event_hash.is_none());
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn writes_hash_chained_events_after_legacy_schema_migration() {
+        let path = std::env::temp_dir().join(format!(
+            "agentbox-legacy-audit-new-event-{}.sqlite",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE audit_log (
+                    id                TEXT PRIMARY KEY,
+                    timestamp         TEXT NOT NULL,
+                    agent_pid         INTEGER NOT NULL,
+                    agent_name        TEXT,
+                    command           TEXT NOT NULL,
+                    cwd               TEXT NOT NULL,
+                    bucket            TEXT NOT NULL,
+                    decision          TEXT NOT NULL,
+                    user_response_ms  INTEGER,
+                    parent_process    TEXT
+                );",
+            )
+            .unwrap();
+        }
+
+        let store = AuditStore::new(&path.to_string_lossy()).unwrap();
+        store
+            .log_event(&make_event(
+                "runtime",
+                "created",
+                "runtime.create session-1",
+            ))
+            .unwrap();
+
+        let rows = store.recent(10).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].schema_version, 2);
+        assert!(rows[0].event_hash.is_some());
+        assert!(store.verify_hash_chain().unwrap().valid);
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
     fn events_are_hash_chained() {
         let store = AuditStore::in_memory().unwrap();
 
