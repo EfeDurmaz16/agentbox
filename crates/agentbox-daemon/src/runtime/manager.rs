@@ -11,8 +11,8 @@ use crate::runtime::policy::validate_minipod_spec;
 use crate::runtime::provider::{RuntimeError, RuntimeProvider};
 use crate::runtime::session::RuntimeSessionStore;
 use crate::runtime::types::{
-    ApprovalGrant, CommandResult, CommandTranscript, ExecCommand, MinipodSpec, RuntimeSession,
-    RuntimeStatus,
+    ApprovalGrant, CommandResult, CommandTranscript, CredentialGrantKind, ExecCommand, MinipodSpec,
+    RuntimeSession, RuntimeStatus,
 };
 use crate::runtime::workspace::{
     WorkspaceDiffSnapshot, WorkspaceDiffSnapshotter, WorkspaceProjectionApplier,
@@ -90,12 +90,15 @@ impl RuntimeManager {
                 .map_err(|e| RuntimeError::Internal(e.to_string()))?;
         }
 
-        let result = self.provider.exec(session_id, command).await?;
+        let mut hydrated_command = command.clone();
+        hydrate_env_credential_grants(&session, &mut hydrated_command)?;
+
+        let result = self.provider.exec(session_id, &hydrated_command).await?;
         session
             .transcripts
             .push(CommandTranscript::from_command_result(
                 session_id.to_string(),
-                command,
+                &hydrated_command,
                 &result,
             ));
         self.sessions
@@ -548,6 +551,28 @@ fn is_network_http_command(command: &ExecCommand) -> bool {
     })
 }
 
+fn hydrate_env_credential_grants(
+    session: &RuntimeSession,
+    command: &mut ExecCommand,
+) -> Result<(), RuntimeError> {
+    for grant in session
+        .spec
+        .credentials
+        .grants
+        .iter()
+        .filter(|grant| matches!(grant.kind, CredentialGrantKind::EnvVar))
+    {
+        let value = std::env::var(&grant.target).map_err(|_| {
+            RuntimeError::PolicyDenied(format!(
+                "credential env grant `{}` references missing host env var `{}`",
+                grant.name, grant.target
+            ))
+        })?;
+        command.env.insert(grant.name.clone(), value);
+    }
+    Ok(())
+}
+
 fn policy_network_mode(mode: &crate::runtime::types::NetworkMode) -> PolicyNetworkMode {
     match mode {
         crate::runtime::types::NetworkMode::None => PolicyNetworkMode::None,
@@ -568,6 +593,7 @@ mod tests {
     use super::*;
     use async_trait::async_trait;
     use std::fs;
+    use std::future::Future;
 
     use crate::runtime::types::{
         ApprovalScope, CredentialGrant, CredentialGrantKind, RuntimeCapability,
@@ -610,9 +636,19 @@ mod tests {
             _session_id: &str,
             command: &ExecCommand,
         ) -> Result<CommandResult, RuntimeError> {
+            let stdout = if command.argv.first().map(String::as_str) == Some("printenv") {
+                command
+                    .argv
+                    .get(1)
+                    .and_then(|key| command.env.get(key))
+                    .cloned()
+                    .unwrap_or_default()
+            } else {
+                command.argv.join(" ")
+            };
             Ok(CommandResult {
                 exit_code: 0,
-                stdout: command.argv.join(" "),
+                stdout,
                 stderr: String::new(),
                 duration_ms: 3,
             })
@@ -646,6 +682,25 @@ mod tests {
             session_store(name),
             AuditStore::in_memory().unwrap(),
         )
+    }
+
+    async fn temp_env_var<F, Fut>(key: &str, value: Option<&str>, body: F)
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = ()>,
+    {
+        let previous = std::env::var(key).ok();
+        match value {
+            Some(value) => std::env::set_var(key, value),
+            None => std::env::remove_var(key),
+        }
+
+        body().await;
+
+        match previous {
+            Some(previous) => std::env::set_var(key, previous),
+            None => std::env::remove_var(key),
+        }
     }
 
     #[tokio::test]
@@ -715,6 +770,70 @@ mod tests {
         assert!(json.contains("<redacted>"));
         assert!(!json.contains("sk-test-secret"));
         assert!(!json.contains("/tmp/project/.env"));
+    }
+
+    #[tokio::test]
+    async fn exec_injects_only_explicit_env_credential_grants() {
+        let manager = manager("exec-env-credential");
+        temp_env_var("AGENTBOX_TEST_SECRET", Some("sk-test-secret"), || async {
+            let mut spec = MinipodSpec::for_agent_task("openclaw", "/tmp/agentbox-work");
+            spec.credentials.grants.push(CredentialGrant {
+                name: "OPENAI_API_KEY".into(),
+                kind: CredentialGrantKind::EnvVar,
+                target: "AGENTBOX_TEST_SECRET".into(),
+                one_time: true,
+                requires_approval: true,
+            });
+            let session = manager.create(&spec).await.unwrap();
+            let command = ExecCommand {
+                argv: vec!["printenv".into(), "OPENAI_API_KEY".into()],
+                working_dir: Some("/workspace".into()),
+                env: Default::default(),
+                timeout_seconds: None,
+            };
+
+            let result = manager.exec(&session.id, &command).await.unwrap();
+
+            assert_eq!(result.stdout, "sk-test-secret");
+            let saved = manager
+                .sessions
+                .get(&session.id)
+                .unwrap()
+                .expect("session should remain persisted");
+            let transcript = saved.transcripts.last().unwrap();
+            let json = serde_json::to_string(transcript).unwrap();
+            assert!(json.contains("<redacted>"));
+            assert!(!json.contains("sk-test-secret"));
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn exec_rejects_missing_env_credential_grant_target() {
+        let manager = manager("exec-env-credential-missing");
+        temp_env_var("AGENTBOX_MISSING_TEST_SECRET", None, || async {
+            let mut spec = MinipodSpec::for_agent_task("openclaw", "/tmp/agentbox-work");
+            spec.credentials.grants.push(CredentialGrant {
+                name: "OPENAI_API_KEY".into(),
+                kind: CredentialGrantKind::EnvVar,
+                target: "AGENTBOX_MISSING_TEST_SECRET".into(),
+                one_time: true,
+                requires_approval: true,
+            });
+            let session = manager.create(&spec).await.unwrap();
+            let command = ExecCommand {
+                argv: vec!["printenv".into(), "OPENAI_API_KEY".into()],
+                working_dir: Some("/workspace".into()),
+                env: Default::default(),
+                timeout_seconds: None,
+            };
+
+            let err = manager.exec(&session.id, &command).await.unwrap_err();
+
+            assert!(matches!(err, RuntimeError::PolicyDenied(_)));
+            assert!(err.to_string().contains("missing host env var"));
+        })
+        .await;
     }
 
     #[tokio::test]
