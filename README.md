@@ -205,9 +205,9 @@ agentbox stop-pod 01hxyzagentpod
 until enforcement lands. `agentbox providers` separates planned provider
 capability metadata from active network enforcement flags, so Podman
 compatibility is not presented as domain or packet-level policy enforcement.
-Linux AgentPod work has started with user and mount namespace launcher
+Linux AgentPod work has started with user, mount, and PID namespace launcher
 primitives, but native AgentPod provider execution remains unavailable until
-the remaining PID, cgroup, filesystem, and network boundaries are wired and
+the remaining cgroup, filesystem, and network boundaries are wired and
 verified.
 
 **How guarded minipods work:**

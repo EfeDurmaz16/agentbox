@@ -168,6 +168,79 @@ impl LinuxMountNamespaceLauncher {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LinuxPidNamespacePlan {
+    pub schema_version: i64,
+    pub command_argv: Vec<String>,
+    pub fork_init: bool,
+    pub mount_proc: bool,
+    pub kill_signal: String,
+    pub requires_linux: bool,
+}
+
+impl LinuxPidNamespacePlan {
+    pub fn isolated(command: &ExecCommand) -> Self {
+        Self {
+            schema_version: 1,
+            command_argv: command.argv.clone(),
+            fork_init: true,
+            mount_proc: true,
+            kill_signal: "TERM".to_string(),
+            requires_linux: true,
+        }
+    }
+}
+
+pub struct LinuxPidNamespaceLauncher;
+
+impl LinuxPidNamespaceLauncher {
+    pub fn plan(command: &ExecCommand) -> Result<LinuxPidNamespacePlan, RuntimeError> {
+        if command.argv.is_empty() {
+            return Err(RuntimeError::ManifestRejected(
+                "pid namespace launcher command cannot be empty".into(),
+            ));
+        }
+
+        Ok(LinuxPidNamespacePlan::isolated(command))
+    }
+
+    pub fn command_args(plan: &LinuxPidNamespacePlan) -> Vec<String> {
+        let mut args = vec![
+            "--pid".to_string(),
+            "--fork".to_string(),
+            "--mount-proc".to_string(),
+            "--".to_string(),
+        ];
+        args.extend(plan.command_argv.clone());
+        args
+    }
+
+    #[cfg(target_os = "linux")]
+    pub fn spawn(
+        command: &ExecCommand,
+    ) -> Result<std::process::Child, Box<dyn std::error::Error + Send + Sync>> {
+        let plan = Self::plan(command)?;
+        let mut child = std::process::Command::new("unshare");
+        child.args(Self::command_args(&plan));
+
+        if let Some(working_dir) = &command.working_dir {
+            child.current_dir(working_dir);
+        }
+        for (key, value) in &command.env {
+            child.env(key, value);
+        }
+
+        Ok(child.spawn()?)
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    pub fn spawn(
+        _command: &ExecCommand,
+    ) -> Result<std::process::Child, Box<dyn std::error::Error + Send + Sync>> {
+        Err("Linux PID namespaces are only available on Linux".into())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -255,6 +328,47 @@ mod tests {
     fn mount_namespace_spawn_is_explicitly_linux_only() {
         let spec = MinipodSpec::for_agent_task("hermes", "/tmp/agentbox-work");
         let err = LinuxMountNamespaceLauncher::spawn(&spec, &command(&["/bin/true"])).unwrap_err();
+
+        assert!(err.to_string().contains("only available on Linux"));
+    }
+
+    #[test]
+    fn pid_namespace_plan_is_forked_and_proc_scoped() {
+        let command = command(&["/bin/sleep", "1"]);
+
+        let plan = LinuxPidNamespaceLauncher::plan(&command).unwrap();
+
+        assert_eq!(plan.schema_version, 1);
+        assert_eq!(plan.command_argv, vec!["/bin/sleep", "1"]);
+        assert!(plan.fork_init);
+        assert!(plan.mount_proc);
+        assert_eq!(plan.kill_signal, "TERM");
+        assert!(plan.requires_linux);
+    }
+
+    #[test]
+    fn pid_namespace_command_args_wrap_command_with_unshare_pid() {
+        let plan = LinuxPidNamespaceLauncher::plan(&command(&["/bin/true"])).unwrap();
+
+        let args = LinuxPidNamespaceLauncher::command_args(&plan);
+
+        assert_eq!(
+            args,
+            vec!["--pid", "--fork", "--mount-proc", "--", "/bin/true"]
+        );
+    }
+
+    #[test]
+    fn pid_namespace_plan_rejects_empty_commands() {
+        let err = LinuxPidNamespaceLauncher::plan(&command(&[])).unwrap_err();
+
+        assert!(matches!(err, RuntimeError::ManifestRejected(_)));
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn pid_namespace_spawn_is_explicitly_linux_only() {
+        let err = LinuxPidNamespaceLauncher::spawn(&command(&["/bin/true"])).unwrap_err();
 
         assert!(err.to_string().contains("only available on Linux"));
     }
