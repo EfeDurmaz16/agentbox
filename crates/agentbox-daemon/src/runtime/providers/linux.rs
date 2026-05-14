@@ -2,7 +2,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::runtime::provider::RuntimeError;
 use crate::runtime::types::{
-    ExecCommand, MinipodSpec, MountMode, ResourcePolicy, SeccompAction, SeccompProfile,
+    CommandResult, ExecCommand, MinipodSpec, MountMode, ResourcePolicy, SeccompAction,
+    SeccompProfile,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -590,6 +591,70 @@ impl LinuxAgentPodExecutionPlan {
     }
 }
 
+pub struct LinuxAgentPodPrototypeExecutor;
+
+impl LinuxAgentPodPrototypeExecutor {
+    pub fn execute(
+        spec: &MinipodSpec,
+        command: &ExecCommand,
+    ) -> Result<CommandResult, RuntimeError> {
+        let plan = LinuxAgentPodExecutionPlan::from_minipod_spec(spec, command)?;
+        if !plan.live_execution_enabled {
+            return Err(RuntimeError::Unavailable(
+                "Linux AgentPod prototype execution requires AGENTBOX_LINUX_NATIVE=1".into(),
+            ));
+        }
+
+        Self::execute_plan(&plan, command)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn execute_plan(
+        plan: &LinuxAgentPodExecutionPlan,
+        command: &ExecCommand,
+    ) -> Result<CommandResult, RuntimeError> {
+        if !plan.runnable_on_current_host() {
+            return Err(RuntimeError::Unavailable(
+                "Linux AgentPod prototype execution is not runnable on this host".into(),
+            ));
+        }
+
+        let (binary, args) = plan.composed_argv.split_first().ok_or_else(|| {
+            RuntimeError::ManifestRejected("Linux AgentPod execution argv cannot be empty".into())
+        })?;
+        let start = std::time::Instant::now();
+        let mut process = std::process::Command::new(binary);
+        process.args(args);
+        if let Some(working_dir) = &command.working_dir {
+            process.current_dir(working_dir);
+        }
+        for (key, value) in &command.env {
+            process.env(key, value);
+        }
+
+        let output = process.output().map_err(|err| {
+            RuntimeError::ExecFailed(format!("Linux AgentPod prototype exec failed: {err}"))
+        })?;
+
+        Ok(CommandResult {
+            exit_code: output.status.code().unwrap_or(-1),
+            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+            duration_ms: start.elapsed().as_millis().try_into().unwrap_or(u64::MAX),
+        })
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn execute_plan(
+        _plan: &LinuxAgentPodExecutionPlan,
+        _command: &ExecCommand,
+    ) -> Result<CommandResult, RuntimeError> {
+        Err(RuntimeError::Unavailable(
+            "Linux AgentPod prototype execution is only available on Linux".into(),
+        ))
+    }
+}
+
 impl LinuxIsolationBenchmarkPlan {
     pub fn from_minipod_spec(
         spec: &MinipodSpec,
@@ -1165,6 +1230,46 @@ mod tests {
             assert!(!plan.live_execution_enabled);
             assert!(!plan.runnable_on_current_host());
         }
+    }
+
+    #[test]
+    fn prototype_executor_refuses_without_native_env_gate() {
+        if std::env::var("AGENTBOX_LINUX_NATIVE").is_ok() {
+            return;
+        }
+        let spec = MinipodSpec::for_agent_task("hermes", "/tmp/agentbox-work");
+        let command = command(&["/bin/true"]);
+
+        let err = LinuxAgentPodPrototypeExecutor::execute(&spec, &command).unwrap_err();
+
+        assert!(err.to_string().contains("AGENTBOX_LINUX_NATIVE"));
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn prototype_executor_plan_is_linux_only_on_non_linux_hosts() {
+        let spec = MinipodSpec::for_agent_task("hermes", "/tmp/agentbox-work");
+        let command = command(&["/bin/true"]);
+        let mut plan = LinuxAgentPodExecutionPlan::from_minipod_spec(&spec, &command).unwrap();
+        plan.live_execution_enabled = true;
+
+        let err = LinuxAgentPodPrototypeExecutor::execute_plan(&plan, &command).unwrap_err();
+
+        assert!(err.to_string().contains("only available on Linux"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn prototype_executor_live_smoke_runs_only_when_enabled() {
+        if !matches!(std::env::var("AGENTBOX_LINUX_NATIVE").as_deref(), Ok("1")) {
+            return;
+        }
+        let spec = MinipodSpec::for_agent_task("hermes", std::env::temp_dir());
+        let command = command(&["/bin/true"]);
+
+        let result = LinuxAgentPodPrototypeExecutor::execute(&spec, &command).unwrap();
+
+        assert_eq!(result.exit_code, 0);
     }
 
     #[test]

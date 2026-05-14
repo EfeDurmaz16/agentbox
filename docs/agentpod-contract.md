@@ -83,6 +83,11 @@ The plan can be inspected without execution:
 agentbox native-plan --provider agentpod-linux -- /bin/true
 ```
 
+The Rust daemon also contains a prototype Linux executor function for that plan.
+It is intentionally not wired into provider selection yet. It refuses to run
+unless `AGENTBOX_LINUX_NATIVE=1` is set on a Linux host, and tests keep the
+non-Linux path unavailable.
+
 ## Adaptive Runtime Selection
 
 Agentbox should choose or recommend a provider by task risk.
