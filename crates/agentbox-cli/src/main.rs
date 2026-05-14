@@ -71,6 +71,14 @@ enum Commands {
         #[arg(long = "agent-profile", default_value = "general")]
         agent_profile: String,
 
+        /// AgentPod task risk: low, medium, high, very-high
+        #[arg(long = "risk", default_value = "medium")]
+        risk: String,
+
+        /// Runtime provider: auto, podman, agentpod-macos, agentpod-linux, agentpod-windows
+        #[arg(long = "provider", default_value = "auto")]
+        provider: String,
+
         /// Add a service sidecar (postgres, redis, mysql, mongo)
         #[arg(long = "with", num_args = 1..)]
         services: Vec<String>,
@@ -99,7 +107,7 @@ enum Commands {
         #[arg(long = "allow-domain")]
         allow_domains: Vec<String>,
 
-        /// Network policy mode: deny-by-default, allowlisted, first-contact
+        /// Network policy mode: deny-by-default, allowlisted, first-contact, open-with-guardrails
         #[arg(long = "network-mode")]
         network_mode: Option<String>,
 
@@ -173,11 +181,19 @@ enum Commands {
         #[arg(long = "agent-profile", default_value = "general")]
         agent_profile: String,
 
+        /// AgentPod task risk: low, medium, high, very-high
+        #[arg(long = "risk", default_value = "medium")]
+        risk: String,
+
+        /// Runtime provider hint: auto, podman, agentpod-macos, agentpod-linux, agentpod-windows
+        #[arg(long = "provider", default_value = "auto")]
+        provider: String,
+
         /// Network domain allowed without first-contact approval
         #[arg(long = "allow-domain")]
         allow_domains: Vec<String>,
 
-        /// Network policy mode: deny-by-default, allowlisted, first-contact
+        /// Network policy mode: deny-by-default, allowlisted, first-contact, open-with-guardrails
         #[arg(long = "network-mode")]
         network_mode: Option<String>,
 
@@ -840,6 +856,8 @@ struct RunOptions {
     command: Vec<String>,
     runtime: Option<String>,
     agent_profile: String,
+    risk: String,
+    provider: String,
     services: Vec<String>,
     mount_cwd: bool,
     memory: u64,
@@ -857,9 +875,12 @@ async fn cmd_run(options: RunOptions) {
     use agentbox_daemon::config;
     use agentbox_daemon::pod::machine::MachineManager;
     use agentbox_daemon::runtime::manager::RuntimeManager;
-    use agentbox_daemon::runtime::registry::RuntimeProviderRegistry;
+    use agentbox_daemon::runtime::registry::{ProviderSelectionRequest, RuntimeProviderRegistry};
     use agentbox_daemon::runtime::session::RuntimeSessionStore;
     use agentbox_daemon::runtime::types::{ExecCommand, MinipodSpec, NetworkMode, ResourcePolicy};
+
+    let risk = parse_agentpod_risk(&options.risk);
+    let provider_hint = parse_provider_hint(&options.provider);
 
     // 1. Check whether the current compatibility backend is available.
     match Command::new("podman").arg("--version").output() {
@@ -903,13 +924,33 @@ async fn cmd_run(options: RunOptions) {
         std::process::exit(1);
     });
     let registry = RuntimeProviderRegistry::with_local_providers(agentbox_sock, shim_binary);
-    let provider = registry.get("podman").unwrap_or_else(|e| {
+    let selection = registry
+        .explain_selection(&ProviderSelectionRequest {
+            preferred_provider: provider_hint.clone(),
+            risk: risk.clone(),
+        })
+        .unwrap_or_else(|e| {
+            eprintln!("Error: failed to select runtime provider: {}", e);
+            std::process::exit(1);
+        });
+    if selection.selected_provider != "podman" {
         eprintln!(
-            "Error: failed to resolve compatibility runtime provider: {}",
-            e
+            "Error: provider `{}` is not runnable in this build yet.",
+            selection.selected_provider
         );
+        eprintln!("reason: {}", selection.reason);
+        eprintln!("hint: use `--provider podman` for the current compatibility backend");
         std::process::exit(1);
-    });
+    }
+    let provider = registry
+        .get(&selection.selected_provider)
+        .unwrap_or_else(|e| {
+            eprintln!(
+                "Error: failed to resolve compatibility runtime provider: {}",
+                e
+            );
+            std::process::exit(1);
+        });
     let manager = RuntimeManager::new(
         provider,
         RuntimeSessionStore::new(config.session_store_path.clone()),
@@ -936,6 +977,17 @@ async fn cmd_run(options: RunOptions) {
         .unwrap_or_else(|| "agent".to_string());
     let mut spec =
         MinipodSpec::for_agent_task_with_profile(agent_name, workspace, options.agent_profile);
+    spec.risk = risk;
+    spec.labels
+        .insert("agentbox.risk".to_string(), spec.risk.label().to_string());
+    spec.labels.insert(
+        "agentbox.provider.selected".to_string(),
+        selection.selected_provider.clone(),
+    );
+    spec.labels.insert(
+        "agentbox.provider.selection_reason".to_string(),
+        selection.reason.clone(),
+    );
     spec.agent.command = if options.command.is_empty() {
         vec!["sleep".to_string(), "infinity".to_string()]
     } else {
@@ -991,6 +1043,9 @@ async fn cmd_run(options: RunOptions) {
         .cloned()
         .unwrap_or_else(|| "ubuntu:24.04".to_string());
     println!("Creating governed minipod {}...", spec.name);
+    println!("  Risk: {}", spec.risk.label());
+    println!("  Provider: {}", selection.selected_provider);
+    println!("  Selection: {}", selection.reason);
     println!("  Image: {}", ws_image);
 
     if !spec.services.is_empty() {
@@ -2031,6 +2086,8 @@ struct MinipodSpecOptions {
     agent: String,
     workspace: Option<PathBuf>,
     agent_profile: String,
+    risk: String,
+    provider: String,
     allow_domains: Vec<String>,
     read_only_mounts: Vec<String>,
     credential_files: Vec<String>,
@@ -2043,6 +2100,7 @@ struct MinipodSpecOptions {
 
 fn cmd_minipod_spec(options: MinipodSpecOptions) {
     use agentbox_daemon::runtime::policy::validate_minipod_spec;
+    use agentbox_daemon::runtime::registry::{ProviderSelectionRequest, RuntimeProviderRegistry};
     use agentbox_daemon::runtime::types::{
         MinipodSpec, NetworkMode, WorkspaceOverlayPolicy, WorkspaceWritePolicy,
     };
@@ -2055,6 +2113,28 @@ fn cmd_minipod_spec(options: MinipodSpecOptions) {
     });
     let mut spec =
         MinipodSpec::for_agent_task_with_profile(options.agent, workspace, options.agent_profile);
+    spec.risk = parse_agentpod_risk(&options.risk);
+    spec.labels
+        .insert("agentbox.risk".to_string(), spec.risk.label().to_string());
+
+    let registry = RuntimeProviderRegistry::with_local_providers(String::new(), String::new());
+    let selection = registry
+        .explain_selection(&ProviderSelectionRequest {
+            preferred_provider: parse_provider_hint(&options.provider),
+            risk: spec.risk.clone(),
+        })
+        .unwrap_or_else(|e| {
+            eprintln!("error: failed to select provider: {}", e);
+            std::process::exit(1);
+        });
+    spec.labels.insert(
+        "agentbox.provider.selected".to_string(),
+        selection.selected_provider,
+    );
+    spec.labels.insert(
+        "agentbox.provider.selection_reason".to_string(),
+        selection.reason,
+    );
 
     for bundle_path in options.policy_bundles {
         let bundle = load_task_policy_bundle(&bundle_path);
@@ -2139,6 +2219,31 @@ fn parse_network_mode(raw: &str) -> agentbox_daemon::runtime::types::NetworkMode
             );
             std::process::exit(1);
         }
+    }
+}
+
+fn parse_agentpod_risk(raw: &str) -> agentbox_daemon::runtime::types::AgentPodRiskLevel {
+    use agentbox_daemon::runtime::types::AgentPodRiskLevel;
+
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "low" => AgentPodRiskLevel::Low,
+        "medium" | "med" => AgentPodRiskLevel::Medium,
+        "high" => AgentPodRiskLevel::High,
+        "very-high" | "very_high" | "veryhigh" | "critical" => AgentPodRiskLevel::VeryHigh,
+        other => {
+            eprintln!("error: invalid --risk value `{}`", other);
+            eprintln!("hint: expected low, medium, high, or very-high");
+            std::process::exit(1);
+        }
+    }
+}
+
+fn parse_provider_hint(raw: &str) -> Option<String> {
+    let provider = raw.trim();
+    if provider.is_empty() || provider.eq_ignore_ascii_case("auto") {
+        None
+    } else {
+        Some(provider.to_string())
     }
 }
 
@@ -2469,6 +2574,8 @@ async fn main() {
             command,
             runtime,
             agent_profile,
+            risk,
+            provider,
             services,
             mount_cwd,
             memory,
@@ -2484,6 +2591,8 @@ async fn main() {
                 command,
                 runtime,
                 agent_profile,
+                risk,
+                provider,
                 services,
                 mount_cwd,
                 memory,
@@ -2513,6 +2622,8 @@ async fn main() {
             agent,
             workspace,
             agent_profile,
+            risk,
+            provider,
             allow_domains,
             network_mode,
             read_only_mounts,
@@ -2525,6 +2636,8 @@ async fn main() {
             agent,
             workspace,
             agent_profile,
+            risk,
+            provider,
             allow_domains,
             read_only_mounts,
             credential_files,
