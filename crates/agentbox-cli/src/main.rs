@@ -250,6 +250,15 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
+    /// Review workspace output for an AgentPod session
+    Review {
+        /// Session id to review
+        session_id: String,
+
+        /// Emit JSON
+        #[arg(long)]
+        json: bool,
+    },
     /// Show logs for a minipod session backed by the compatibility backend
     MinipodLogs {
         /// Minipod session id; legacy sb-* backend ids are still accepted
@@ -2614,6 +2623,71 @@ fn cmd_minipod_inspect(session_id: Option<String>, json: bool) {
     }
 }
 
+fn cmd_review(session_id: String, json: bool) {
+    use agentbox_daemon::config;
+    use agentbox_daemon::runtime::session::RuntimeSessionStore;
+    use agentbox_daemon::runtime::workspace::WorkspaceDiffSnapshotter;
+
+    let config = config::load().unwrap_or_else(|e| {
+        eprintln!("error: failed to load Agentbox config: {}", e);
+        std::process::exit(1);
+    });
+    let store = RuntimeSessionStore::new(config.session_store_path);
+    let session = store.get(&session_id).unwrap_or_else(|e| {
+        eprintln!("error: failed to read runtime session store: {}", e);
+        std::process::exit(1);
+    });
+    let Some(session) = session else {
+        eprintln!("error: AgentPod session not found: {}", session_id);
+        std::process::exit(1);
+    };
+    let snapshot = WorkspaceDiffSnapshotter::capture(&session);
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&snapshot).expect("failed to serialize workspace review")
+        );
+        return;
+    }
+
+    println!("AgentPod review");
+    println!("{}", "-".repeat(64));
+    println!("session:   {}", session.id);
+    println!("provider:  {}", session.provider);
+    println!("risk:      {}", session.spec.risk.label());
+    println!("workspace: {}", snapshot.workspace);
+    println!("mode:      {}", session.spec.workspace_mode.label());
+    if !snapshot.available {
+        println!(
+            "diff:      unavailable ({})",
+            snapshot
+                .reason
+                .unwrap_or_else(|| "unknown reason".to_string())
+        );
+        return;
+    }
+    println!(
+        "git head:  {}",
+        snapshot.git_head.unwrap_or_else(|| "(unknown)".into())
+    );
+    println!(
+        "diff:      {}",
+        snapshot
+            .diff_shortstat
+            .clone()
+            .unwrap_or_else(|| "no unstaged diff".to_string())
+    );
+    if snapshot.changed_files.is_empty() {
+        println!("files:     no workspace changes");
+    } else {
+        println!("files:");
+        for file in &snapshot.changed_files {
+            println!("  - {}", file);
+        }
+    }
+}
+
 fn print_minipod_session(session: &agentbox_daemon::runtime::types::RuntimeSession) {
     println!("session:   {}", session.id);
     println!("name:      {}", session.name);
@@ -2795,6 +2869,7 @@ async fn main() {
         }),
         Commands::Providers => cmd_providers(),
         Commands::MinipodInspect { session_id, json } => cmd_minipod_inspect(session_id, json),
+        Commands::Review { session_id, json } => cmd_review(session_id, json),
         Commands::MinipodLogs {
             session_id,
             follow,
