@@ -209,6 +209,10 @@ pub struct ApprovalGrant {
 }
 
 impl ApprovalGrant {
+    pub fn is_expired_at(&self, now: DateTime<Utc>) -> bool {
+        self.expires_at.is_some_and(|expires_at| expires_at <= now)
+    }
+
     pub fn bound_to_session(mut self, session_id: &str) -> Self {
         if let ApprovalScope::Session { session_id: scope } = &mut self.scope {
             if scope.is_empty() {
@@ -1074,6 +1078,26 @@ mod tests {
         let decoded: Vec<ApprovalScope> = serde_json::from_str(&encoded).unwrap();
 
         assert_eq!(decoded, scopes);
+    }
+
+    #[test]
+    fn approval_grant_expiry_uses_inclusive_deadline() {
+        let now = Utc::now();
+        let active = ApprovalGrant {
+            id: "active".into(),
+            scope: ApprovalScope::Once,
+            reason: "active".into(),
+            expires_at: Some(now + chrono::Duration::seconds(60)),
+        };
+        let expired = ApprovalGrant {
+            id: "expired".into(),
+            scope: ApprovalScope::Once,
+            reason: "expired".into(),
+            expires_at: Some(now),
+        };
+
+        assert!(!active.is_expired_at(now));
+        assert!(expired.is_expired_at(now));
     }
 
     #[test]

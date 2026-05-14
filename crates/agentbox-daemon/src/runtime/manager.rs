@@ -76,8 +76,9 @@ impl RuntimeManager {
             .map_err(|e| RuntimeError::Internal(e.to_string()))?
             .ok_or_else(|| RuntimeError::NotFound(session_id.to_string()))?;
 
+        let grant_count_before = session.approval_grants.len();
         let grant_id = self.enforce_exec_policy(&mut session, command)?;
-        if grant_id.is_some() {
+        if grant_id.is_some() || session.approval_grants.len() != grant_count_before {
             self.sessions
                 .upsert(session.clone())
                 .map_err(|e| RuntimeError::Internal(e.to_string()))?;
@@ -160,6 +161,12 @@ impl RuntimeManager {
             .map_err(|e| RuntimeError::Internal(e.to_string()))?
             .ok_or_else(|| RuntimeError::NotFound(session_id.to_string()))?;
         let grant = grant.bound_to_session(session_id);
+        if grant.is_expired_at(Utc::now()) {
+            return Err(RuntimeError::ManifestRejected(format!(
+                "approval grant {} is already expired",
+                grant.id
+            )));
+        }
         if let Some(scope_session_id) = grant.session_scope_id() {
             if scope_session_id != session_id {
                 return Err(RuntimeError::ManifestRejected(format!(
@@ -195,7 +202,12 @@ impl RuntimeManager {
             .map_err(|e| RuntimeError::Internal(e.to_string()))?
             .ok_or_else(|| RuntimeError::NotFound(session_id.to_string()))?;
 
-        Ok(session.approval_grants)
+        let now = Utc::now();
+        Ok(session
+            .approval_grants
+            .into_iter()
+            .filter(|grant| !grant.is_expired_at(now))
+            .collect())
     }
 
     pub fn list_sessions(&self) -> Result<Vec<RuntimeSession>, RuntimeError> {
@@ -214,6 +226,10 @@ impl RuntimeManager {
                 "exec command cannot be empty".into(),
             ));
         }
+        let now = Utc::now();
+        session
+            .approval_grants
+            .retain(|grant| !grant.is_expired_at(now));
 
         let ctx = command_context_for_session(session, command);
         let classification = classify::classify(
@@ -647,5 +663,58 @@ mod tests {
             .unwrap_err();
 
         assert!(matches!(err, RuntimeError::ManifestRejected(_)));
+    }
+
+    #[tokio::test]
+    async fn rejects_already_expired_session_approval_grant() {
+        let manager = manager("session-approval-expired-add");
+        let spec = MinipodSpec::for_agent_task("hermes", "/tmp/agentbox-work");
+        let session = manager.create(&spec).await.unwrap();
+
+        let err = manager
+            .add_session_approval_grant(
+                &session.id,
+                ApprovalGrant {
+                    id: "grant-expired".into(),
+                    scope: ApprovalScope::Session {
+                        session_id: session.id.clone(),
+                    },
+                    reason: "expired approval".into(),
+                    expires_at: Some(Utc::now() - chrono::Duration::seconds(1)),
+                },
+            )
+            .unwrap_err();
+
+        assert!(matches!(err, RuntimeError::ManifestRejected(_)));
+    }
+
+    #[tokio::test]
+    async fn expired_approval_grants_do_not_authorize_exec() {
+        let manager = manager("exec-expired-grant");
+        let mut spec = MinipodSpec::for_agent_task("openclaw", "/tmp/agentbox-work");
+        spec.approvals.push(ApprovalGrant {
+            id: "expired-git-push".into(),
+            scope: ApprovalScope::Command {
+                binary: "git".into(),
+                args_prefix: vec!["push".into()],
+            },
+            reason: "expired git push approval".into(),
+            expires_at: Some(Utc::now() - chrono::Duration::seconds(1)),
+        });
+        let session = manager.create(&spec).await.unwrap();
+        let command = ExecCommand {
+            argv: vec!["git".into(), "push".into(), "origin".into(), "main".into()],
+            working_dir: Some("/workspace".into()),
+            env: Default::default(),
+            timeout_seconds: None,
+        };
+
+        let err = manager.exec(&session.id, &command).await.unwrap_err();
+
+        assert!(matches!(err, RuntimeError::PolicyDenied(_)));
+        assert!(manager
+            .session_approval_grants(&session.id)
+            .unwrap()
+            .is_empty());
     }
 }
