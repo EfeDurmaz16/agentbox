@@ -99,6 +99,10 @@ enum Commands {
         #[arg(long = "allow-domain")]
         allow_domains: Vec<String>,
 
+        /// Network policy mode: deny-by-default, allowlisted, first-contact
+        #[arg(long = "network-mode")]
+        network_mode: Option<String>,
+
         /// Network domain blocked for this minipod task
         #[arg(long = "deny-domain")]
         deny_domains: Vec<String>,
@@ -168,6 +172,10 @@ enum Commands {
         /// Network domain allowed without first-contact approval
         #[arg(long = "allow-domain")]
         allow_domains: Vec<String>,
+
+        /// Network policy mode: deny-by-default, allowlisted, first-contact
+        #[arg(long = "network-mode")]
+        network_mode: Option<String>,
 
         /// Network domain blocked for this minipod task
         #[arg(long = "deny-domain")]
@@ -827,6 +835,7 @@ struct RunOptions {
     credential_files: Vec<String>,
     policy_bundles: Vec<PathBuf>,
     allow_domains: Vec<String>,
+    network_mode: Option<String>,
     deny_domains: Vec<String>,
 }
 
@@ -951,6 +960,9 @@ async fn cmd_run(options: RunOptions) {
     if !options.allow_domains.is_empty() {
         spec.network.mode = NetworkMode::AllowListed;
         spec.network.allowed_domains = options.allow_domains;
+    }
+    if let Some(mode) = options.network_mode {
+        spec.network.mode = parse_network_mode(&mode);
     }
     if !options.deny_domains.is_empty() {
         spec.network.denied_domains = options.deny_domains;
@@ -1975,6 +1987,7 @@ struct MinipodSpecOptions {
     read_only_mounts: Vec<String>,
     credential_files: Vec<String>,
     policy_bundles: Vec<PathBuf>,
+    network_mode: Option<String>,
     deny_domains: Vec<String>,
 }
 
@@ -2006,6 +2019,9 @@ fn cmd_minipod_spec(options: MinipodSpecOptions) {
     if !options.allow_domains.is_empty() {
         spec.network.mode = NetworkMode::AllowListed;
         spec.network.allowed_domains = options.allow_domains;
+    }
+    if let Some(mode) = options.network_mode {
+        spec.network.mode = parse_network_mode(&mode);
     }
     if !options.deny_domains.is_empty() {
         spec.network.denied_domains = options.deny_domains;
@@ -2041,6 +2057,23 @@ fn parse_read_only_mount(raw: &str) -> agentbox_daemon::runtime::types::MountRul
         guest_path: guest_path.to_string(),
         mode: MountMode::ReadOnly,
         kind: MountKind::ReadOnlyHost,
+    }
+}
+
+fn parse_network_mode(raw: &str) -> agentbox_daemon::runtime::types::NetworkMode {
+    use agentbox_daemon::runtime::types::NetworkMode;
+
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "deny" | "deny-by-default" | "deny_by_default" => NetworkMode::DenyByDefault,
+        "allowlist" | "allowlisted" | "allow-listed" => NetworkMode::AllowListed,
+        "first-contact" | "first_contact" | "approval-on-first-contact" => {
+            NetworkMode::ApprovalOnFirstContact
+        }
+        other => {
+            eprintln!("error: invalid --network-mode value `{}`", other);
+            eprintln!("hint: expected deny-by-default, allowlisted, or first-contact");
+            std::process::exit(1);
+        }
     }
 }
 
@@ -2331,6 +2364,7 @@ async fn main() {
             credential_files,
             policy_bundles,
             allow_domains,
+            network_mode,
             deny_domains,
         } => {
             cmd_run(RunOptions {
@@ -2344,6 +2378,7 @@ async fn main() {
                 credential_files,
                 policy_bundles,
                 allow_domains,
+                network_mode,
                 deny_domains,
             })
             .await
@@ -2365,6 +2400,7 @@ async fn main() {
             workspace,
             agent_profile,
             allow_domains,
+            network_mode,
             read_only_mounts,
             credential_files,
             policy_bundles,
@@ -2377,6 +2413,7 @@ async fn main() {
             read_only_mounts,
             credential_files,
             policy_bundles,
+            network_mode,
             deny_domains,
         }),
         Commands::Providers => cmd_providers(),

@@ -178,6 +178,9 @@ agentbox minipod-spec hermes --workspace . --allow-domain api.openai.com
 # Block high-risk destinations for the task
 agentbox minipod-spec hermes --workspace . --deny-domain metadata.google.internal
 
+# Require approval on first contact for unknown external destinations
+agentbox minipod-spec hermes --workspace . --network-mode first-contact
+
 # Bind a task-scoped policy bundle into the manifest
 agentbox minipod-spec hermes --workspace . --policy-bundle ./agentbox.task-policy.json
 
