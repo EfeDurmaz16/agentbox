@@ -1,10 +1,11 @@
 # Remote AgentPod
 
-Remote AgentPod is the future provider shape for attached machines, disposable
-workers, and cloud-hosted execution cells. It is not a runnable provider in this
-repository yet.
+Remote AgentPod is the provider shape for attached machines, disposable workers,
+and cloud-hosted execution cells. It is experimental and disabled by default.
+`RemoteAgentPodProvider` becomes available only when
+`AGENTBOX_REMOTE_AGENTPOD_ENDPOINT` points at an HTTPS worker endpoint.
 
-The current product surface is a secret-free transport descriptor:
+The product surface starts with a secret-free transport descriptor:
 
 ```sh
 agentbox remote-descriptor \
@@ -164,6 +165,9 @@ acknowledgements using the Ed25519 format described above and exposes the same
 This is still a contract worker, not the final sandboxed remote execution
 engine. The `exec` route runs the provided argv directly, without invoking a
 shell, and returns exit code, stdout, stderr, duration, and lifecycle evidence.
+When the daemon-side provider creates a remote session, it persists the worker
+endpoint, worker session id, worker identity, and worker evidence endpoint in
+session labels so later exec/destroy calls can route back to the same worker.
 Workspace materialization, policy enforcement, credential handoff, evidence
 storage, and kill-switch process control remain future work.
 
@@ -209,6 +213,7 @@ implementation.
 
 ## Current Boundary
 
-`remote-agentpod` remains descriptor-only. The missing pieces are a live worker
-server, provider lifecycle wiring, command execution, evidence streaming,
-credential handoff, kill switch enforcement, and live conformance tests.
+`remote-agentpod` is now an experimental gated provider. The missing pieces are
+sandboxed remote execution, workspace materialization, policy enforcement inside
+the worker, credential handoff, evidence streaming/storage, kill-switch process
+control, and live HTTPS worker conformance tests.

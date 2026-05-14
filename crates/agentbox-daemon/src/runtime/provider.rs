@@ -133,9 +133,21 @@ pub trait RuntimeProvider: Send + Sync {
         command: &ExecCommand,
     ) -> Result<CommandResult, RuntimeError>;
 
+    async fn exec_session(
+        &self,
+        session: &RuntimeSession,
+        command: &ExecCommand,
+    ) -> Result<CommandResult, RuntimeError> {
+        self.exec(&session.id, command).await
+    }
+
     async fn status(&self, session_id: &str) -> Result<RuntimeStatus, RuntimeError>;
 
     async fn destroy(&self, session_id: &str) -> Result<(), RuntimeError>;
+
+    async fn destroy_session(&self, session: &RuntimeSession) -> Result<(), RuntimeError> {
+        self.destroy(&session.id).await
+    }
 
     async fn list(&self) -> Result<Vec<RuntimeSession>, RuntimeError>;
 }

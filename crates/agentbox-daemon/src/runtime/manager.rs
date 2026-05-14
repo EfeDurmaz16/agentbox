@@ -103,7 +103,10 @@ impl RuntimeManager {
         let mut hydrated_command = command.clone();
         let consumed_credentials = hydrate_env_credential_grants(&session, &mut hydrated_command)?;
 
-        let result = self.provider.exec(session_id, &hydrated_command).await?;
+        let result = self
+            .provider
+            .exec_session(&session, &hydrated_command)
+            .await?;
         for grant in &consumed_credentials {
             session.spec.credentials.grants.retain(|existing| {
                 !(existing.name == grant.name
@@ -168,7 +171,7 @@ impl RuntimeManager {
             .map_err(|e| RuntimeError::Internal(e.to_string()))?
             .ok_or_else(|| RuntimeError::NotFound(session_id.to_string()))?;
 
-        self.provider.destroy(session_id).await?;
+        self.provider.destroy_session(&session).await?;
         session.status = RuntimeStatus::Stopped;
         session.stopped_at = Some(Utc::now());
         session.approval_grants.clear();

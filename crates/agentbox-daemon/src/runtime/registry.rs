@@ -151,7 +151,7 @@ impl RuntimeProviderRegistry {
         registry.register(Arc::new(AgentPodProvider::new(
             AgentPodProviderKind::Windows,
         )));
-        registry.register(Arc::new(RemoteAgentPodProvider));
+        registry.register(Arc::new(RemoteAgentPodProvider::default()));
         registry
     }
 
@@ -166,7 +166,7 @@ impl RuntimeProviderRegistry {
         registry.register(Arc::new(AgentPodProvider::new(
             AgentPodProviderKind::Windows,
         )));
-        registry.register(Arc::new(RemoteAgentPodProvider));
+        registry.register(Arc::new(RemoteAgentPodProvider::default()));
         registry
     }
 }

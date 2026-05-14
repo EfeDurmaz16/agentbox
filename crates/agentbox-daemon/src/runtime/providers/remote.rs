@@ -4,6 +4,7 @@ use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::sync::Arc;
 
 use crate::runtime::bridge::HostBridgeTransportKind;
 use crate::runtime::provider::{
@@ -937,13 +938,99 @@ fn require_lifecycle_events(
     Ok(())
 }
 
-pub struct RemoteAgentPodProvider;
+const REMOTE_AGENTPOD_ENDPOINT_ENV: &str = "AGENTBOX_REMOTE_AGENTPOD_ENDPOINT";
+const REMOTE_LABEL_ENDPOINT: &str = "agentbox.remote.endpoint";
+const REMOTE_LABEL_WORKER_SESSION_ID: &str = "agentbox.remote.worker_session";
+const REMOTE_LABEL_WORKER_IDENTITY: &str = "agentbox.remote.worker_identity";
+const REMOTE_LABEL_WORKER_EVIDENCE_ENDPOINT: &str = "agentbox.remote.evidence_endpoint";
+
+#[derive(Clone, Default)]
+pub struct RemoteAgentPodProvider {
+    endpoint: Option<String>,
+    transport: Option<Arc<dyn RemoteAgentPodTransport>>,
+}
 
 impl RemoteAgentPodProvider {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_transport(
+        endpoint: impl Into<String>,
+        transport: Arc<dyn RemoteAgentPodTransport>,
+    ) -> Self {
+        Self {
+            endpoint: Some(endpoint.into()),
+            transport: Some(transport),
+        }
+    }
+
     fn unavailable(&self) -> RuntimeError {
-        RuntimeError::Unavailable(
-            "remote-agentpod is a provider descriptor; remote transport, auth, and worker lifecycle are not implemented yet".into(),
-        )
+        RuntimeError::Unavailable(format!(
+            "remote-agentpod requires {REMOTE_AGENTPOD_ENDPOINT_ENV}=https://worker.example.com/agentpod"
+        ))
+    }
+
+    fn configured_endpoint(&self) -> Result<String, RuntimeError> {
+        if let Some(endpoint) = &self.endpoint {
+            validate_remote_endpoint(endpoint)?;
+            return Ok(endpoint.clone());
+        }
+        let endpoint =
+            std::env::var(REMOTE_AGENTPOD_ENDPOINT_ENV).map_err(|_| self.unavailable())?;
+        validate_remote_endpoint(&endpoint)?;
+        Ok(endpoint)
+    }
+
+    fn transport_for(
+        &self,
+        endpoint: &str,
+    ) -> Result<Arc<dyn RemoteAgentPodTransport>, RuntimeError> {
+        if let Some(transport) = &self.transport {
+            return Ok(transport.clone());
+        }
+        Ok(Arc::new(HttpRemoteAgentPodTransport::new(endpoint)?))
+    }
+
+    fn endpoint_from_session<'a>(
+        &self,
+        session: &'a RuntimeSession,
+    ) -> Result<&'a str, RuntimeError> {
+        session
+            .spec
+            .labels
+            .get(REMOTE_LABEL_ENDPOINT)
+            .map(String::as_str)
+            .ok_or_else(|| {
+                RuntimeError::ManifestRejected(
+                    "remote AgentPod session is missing worker endpoint metadata".into(),
+                )
+            })
+    }
+
+    fn worker_session_from_session<'a>(
+        &self,
+        session: &'a RuntimeSession,
+    ) -> Result<&'a str, RuntimeError> {
+        session
+            .spec
+            .labels
+            .get(REMOTE_LABEL_WORKER_SESSION_ID)
+            .map(String::as_str)
+            .ok_or_else(|| {
+                RuntimeError::ManifestRejected(
+                    "remote AgentPod session is missing worker session metadata".into(),
+                )
+            })
+    }
+}
+
+impl std::fmt::Debug for RemoteAgentPodProvider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RemoteAgentPodProvider")
+            .field("endpoint", &self.endpoint)
+            .field("transport", &self.transport.as_ref().map(|_| "<transport>"))
+            .finish()
     }
 }
 
@@ -962,7 +1049,7 @@ impl RuntimeProvider for RemoteAgentPodProvider {
     }
 
     fn implementation_status(&self) -> ProviderImplementationStatus {
-        ProviderImplementationStatus::DescriptorOnly
+        ProviderImplementationStatus::Experimental
     }
 
     fn capabilities(&self) -> &[RuntimeCapability] {
@@ -981,11 +1068,54 @@ impl RuntimeProvider for RemoteAgentPodProvider {
     }
 
     async fn is_available(&self) -> bool {
-        false
+        self.configured_endpoint().is_ok()
     }
 
-    async fn create(&self, _spec: &MinipodSpec) -> Result<RuntimeSession, RuntimeError> {
-        Err(self.unavailable())
+    async fn create(&self, spec: &MinipodSpec) -> Result<RuntimeSession, RuntimeError> {
+        let endpoint = self.configured_endpoint()?;
+        let transport = self.transport_for(&endpoint)?;
+        let transport_descriptor = RemoteAgentPodTransportDescriptor::new(
+            endpoint.clone(),
+            RemoteAgentPodAuthKind::SignedChallenge,
+            RemoteAgentPodEvidenceMode::BundleUpload,
+        )?;
+        let handshake_descriptor = RemoteAgentPodHandshakeDescriptor::new(
+            endpoint.clone(),
+            RemoteAgentPodAuthKind::SignedChallenge,
+            300,
+        )?;
+        let handshake_ack = transport.handshake(&handshake_descriptor).await?;
+        let response = transport
+            .create_session(RemoteAgentPodCreateSessionRequest {
+                transport: transport_descriptor,
+                handshake_ack: handshake_ack.clone(),
+                spec: spec.clone(),
+            })
+            .await?;
+        let mut session = RuntimeSession::new(
+            spec.name.clone(),
+            self.name().to_string(),
+            self.platform().to_string(),
+            spec.clone(),
+        );
+        session.status = response.status;
+        session
+            .spec
+            .labels
+            .insert(REMOTE_LABEL_ENDPOINT.to_string(), endpoint);
+        session.spec.labels.insert(
+            REMOTE_LABEL_WORKER_SESSION_ID.to_string(),
+            response.worker_session_id,
+        );
+        session.spec.labels.insert(
+            REMOTE_LABEL_WORKER_IDENTITY.to_string(),
+            handshake_ack.worker_identity,
+        );
+        session.spec.labels.insert(
+            REMOTE_LABEL_WORKER_EVIDENCE_ENDPOINT.to_string(),
+            handshake_ack.evidence_endpoint,
+        );
+        Ok(session)
     }
 
     async fn exec(
@@ -996,12 +1126,45 @@ impl RuntimeProvider for RemoteAgentPodProvider {
         Err(self.unavailable())
     }
 
+    async fn exec_session(
+        &self,
+        session: &RuntimeSession,
+        command: &ExecCommand,
+    ) -> Result<CommandResult, RuntimeError> {
+        let endpoint = self.endpoint_from_session(session)?;
+        let worker_session_id = self.worker_session_from_session(session)?;
+        let transport = self.transport_for(endpoint)?;
+        let response = transport
+            .exec_command(RemoteAgentPodExecRequest {
+                session_id: session.id.clone(),
+                worker_session_id: worker_session_id.to_string(),
+                command: command.clone(),
+            })
+            .await?;
+        Ok(response.result)
+    }
+
     async fn status(&self, _session_id: &str) -> Result<RuntimeStatus, RuntimeError> {
         Err(self.unavailable())
     }
 
     async fn destroy(&self, _session_id: &str) -> Result<(), RuntimeError> {
         Err(self.unavailable())
+    }
+
+    async fn destroy_session(&self, session: &RuntimeSession) -> Result<(), RuntimeError> {
+        let endpoint = self.endpoint_from_session(session)?;
+        let worker_session_id = self.worker_session_from_session(session)?;
+        let transport = self.transport_for(endpoint)?;
+        transport
+            .destroy_session(RemoteAgentPodDestroySessionRequest {
+                session_id: session.id.clone(),
+                worker_session_id: worker_session_id.to_string(),
+                reason: "operator_destroy".into(),
+                kill_switch_required: true,
+            })
+            .await?;
+        Ok(())
     }
 
     async fn list(&self) -> Result<Vec<RuntimeSession>, RuntimeError> {
@@ -1014,7 +1177,6 @@ mod tests {
     use super::*;
     use crate::runtime::providers::conformance::{
         assert_network_enforcement_metadata, assert_provider_metadata,
-        assert_unavailable_provider_contract,
     };
     use ed25519_dalek::{Signer, SigningKey};
     use std::collections::HashMap;
@@ -1119,7 +1281,10 @@ mod tests {
 
     #[tokio::test]
     async fn remote_agentpod_descriptor_does_not_claim_execution() {
-        let provider = RemoteAgentPodProvider;
+        let provider = RemoteAgentPodProvider {
+            endpoint: Some(String::new()),
+            transport: None,
+        };
 
         assert_provider_metadata(
             &provider,
@@ -1134,14 +1299,54 @@ mod tests {
         assert_eq!(provider.family(), ProviderFamily::Remote);
         assert_eq!(
             provider.implementation_status(),
-            ProviderImplementationStatus::DescriptorOnly
+            ProviderImplementationStatus::Experimental
         );
         assert_eq!(
             provider.bridge_transport_kinds(),
             &[HostBridgeTransportKind::RemoteTunnel]
         );
         assert_network_enforcement_metadata(&provider, &[]);
-        assert_unavailable_provider_contract(&provider).await;
+        assert!(!provider.is_available().await);
+        let spec = MinipodSpec::for_agent_task("hermes", "/tmp/workspace");
+        assert!(provider.create(&spec).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn remote_agentpod_provider_routes_lifecycle_through_transport() {
+        let provider = RemoteAgentPodProvider::with_transport(
+            "https://worker.example.com/agentpod",
+            Arc::new(FakeRemoteAgentPodTransport),
+        );
+        let spec = MinipodSpec::for_agent_task("hermes", "/tmp/workspace");
+
+        assert!(provider.is_available().await);
+        let session = provider.create(&spec).await.unwrap();
+
+        assert_eq!(session.status, RuntimeStatus::Running);
+        assert_eq!(
+            session.spec.labels.get(REMOTE_LABEL_ENDPOINT),
+            Some(&"https://worker.example.com/agentpod".to_string())
+        );
+        assert_eq!(
+            session.spec.labels.get(REMOTE_LABEL_WORKER_SESSION_ID),
+            Some(&format!("worker-{}", spec.id))
+        );
+        assert_eq!(
+            session.spec.labels.get(REMOTE_LABEL_WORKER_IDENTITY),
+            Some(&"worker.local/test".to_string())
+        );
+
+        let command = ExecCommand {
+            argv: vec!["printf".into(), "ok".into()],
+            working_dir: None,
+            env: HashMap::new(),
+            timeout_seconds: Some(5),
+        };
+        let result = provider.exec_session(&session, &command).await.unwrap();
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(result.stdout, "ok\n");
+
+        provider.destroy_session(&session).await.unwrap();
     }
 
     #[test]
@@ -1780,12 +1985,11 @@ mod tests {
             .lifecycle_events
             .contains(&RemoteAgentPodLifecycleEvent::EvidenceSealed));
 
-        let provider = RemoteAgentPodProvider;
+        let provider = RemoteAgentPodProvider::default();
         assert_eq!(
             provider.implementation_status(),
-            ProviderImplementationStatus::DescriptorOnly
+            ProviderImplementationStatus::Experimental
         );
-        assert!(!provider.is_available().await);
     }
 
     #[test]

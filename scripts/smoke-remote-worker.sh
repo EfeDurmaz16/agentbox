@@ -6,7 +6,7 @@ cd "$ROOT"
 
 TMPDIR="$(mktemp -d)"
 WORKER_PID=""
-trap 'if [[ -n "$WORKER_PID" ]]; then kill "$WORKER_PID" 2>/dev/null || true; fi; rm -rf "$TMPDIR"' EXIT
+trap 'if [[ -n "$WORKER_PID" ]]; then kill "$WORKER_PID" 2>/dev/null || true; wait "$WORKER_PID" 2>/dev/null || true; fi; rm -rf "$TMPDIR"' EXIT
 
 PORT="$(python3 - <<'PY'
 import socket
