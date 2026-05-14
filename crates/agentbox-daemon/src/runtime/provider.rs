@@ -5,6 +5,18 @@ use crate::runtime::types::{
     CommandResult, ExecCommand, MinipodSpec, RuntimeCapability, RuntimeSession, RuntimeStatus,
 };
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuntimeErrorKind {
+    NotFound,
+    AlreadyExists,
+    Unavailable,
+    ManifestRejected,
+    PolicyDenied,
+    ExecFailed,
+    Timeout,
+    Internal,
+}
+
 #[derive(Error, Debug)]
 pub enum RuntimeError {
     #[error("session not found: {0}")]
@@ -30,6 +42,40 @@ pub enum RuntimeError {
 
     #[error("internal error: {0}")]
     Internal(String),
+}
+
+impl RuntimeError {
+    pub fn kind(&self) -> RuntimeErrorKind {
+        match self {
+            Self::NotFound(_) => RuntimeErrorKind::NotFound,
+            Self::AlreadyExists(_) => RuntimeErrorKind::AlreadyExists,
+            Self::Unavailable(_) => RuntimeErrorKind::Unavailable,
+            Self::ManifestRejected(_) => RuntimeErrorKind::ManifestRejected,
+            Self::PolicyDenied(_) => RuntimeErrorKind::PolicyDenied,
+            Self::ExecFailed(_) => RuntimeErrorKind::ExecFailed,
+            Self::Timeout(_) => RuntimeErrorKind::Timeout,
+            Self::Internal(_) => RuntimeErrorKind::Internal,
+        }
+    }
+
+    pub fn is_retryable(&self) -> bool {
+        matches!(
+            self.kind(),
+            RuntimeErrorKind::Unavailable
+                | RuntimeErrorKind::ExecFailed
+                | RuntimeErrorKind::Timeout
+        )
+    }
+
+    pub fn is_user_actionable(&self) -> bool {
+        matches!(
+            self.kind(),
+            RuntimeErrorKind::Unavailable
+                | RuntimeErrorKind::ManifestRejected
+                | RuntimeErrorKind::PolicyDenied
+                | RuntimeErrorKind::Timeout
+        )
+    }
 }
 
 #[async_trait]
@@ -146,5 +192,65 @@ mod tests {
         assert_eq!(session.provider, "mock");
         assert_eq!(session.platform, "test");
         assert!(matches!(session.status, RuntimeStatus::Creating));
+    }
+
+    #[test]
+    fn runtime_errors_expose_stable_taxonomy() {
+        let cases = [
+            (
+                RuntimeError::NotFound("missing".into()),
+                RuntimeErrorKind::NotFound,
+                false,
+                false,
+            ),
+            (
+                RuntimeError::AlreadyExists("session".into()),
+                RuntimeErrorKind::AlreadyExists,
+                false,
+                false,
+            ),
+            (
+                RuntimeError::Unavailable("agentpod-linux".into()),
+                RuntimeErrorKind::Unavailable,
+                true,
+                true,
+            ),
+            (
+                RuntimeError::ManifestRejected("host network".into()),
+                RuntimeErrorKind::ManifestRejected,
+                false,
+                true,
+            ),
+            (
+                RuntimeError::PolicyDenied("credential read".into()),
+                RuntimeErrorKind::PolicyDenied,
+                false,
+                true,
+            ),
+            (
+                RuntimeError::ExecFailed("exit 1".into()),
+                RuntimeErrorKind::ExecFailed,
+                true,
+                false,
+            ),
+            (
+                RuntimeError::Timeout(30),
+                RuntimeErrorKind::Timeout,
+                true,
+                true,
+            ),
+            (
+                RuntimeError::Internal("sqlite".into()),
+                RuntimeErrorKind::Internal,
+                false,
+                false,
+            ),
+        ];
+
+        for (error, kind, retryable, user_actionable) in cases {
+            assert_eq!(error.kind(), kind);
+            assert_eq!(error.is_retryable(), retryable, "{error:?}");
+            assert_eq!(error.is_user_actionable(), user_actionable, "{error:?}");
+        }
     }
 }
