@@ -73,6 +73,12 @@ process isolation. It can become the equivalent of the Linux Landlock/seccomp
 layer only after Agentbox can reliably create a restricted token/profile and
 map minipod capabilities to allowed resources.
 
+Current repo status: the AppContainer descriptor now carries workspace mode,
+workspace write policy, overlay/review metadata, read-only or read-write mount
+descriptors, protected path rules, and an explicit non-claim that live ACL proof
+is not wired. This keeps Windows native planning aligned with the AgentPod
+workspace contract while avoiding a false AppContainer enforcement claim.
+
 Open questions:
 
 - how to create per-session AppContainer identities without leaking stale

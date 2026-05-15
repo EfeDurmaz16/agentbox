@@ -7758,6 +7758,17 @@ mod tests {
                 );
             }
             if provider == "agentpod-windows" {
+                assert_eq!(plan["app_container"]["workspace_mode"], "overlay-review");
+                assert_eq!(
+                    plan["app_container"]["workspace_boundary"]["review_required"],
+                    true
+                );
+                assert!(
+                    plan["app_container"]["workspace_boundary"]["enforcement_claim"]
+                        .as_str()
+                        .unwrap()
+                        .contains("live ACL proof is not wired")
+                );
                 assert_eq!(
                     plan["vm_boundary"]["cell_config"]["workspace_mount"]["review_required"],
                     true

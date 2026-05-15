@@ -1,7 +1,10 @@
 use serde::{Deserialize, Serialize};
 
 use crate::runtime::provider::RuntimeError;
-use crate::runtime::types::{CredentialGrantKind, ExecCommand, MinipodSpec, NetworkMode};
+use crate::runtime::types::{
+    CredentialGrantKind, ExecCommand, MinipodSpec, MountKind, MountMode, NetworkMode,
+    WorkspaceOverlayMode, WorkspaceWritePolicy,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WindowsJobObjectPlan {
@@ -77,9 +80,44 @@ pub struct WindowsAppContainerPlan {
     pub package_family_name: String,
     pub workspace_host_path: String,
     pub workspace_guest_path: String,
+    pub workspace_mode: String,
+    pub workspace_write_policy: WorkspaceWritePolicy,
+    pub workspace_boundary: WindowsWorkspaceBoundaryPlan,
+    pub mounts: Vec<WindowsMountPlan>,
     pub protected_paths: Vec<String>,
+    pub protected_path_rules: Vec<WindowsProtectedPathPlan>,
     pub deny_home_by_default: bool,
     pub requires_profile_creation: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WindowsWorkspaceBoundaryPlan {
+    pub access_model: String,
+    pub overlay_mode: WorkspaceOverlayMode,
+    pub upper_host_path: Option<String>,
+    pub work_host_path: Option<String>,
+    pub guest_path: String,
+    pub review_required: bool,
+    pub commit_required: bool,
+    pub discard_on_destroy: bool,
+    pub enforcement_claim: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WindowsMountPlan {
+    pub host_path: String,
+    pub guest_path: String,
+    pub read_only: bool,
+    pub kind: MountKind,
+    pub acl_claim: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WindowsProtectedPathPlan {
+    pub path: String,
+    pub class: crate::runtime::types::SensitivePathClass,
+    pub reason: String,
+    pub default_access: String,
 }
 
 impl WindowsAppContainerPlan {
@@ -95,11 +133,80 @@ impl WindowsAppContainerPlan {
             package_family_name: format!("Agentbox.AgentPod.{}", spec.id),
             workspace_host_path: spec.filesystem.workspace_host_path.display().to_string(),
             workspace_guest_path: spec.filesystem.workspace_guest_path.clone(),
+            workspace_mode: spec.workspace_mode.label().to_string(),
+            workspace_write_policy: spec.filesystem.workspace_write_policy.clone(),
+            workspace_boundary: WindowsWorkspaceBoundaryPlan {
+                access_model: if matches!(
+                    spec.filesystem.workspace_write_policy,
+                    WorkspaceWritePolicy::WritableOverlay
+                ) {
+                    "workspace-overlay-review".into()
+                } else {
+                    "direct-workspace-acl".into()
+                },
+                overlay_mode: spec.filesystem.workspace_overlay.mode.clone(),
+                upper_host_path: spec
+                    .filesystem
+                    .workspace_overlay
+                    .upper_host_path
+                    .as_ref()
+                    .map(|path| path.display().to_string()),
+                work_host_path: spec
+                    .filesystem
+                    .workspace_overlay
+                    .work_host_path
+                    .as_ref()
+                    .map(|path| path.display().to_string()),
+                guest_path: spec.filesystem.workspace_overlay.guest_path.clone(),
+                review_required: matches!(
+                    spec.workspace_mode,
+                    crate::runtime::types::AgentPodWorkspaceMode::OverlayReview
+                        | crate::runtime::types::AgentPodWorkspaceMode::CommitGated
+                ),
+                commit_required: matches!(
+                    spec.workspace_mode,
+                    crate::runtime::types::AgentPodWorkspaceMode::CommitGated
+                ),
+                discard_on_destroy: matches!(
+                    spec.workspace_mode,
+                    crate::runtime::types::AgentPodWorkspaceMode::Ephemeral
+                ),
+                enforcement_claim:
+                    "planned AppContainer/ACL workspace boundary; live ACL proof is not wired"
+                        .into(),
+            },
+            mounts: spec
+                .filesystem
+                .mounts
+                .iter()
+                .map(|mount| WindowsMountPlan {
+                    host_path: mount.host_path.display().to_string(),
+                    guest_path: mount.guest_path.clone(),
+                    read_only: matches!(mount.mode, MountMode::ReadOnly),
+                    kind: mount.kind.clone(),
+                    acl_claim: if matches!(mount.mode, MountMode::ReadOnly) {
+                        "planned read-only ACL or mapped-folder permission".into()
+                    } else {
+                        "planned explicit read-write capability".into()
+                    },
+                })
+                .collect(),
             protected_paths: spec
                 .filesystem
                 .protected_paths
                 .iter()
                 .map(|path| path.path.display().to_string())
+                .collect(),
+            protected_path_rules: spec
+                .filesystem
+                .protected_paths
+                .iter()
+                .map(|path| WindowsProtectedPathPlan {
+                    path: path.path.display().to_string(),
+                    class: path.class.clone(),
+                    reason: path.reason.clone(),
+                    default_access: "deny-without-explicit-grant".into(),
+                })
                 .collect(),
             deny_home_by_default: spec.filesystem.deny_home_by_default,
             requires_profile_creation: true,
@@ -431,7 +538,9 @@ fn cpu_shares_to_job_weight(cpu_shares: u32) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runtime::types::{CredentialGrant, ResourcePolicy};
+    use crate::runtime::types::{
+        CredentialGrant, MountRule, ResourcePolicy, WorkspaceOverlayPolicy,
+    };
 
     #[test]
     fn job_object_plan_maps_minipod_resources() {
@@ -483,6 +592,16 @@ mod tests {
     fn agentpod_execution_plan_composes_windows_native_boundaries() {
         let mut spec = MinipodSpec::for_agent_task("codex", "C:\\agentbox\\work");
         spec.workspace_mode = crate::runtime::types::AgentPodWorkspaceMode::OverlayReview;
+        spec.filesystem.workspace_write_policy = WorkspaceWritePolicy::WritableOverlay;
+        spec.filesystem.workspace_overlay = WorkspaceOverlayPolicy::review_required(Some(
+            "C:\\agentbox\\.agentbox\\overlay".into(),
+        ));
+        spec.filesystem.mounts.push(MountRule {
+            host_path: "C:\\agentbox\\readonly".into(),
+            guest_path: "/mnt/readonly".into(),
+            mode: MountMode::ReadOnly,
+            kind: MountKind::ReadOnlyHost,
+        });
         spec.credentials.grants.push(CredentialGrant {
             name: "OPENAI_API_KEY".into(),
             kind: CredentialGrantKind::EnvVar,
@@ -518,6 +637,43 @@ mod tests {
         assert!(plan.security_claim.contains("execution is not wired"));
         assert!(plan.job_object.kill_on_close);
         assert!(plan.app_container.requires_profile_creation);
+        assert_eq!(plan.app_container.workspace_mode, "overlay-review");
+        assert_eq!(
+            plan.app_container.workspace_write_policy,
+            WorkspaceWritePolicy::WritableOverlay
+        );
+        assert_eq!(
+            plan.app_container.workspace_boundary.access_model,
+            "workspace-overlay-review"
+        );
+        assert_eq!(
+            plan.app_container.workspace_boundary.overlay_mode,
+            WorkspaceOverlayMode::ReviewRequired
+        );
+        assert!(plan.app_container.workspace_boundary.review_required);
+        assert!(!plan.app_container.workspace_boundary.commit_required);
+        assert!(!plan.app_container.workspace_boundary.discard_on_destroy);
+        assert!(plan
+            .app_container
+            .workspace_boundary
+            .enforcement_claim
+            .contains("live ACL proof is not wired"));
+        assert_eq!(plan.app_container.mounts.len(), 1);
+        assert!(plan.app_container.mounts.iter().any(|mount| {
+            mount.host_path == "C:\\agentbox\\readonly"
+                && mount.guest_path == "/mnt/readonly"
+                && mount.read_only
+                && mount.kind == MountKind::ReadOnlyHost
+        }));
+        assert_eq!(
+            plan.app_container.protected_paths.len(),
+            plan.app_container.protected_path_rules.len()
+        );
+        assert!(plan
+            .app_container
+            .protected_path_rules
+            .iter()
+            .all(|rule| rule.default_access == "deny-without-explicit-grant"));
         assert!(plan.wfp.requires_wfp);
         assert!(plan
             .wfp
