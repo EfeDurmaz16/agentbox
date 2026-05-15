@@ -44,7 +44,9 @@ It writes `doctor.json`, `setup-plan.json`, `providers.json`, logs, and
 `manifest.json` under `target/agentbox-release-readiness` by default.
 `doctor.json` separates `required_failed` from `advisory_failed`; required
 failures block the release, while advisory failures track planned or prototype
-provider prerequisites. `setup-plan.json` records the next operator action to
+provider prerequisites. `providers.json` is checked for primitive-level
+status/gate/scope metadata so release artifacts cannot silently drop the
+provider truth contract. `setup-plan.json` records the next operator action to
 surface in installer or package UX. If local required doctor checks are expected
 to fail on a candidate host, set
 `AGENTBOX_RELEASE_ALLOW_DOCTOR_FAILURE=1` and treat the generated `doctor.json`
@@ -68,7 +70,8 @@ doctor report without mutating host state.
 - [ ] `agentbox policy`, `policy-simulate`, and `policy-explain` work without a
       daemon.
 - [ ] `agentbox providers` separates shipped, experimental, unavailable, and
-      planned surfaces.
+      planned surfaces, including primitive-level active/gate/scope metadata in
+      JSON output.
 
 ## Daemon And Shims
 

@@ -32,7 +32,8 @@ path, expression = sys.argv[1], sys.argv[2]
 with open(path, "r", encoding="utf-8") as fh:
     data = json.load(fh)
 
-if not eval(expression, {"__builtins__": {}}, {"data": data, "any": any, "len": len}):
+safe_globals = {"__builtins__": {}, "all": all, "any": any, "len": len}
+if not eval(expression, safe_globals, {"data": data}):
     raise SystemExit(f"JSON contract failed for {path}: {expression}")
 PY
 }
@@ -45,7 +46,7 @@ run_step build-release cargo build --locked --release
 log "providers JSON"
 cargo run --locked -q -p agentbox-cli -- providers --json >"$ARTIFACT_DIR/providers.json"
 validate_json_file "$ARTIFACT_DIR/providers.json" \
-  "any(p.get('provider') == 'direct-host' for p in data) and any(p.get('provider') == 'remote-agentpod' for p in data)"
+  "any(p.get('provider') == 'direct-host' and any(s.get('primitive') == 'path-shim' and s.get('status') == 'shipped' and s.get('active') == True for s in p.get('boundary_primitive_statuses', [])) for p in data) and any(p.get('provider') == 'podman' and any(s.get('primitive') == 'guest-shim' and s.get('requires_gate') for s in p.get('boundary_primitive_statuses', [])) for p in data) and any(p.get('provider') == 'remote-agentpod' for p in data) and any(p.get('provider') == 'agentpod-linux' and any(s.get('primitive') == 'seccomp' and s.get('status') == 'prototype' and s.get('active') == False for s in p.get('boundary_primitive_statuses', [])) for p in data)"
 
 log "doctor JSON"
 set +e
