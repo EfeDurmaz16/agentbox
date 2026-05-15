@@ -21,19 +21,50 @@ require cargo
 require podman
 require python3
 
+is_linux_elf() {
+  local path="$1"
+  [[ -f "$path" ]] || return 1
+  head -c 4 "$path" | od -An -tx1 | grep -qi '7f 45 4c 46'
+}
+
+resolve_linux_shim() {
+  if [[ -n "${AGENTBOX_LINUX_SHIM:-}" ]]; then
+    is_linux_elf "$AGENTBOX_LINUX_SHIM" || skip "AGENTBOX_LINUX_SHIM is not a Linux ELF binary: $AGENTBOX_LINUX_SHIM"
+    printf '%s\n' "$AGENTBOX_LINUX_SHIM"
+    return
+  fi
+
+  if [[ "$(uname -s)" != "Darwin" ]]; then
+    cargo build -q -p agentbox-shim
+    local host_shim="$ROOT/target/debug/agentbox-shim"
+    is_linux_elf "$host_shim" || skip "local agentbox-shim is not a Linux ELF binary; set AGENTBOX_LINUX_SHIM"
+    printf '%s\n' "$host_shim"
+    return
+  fi
+
+  local build_output
+  if ! build_output="$(AGENTBOX_LINUX_SHIM_PROFILE="${AGENTBOX_LINUX_SHIM_PROFILE:-debug}" scripts/build-linux-shim.sh 2>&1)"; then
+    skip "Linux guest shim artifact is unavailable; run scripts/build-linux-shim.sh first. ${build_output//$'\n'/ }"
+  fi
+  local built_shim
+  built_shim="$(printf '%s\n' "$build_output" | sed -n 's/^AGENTBOX_LINUX_SHIM=//p' | tail -n 1)"
+  [[ -n "$built_shim" ]] || skip "scripts/build-linux-shim.sh did not print AGENTBOX_LINUX_SHIM"
+  is_linux_elf "$built_shim" || skip "built shim is not a Linux ELF binary: $built_shim"
+  printf '%s\n' "$built_shim"
+}
+
 if [[ "$(uname -s)" == "Darwin" ]]; then
   podman machine inspect >/dev/null 2>&1 || skip "podman machine is not initialized; run: podman machine init && podman machine start"
   podman machine inspect | grep -Eq '"Running": true|"State": "running"' || skip "podman machine is not running; run: podman machine start"
 fi
 
-log "building local binaries"
-cargo build -q -p agentbox-shim
+log "resolving Linux guest shim artifact"
+SHIM="$(resolve_linux_shim)"
 
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/agentbox-podman-bridge.XXXXXX")"
 HOME_IN_CONTAINER="/tmp/agentbox-home"
 SOCKET_DIR="$TMP/home/.agentbox"
 SOCKET="$SOCKET_DIR/agentbox.sock"
-SHIM="$ROOT/target/debug/agentbox-shim"
 SERVER_PID=""
 
 cleanup() {
