@@ -902,8 +902,46 @@ pub struct SessionEvidenceBundle {
     pub credential_events: Vec<SessionEvidenceEvent>,
     #[serde(default)]
     pub transcripts: Vec<CommandTranscript>,
+    #[serde(default)]
+    pub integration_descriptors: Vec<EvidenceIntegrationDescriptor>,
     pub replay: SessionReplayMetadata,
     pub generated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EvidenceIntegrationDescriptor {
+    pub schema_version: i64,
+    pub integration: String,
+    pub descriptor_kind: String,
+    pub status: String,
+    pub live_support: bool,
+    pub requires_external_adapter: bool,
+    pub evidence_refs: Vec<String>,
+    pub limitations: Vec<String>,
+}
+
+impl EvidenceIntegrationDescriptor {
+    fn disabled(
+        integration: &str,
+        descriptor_kind: &str,
+        status: &str,
+        evidence_refs: &[String],
+        limitations: &[&str],
+    ) -> Self {
+        Self {
+            schema_version: 1,
+            integration: integration.to_string(),
+            descriptor_kind: descriptor_kind.to_string(),
+            status: status.to_string(),
+            live_support: false,
+            requires_external_adapter: true,
+            evidence_refs: evidence_refs.to_vec(),
+            limitations: limitations
+                .iter()
+                .map(|limitation| limitation.to_string())
+                .collect(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -958,6 +996,8 @@ impl SessionEvidenceBundle {
         }
 
         let replay = SessionReplayMetadata::from_session_events(session, events);
+        let evidence_refs = evidence_refs_for_events(events);
+        let integration_descriptors = evidence_integration_descriptors(&evidence_refs);
         let now = Utc::now();
 
         Self {
@@ -989,10 +1029,60 @@ impl SessionEvidenceBundle {
                 .collect(),
             credential_events,
             transcripts: session.transcripts.clone(),
+            integration_descriptors,
             replay,
             generated_at: Utc::now(),
         }
     }
+}
+
+fn evidence_refs_for_events(events: &[AuditEvent]) -> Vec<String> {
+    events
+        .iter()
+        .map(|event| {
+            event
+                .event_hash
+                .clone()
+                .unwrap_or_else(|| format!("audit-event:{}", event.id))
+        })
+        .collect()
+}
+
+fn evidence_integration_descriptors(
+    evidence_refs: &[String],
+) -> Vec<EvidenceIntegrationDescriptor> {
+    vec![
+        EvidenceIntegrationDescriptor::disabled(
+            "fides",
+            "signed-action-draft",
+            "external-authority-required",
+            evidence_refs,
+            &[
+                "FIDES authority is not configured by Agentbox",
+                "descriptor contains evidence references only and no signature",
+            ],
+        ),
+        EvidenceIntegrationDescriptor::disabled(
+            "agit",
+            "lineage-draft",
+            "external-adapter-required",
+            evidence_refs,
+            &[
+                "AGIT publisher is not configured by Agentbox",
+                "descriptor does not claim a committed lineage record",
+            ],
+        ),
+        EvidenceIntegrationDescriptor::disabled(
+            "oaps",
+            "interoperability-profile-draft",
+            "descriptor-only",
+            evidence_refs,
+            &[
+                "OAPS profile publication is not configured by Agentbox",
+                "descriptor is not a conformance claim",
+            ],
+        ),
+    ]
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1628,6 +1718,26 @@ mod tests {
         assert_eq!(bundle.boundary_events.len(), 0);
         assert_eq!(bundle.transcripts.len(), 1);
         assert_eq!(bundle.transcripts[0].stdout.text, "hello");
+        assert_eq!(bundle.integration_descriptors.len(), 3);
+        assert!(bundle
+            .integration_descriptors
+            .iter()
+            .all(|descriptor| !descriptor.live_support && descriptor.requires_external_adapter));
+        assert!(bundle
+            .integration_descriptors
+            .iter()
+            .any(|descriptor| descriptor.integration == "fides"
+                && descriptor.status == "external-authority-required"));
+        assert!(bundle
+            .integration_descriptors
+            .iter()
+            .any(|descriptor| descriptor.integration == "agit"
+                && descriptor.status == "external-adapter-required"));
+        assert!(bundle
+            .integration_descriptors
+            .iter()
+            .any(|descriptor| descriptor.integration == "oaps"
+                && descriptor.status == "descriptor-only"));
         assert_eq!(bundle.replay.session_id, session.id);
         assert_eq!(bundle.replay.steps.len(), 4);
         assert!(!bundle.replay.replayable);

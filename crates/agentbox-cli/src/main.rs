@@ -4126,6 +4126,12 @@ fn write_session_evidence_bundle_dir(
             "Redacted command transcripts captured by RuntimeManager",
             &bundle.transcripts,
         )?,
+        write_bundle_json_file(
+            output_dir,
+            "integrations.json",
+            "Descriptor-only FIDES, AGIT, and OAPS integration metadata",
+            &bundle.integration_descriptors,
+        )?,
     ];
 
     let index = EvidenceBundleIndex {
@@ -7277,6 +7283,7 @@ mod tests {
             "manifest.json",
             "replay.json",
             "transcripts.json",
+            "integrations.json",
         ] {
             assert!(output_dir.join(file).exists(), "{file} was not written");
         }
@@ -7286,12 +7293,12 @@ mod tests {
         assert_eq!(index["schema_version"], 1);
         assert_eq!(index["session_id"], bundle.session_id);
         assert_eq!(index["root_sha256"].as_str().unwrap().len(), 64);
-        assert_eq!(index["files"].as_array().unwrap().len(), 4);
+        assert_eq!(index["files"].as_array().unwrap().len(), 5);
         for file in index["files"].as_array().unwrap() {
             assert_eq!(file["sha256"].as_str().unwrap().len(), 64);
             assert!(file["bytes"].as_u64().unwrap() > 0);
         }
-        assert_eq!(verify_evidence_bundle_dir(&output_dir).unwrap(), 4);
+        assert_eq!(verify_evidence_bundle_dir(&output_dir).unwrap(), 5);
 
         let _ = fs::remove_dir_all(output_dir);
     }

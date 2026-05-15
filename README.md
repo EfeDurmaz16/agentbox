@@ -316,6 +316,9 @@ Session evidence bundles include redacted command transcripts so operators can
 inspect what ran without storing raw credential-like output.
 They also include metadata-only replay steps linked to audit hashes; Agentbox
 does not automatically rerun side-effecting commands from evidence bundles.
+Evidence bundle directories also include descriptor-only FIDES, AGIT, and OAPS
+integration metadata with `live_support=false` until external authority or
+adapter code is configured.
 
 ```sh
 # Export a portable evidence bundle directory for a persisted AgentPod session
