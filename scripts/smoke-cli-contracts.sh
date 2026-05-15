@@ -24,7 +24,8 @@ path, expression = sys.argv[1], sys.argv[2]
 with open(path, "r", encoding="utf-8") as fh:
     data = json.load(fh)
 
-if not eval(expression, {"__builtins__": {}}, {"data": data, "all": all, "any": any, "len": len}):
+safe_globals = {"__builtins__": {}, "all": all, "any": any, "len": len}
+if not eval(expression, safe_globals, {"data": data}):
     raise SystemExit(f"JSON contract failed for {path}: {expression}")
 PY
 }
@@ -32,7 +33,7 @@ PY
 log "checking provider truth JSON"
 "${CLI[@]}" providers --json >"$TMPDIR/providers.json"
 validate_json "$TMPDIR/providers.json" \
-  "any(p.get('provider') == 'direct-host' and p.get('status') == 'shipped' and p.get('doctor_check') == 'daemon socket' and 'path-shim' in p.get('boundary_primitives', []) and p.get('network') == 'command-mediation' for p in data) and any(p.get('provider') == 'podman' and p.get('setup_command') and p.get('verification_command') for p in data) and any(p.get('provider') == 'remote-agentpod' and p.get('status') == 'experimental' and p.get('setup_command') and p.get('doctor_check') == 'remote-agentpod endpoint' for p in data) and any(p.get('provider') == 'agentpod-windows' and 'job-objects' in p.get('boundary_primitives', []) and 'wfp' in p.get('boundary_primitives', []) and 'windows-sandbox' in p.get('boundary_primitives', []) and 'hyper-v' in p.get('boundary_primitives', []) for p in data) and any(p.get('provider') == 'agentpod-linux' and 'user-namespaces' in p.get('boundary_primitives', []) and 'seccomp' in p.get('boundary_primitives', []) and p.get('verification_command') for p in data)"
+  "any(p.get('provider') == 'direct-host' and p.get('status') == 'shipped' and p.get('doctor_check') == 'daemon socket' and 'path-shim' in p.get('boundary_primitives', []) and p.get('network') == 'command-mediation' for p in data) and any(p.get('provider') == 'podman' and p.get('setup_command') and p.get('verification_command') for p in data) and any(p.get('provider') == 'remote-agentpod' and p.get('status') == 'experimental' and p.get('setup_command') and p.get('doctor_check') == 'remote-agentpod endpoint' for p in data) and any(p.get('provider') == 'agentpod-windows' and 'job-objects' in p.get('boundary_primitives', []) and 'wfp' in p.get('boundary_primitives', []) and 'windows-sandbox' in p.get('boundary_primitives', []) and 'hyper-v' in p.get('boundary_primitives', []) and any(s.get('primitive') == 'job-objects' and s.get('status') == 'descriptor-only' and s.get('active') == False and s.get('requires_gate') == 'AGENTBOX_WINDOWS_NATIVE=1' for s in p.get('boundary_primitive_statuses', [])) for p in data) and any(p.get('provider') == 'agentpod-linux' and 'user-namespaces' in p.get('boundary_primitives', []) and 'seccomp' in p.get('boundary_primitives', []) and p.get('verification_command') and any(s.get('primitive') == 'seccomp' and s.get('status') == 'prototype' and s.get('active') == False and s.get('requires_gate') == 'AGENTBOX_LINUX_NATIVE=1' for s in p.get('boundary_primitive_statuses', [])) for p in data) and any(p.get('provider') == 'agentpod-macos' and any(s.get('primitive') == 'apple-virtualization' and s.get('status') == 'descriptor-only' and s.get('active') == False and s.get('requires_gate') == 'AGENTBOX_MACOS_NATIVE=1' for s in p.get('boundary_primitive_statuses', [])) for p in data)"
 
 log "checking daemon cleanup command surface"
 "${CLI[@]}" clean --help >"$TMPDIR/clean-help.txt"

@@ -5156,6 +5156,17 @@ fn cmd_providers(json: bool) {
             "bridge": format_bridge_transports(provider.bridge_transport_kinds()),
             "network": format_network_enforcement(provider.network_enforcement_capabilities()),
             "boundary_primitives": provider.boundary_primitives(),
+            "boundary_primitive_statuses": provider
+                .boundary_primitive_statuses()
+                .into_iter()
+                .map(|primitive| serde_json::json!({
+                    "primitive": primitive.primitive,
+                    "status": format_provider_status(primitive.status),
+                    "active": primitive.active,
+                    "requires_gate": primitive.requires_gate,
+                    "enforcement_scope": primitive.enforcement_scope,
+                }))
+                .collect::<Vec<_>>(),
             "doctor_check": provider_doctor_check(provider.name()),
             "setup_command": provider_setup_command(provider.name()),
             "verification_command": provider_verification_command(provider.name()),

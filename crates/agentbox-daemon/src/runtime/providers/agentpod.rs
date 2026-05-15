@@ -4,7 +4,8 @@ use std::sync::{Arc, Mutex};
 
 use crate::runtime::bridge::HostBridgeTransportKind;
 use crate::runtime::provider::{
-    ProviderFamily, ProviderImplementationStatus, RuntimeError, RuntimeProvider,
+    BoundaryPrimitiveStatus, ProviderFamily, ProviderImplementationStatus, RuntimeError,
+    RuntimeProvider,
 };
 use crate::runtime::providers::linux::{
     linux_native_execution_enabled, LinuxAgentPodPrototypeExecutor,
@@ -243,6 +244,37 @@ impl RuntimeProvider for AgentPodProvider {
         self.planned_primitives()
             .iter()
             .map(AgentPodPrimitive::label)
+            .collect()
+    }
+
+    fn boundary_primitive_statuses(&self) -> Vec<BoundaryPrimitiveStatus> {
+        let (status, requires_gate, enforcement_scope) = match self.kind {
+            AgentPodProviderKind::MacOs => (
+                ProviderImplementationStatus::DescriptorOnly,
+                Some("AGENTBOX_MACOS_NATIVE=1"),
+                "plan compiler only; VM runner, system extension, and network extension are not wired",
+            ),
+            AgentPodProviderKind::Linux => (
+                ProviderImplementationStatus::PrototypePrimitive,
+                Some("AGENTBOX_LINUX_NATIVE=1"),
+                "prototype primitive plan and gated local executor; not a complete sandbox",
+            ),
+            AgentPodProviderKind::Windows => (
+                ProviderImplementationStatus::DescriptorOnly,
+                Some("AGENTBOX_WINDOWS_NATIVE=1"),
+                "plan compiler only; Job Object/AppContainer/WFP/ETW execution is not wired",
+            ),
+        };
+
+        self.planned_primitives()
+            .iter()
+            .map(|primitive| BoundaryPrimitiveStatus {
+                primitive: primitive.label(),
+                status,
+                active: false,
+                requires_gate,
+                enforcement_scope,
+            })
             .collect()
     }
 

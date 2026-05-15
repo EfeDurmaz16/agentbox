@@ -26,6 +26,15 @@ pub enum ProviderImplementationStatus {
     Unavailable,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BoundaryPrimitiveStatus {
+    pub primitive: &'static str,
+    pub status: ProviderImplementationStatus,
+    pub active: bool,
+    pub requires_gate: Option<&'static str>,
+    pub enforcement_scope: &'static str,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuntimeErrorKind {
     NotFound,
@@ -127,6 +136,19 @@ pub trait RuntimeProvider: Send + Sync {
         vec![]
     }
 
+    fn boundary_primitive_statuses(&self) -> Vec<BoundaryPrimitiveStatus> {
+        self.boundary_primitives()
+            .into_iter()
+            .map(|primitive| BoundaryPrimitiveStatus {
+                primitive,
+                status: self.implementation_status(),
+                active: false,
+                requires_gate: None,
+                enforcement_scope: "metadata only",
+            })
+            .collect()
+    }
+
     async fn is_available(&self) -> bool;
 
     async fn create(&self, spec: &MinipodSpec) -> Result<RuntimeSession, RuntimeError>;
@@ -178,6 +200,7 @@ mod tests {
     struct MockProvider {
         capabilities: Vec<RuntimeCapability>,
         network_enforcement_capabilities: Vec<NetworkEnforcementCapability>,
+        boundary_primitives: Vec<&'static str>,
     }
 
     #[async_trait]
@@ -196,6 +219,10 @@ mod tests {
 
         fn network_enforcement_capabilities(&self) -> &[NetworkEnforcementCapability] {
             &self.network_enforcement_capabilities
+        }
+
+        fn boundary_primitives(&self) -> Vec<&'static str> {
+            self.boundary_primitives.clone()
         }
 
         async fn is_available(&self) -> bool {
@@ -248,6 +275,7 @@ mod tests {
                 NetworkEnforcementCapability::ContainerNetworkMode,
                 NetworkEnforcementCapability::DomainDenylist,
             ],
+            boundary_primitives: vec![],
         };
 
         assert!(provider.is_available().await);
@@ -262,6 +290,7 @@ mod tests {
         let provider = MockProvider {
             capabilities: vec![RuntimeCapability::ContainerIsolation],
             network_enforcement_capabilities: vec![],
+            boundary_primitives: vec![],
         };
         let spec = MinipodSpec::for_agent_task("hermes", "/tmp/workspace");
 
@@ -339,6 +368,26 @@ mod tests {
         assert_eq!(
             format!("{:?}", ProviderImplementationStatus::DescriptorOnly),
             "DescriptorOnly"
+        );
+    }
+
+    #[test]
+    fn boundary_primitive_status_defaults_to_metadata_only() {
+        let provider = MockProvider {
+            capabilities: vec![RuntimeCapability::ContainerIsolation],
+            network_enforcement_capabilities: vec![],
+            boundary_primitives: vec!["mock-primitive"],
+        };
+
+        assert_eq!(
+            provider.boundary_primitive_statuses(),
+            vec![BoundaryPrimitiveStatus {
+                primitive: "mock-primitive",
+                status: ProviderImplementationStatus::Experimental,
+                active: false,
+                requires_gate: None,
+                enforcement_scope: "metadata only",
+            }]
         );
     }
 }
