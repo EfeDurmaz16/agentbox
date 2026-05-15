@@ -6,7 +6,10 @@ use std::path::PathBuf;
 use ulid::Ulid;
 
 use crate::audit::redact_sensitive_text;
-use crate::runtime::types::{ApprovalScope, CredentialGrantKind, FileAccessMode};
+use crate::runtime::types::{
+    ApprovalScope, CredentialGrantKind, FileAccessMode, NetworkEnforcementCapability,
+    RuntimeCapability,
+};
 
 pub const HOST_BRIDGE_SCHEMA_VERSION: u32 = 1;
 
@@ -24,6 +27,94 @@ pub enum HostBridgeTransportKind {
     NamedPipe,
     Vsock,
     RemoteTunnel,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostBridgeHealth {
+    pub schema_version: u32,
+    pub provider: String,
+    pub transports: Vec<HostBridgeTransportKind>,
+    pub policy: HostBridgeCapabilityHealth,
+    pub approval: HostBridgeCapabilityHealth,
+    pub credentials: HostBridgeCapabilityHealth,
+    pub evidence: HostBridgeCapabilityHealth,
+    pub kill_switch: HostBridgeCapabilityHealth,
+    pub network: HostBridgeCapabilityHealth,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostBridgeCapabilityHealth {
+    pub supported: bool,
+    pub active: bool,
+    pub detail: String,
+}
+
+impl HostBridgeHealth {
+    pub fn from_runtime_metadata(
+        provider: impl Into<String>,
+        transports: &[HostBridgeTransportKind],
+        capabilities: &[RuntimeCapability],
+        network_capabilities: &[NetworkEnforcementCapability],
+        provider_active: bool,
+    ) -> Self {
+        let transports = transports.to_vec();
+        let bridge_active = provider_active && !transports.is_empty();
+        let has_policy = capabilities.contains(&RuntimeCapability::FilesystemPolicy)
+            || capabilities.contains(&RuntimeCapability::NetworkPolicy);
+        let has_approval = capabilities.contains(&RuntimeCapability::ApprovalBridge);
+        let has_credentials = capabilities.contains(&RuntimeCapability::CredentialPolicy);
+        let has_evidence = capabilities.contains(&RuntimeCapability::EvidenceExport);
+        let has_network = capabilities.contains(&RuntimeCapability::NetworkPolicy)
+            || !network_capabilities.is_empty();
+
+        Self {
+            schema_version: HOST_BRIDGE_SCHEMA_VERSION,
+            provider: provider.into(),
+            transports,
+            policy: capability_health(
+                has_policy,
+                bridge_active && has_policy,
+                "policy mediation through the host bridge",
+            ),
+            approval: capability_health(
+                has_approval,
+                bridge_active && has_approval,
+                "operator approval request and response transport",
+            ),
+            credentials: capability_health(
+                has_credentials,
+                bridge_active && has_credentials,
+                "explicit credential grant transport",
+            ),
+            evidence: capability_health(
+                has_evidence,
+                bridge_active && has_evidence,
+                "hash-linked evidence append or bundle transport",
+            ),
+            kill_switch: capability_health(
+                bridge_active,
+                bridge_active,
+                "session destroy and running command kill acknowledgement",
+            ),
+            network: capability_health(
+                has_network,
+                bridge_active && has_network && !network_capabilities.is_empty(),
+                "network boundary decisions or provider-level network enforcement",
+            ),
+        }
+    }
+}
+
+fn capability_health(
+    supported: bool,
+    active: bool,
+    detail: impl Into<String>,
+) -> HostBridgeCapabilityHealth {
+    HostBridgeCapabilityHealth {
+        supported,
+        active,
+        detail: detail.into(),
+    }
 }
 
 impl HostBridgeTransport {
@@ -346,5 +437,43 @@ mod tests {
         assert!(!encoded.contains("user:pass"));
         assert!(!encoded.contains("/Users/operator/.ssh/id_rsa"));
         assert!(!encoded.contains("AWS_SECRET_ACCESS_KEY=abc"));
+    }
+
+    #[test]
+    fn bridge_health_maps_runtime_metadata_to_capability_status() {
+        let health = HostBridgeHealth::from_runtime_metadata(
+            "agentpod-linux",
+            &[HostBridgeTransportKind::UnixSocket],
+            &[
+                RuntimeCapability::FilesystemPolicy,
+                RuntimeCapability::CredentialPolicy,
+                RuntimeCapability::ApprovalBridge,
+                RuntimeCapability::EvidenceExport,
+                RuntimeCapability::NetworkPolicy,
+            ],
+            &[NetworkEnforcementCapability::DomainDenylist],
+            true,
+        );
+
+        assert_eq!(health.schema_version, HOST_BRIDGE_SCHEMA_VERSION);
+        assert_eq!(health.provider, "agentpod-linux");
+        assert!(health.policy.supported);
+        assert!(health.policy.active);
+        assert!(health.approval.active);
+        assert!(health.credentials.active);
+        assert!(health.evidence.active);
+        assert!(health.kill_switch.active);
+        assert!(health.network.active);
+
+        let descriptor_only = HostBridgeHealth::from_runtime_metadata(
+            "agentpod-macos",
+            &[HostBridgeTransportKind::Vsock],
+            &[RuntimeCapability::ApprovalBridge],
+            &[],
+            false,
+        );
+        assert!(descriptor_only.approval.supported);
+        assert!(!descriptor_only.approval.active);
+        assert!(!descriptor_only.kill_switch.active);
     }
 }

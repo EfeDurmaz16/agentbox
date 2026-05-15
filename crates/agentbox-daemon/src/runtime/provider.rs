@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use thiserror::Error;
 
-use crate::runtime::bridge::HostBridgeTransportKind;
+use crate::runtime::bridge::{HostBridgeHealth, HostBridgeTransportKind};
 use crate::runtime::types::{
     CommandResult, ExecCommand, MinipodSpec, NetworkEnforcementCapability, RuntimeCapability,
     RuntimeSession, RuntimeStatus, SessionEvidenceBundle,
@@ -147,6 +147,22 @@ pub trait RuntimeProvider: Send + Sync {
                 enforcement_scope: "metadata only",
             })
             .collect()
+    }
+
+    fn bridge_health(&self) -> HostBridgeHealth {
+        let provider_active = matches!(
+            self.implementation_status(),
+            ProviderImplementationStatus::Shipped
+                | ProviderImplementationStatus::Experimental
+                | ProviderImplementationStatus::PrototypePrimitive
+        );
+        HostBridgeHealth::from_runtime_metadata(
+            self.name(),
+            self.bridge_transport_kinds(),
+            self.capabilities(),
+            self.network_enforcement_capabilities(),
+            provider_active,
+        )
     }
 
     async fn is_available(&self) -> bool;

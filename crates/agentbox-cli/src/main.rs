@@ -5297,7 +5297,7 @@ fn default_workspace_overlay_base(
         .into_iter()
         .map(|root| root.join(spec.id.clone()).join(mode.label()))
         .find(|candidate| !path_is_inside(candidate, &workspace))
-        .unwrap_or_else(|| preferred)
+        .unwrap_or(preferred)
 }
 
 fn default_workspace_mode_for_risk(
@@ -5520,6 +5520,17 @@ fn cmd_providers(json: bool) {
                 "enforcement_scope": "hash-chained local audit persistence"
             }
         ],
+        "bridge_health": {
+            "schema_version": 1,
+            "provider": "direct-host",
+            "transports": ["UnixSocket"],
+            "policy": {"supported": true, "active": true, "detail": "policy mediation through the host bridge"},
+            "approval": {"supported": true, "active": true, "detail": "operator approval request and response transport"},
+            "credentials": {"supported": true, "active": true, "detail": "explicit credential grant transport"},
+            "evidence": {"supported": true, "active": true, "detail": "hash-linked evidence append or bundle transport"},
+            "kill_switch": {"supported": true, "active": true, "detail": "session destroy and running command kill acknowledgement"},
+            "network": {"supported": true, "active": false, "detail": "network boundary decisions or provider-level network enforcement"}
+        },
         "capabilities": ["shim", "policy", "approval", "audit"],
         "doctor_check": "daemon socket",
         "setup_command": "agentbox setup-plan",
@@ -5558,6 +5569,7 @@ fn cmd_providers(json: bool) {
                     "enforcement_scope": primitive.enforcement_scope,
                 }))
                 .collect::<Vec<_>>(),
+            "bridge_health": provider.bridge_health(),
             "doctor_check": provider_doctor_check(provider.name()),
             "setup_command": provider_setup_command(provider.name()),
             "verification_command": provider_verification_command(provider.name()),
@@ -5603,6 +5615,17 @@ fn cmd_providers(json: bool) {
                 "enforcement_scope": "guest command bridge inside compatibility container"
             }
         ],
+        "bridge_health": {
+            "schema_version": 1,
+            "provider": "podman",
+            "transports": ["UnixSocket"],
+            "policy": {"supported": true, "active": podman_status == "experimental", "detail": "policy mediation through the host bridge"},
+            "approval": {"supported": true, "active": podman_status == "experimental", "detail": "operator approval request and response transport"},
+            "credentials": {"supported": true, "active": podman_status == "experimental", "detail": "explicit credential grant transport"},
+            "evidence": {"supported": true, "active": podman_status == "experimental", "detail": "hash-linked evidence append or bundle transport"},
+            "kill_switch": {"supported": true, "active": podman_status == "experimental", "detail": "session destroy and running command kill acknowledgement"},
+            "network": {"supported": false, "active": false, "detail": "network boundary decisions or provider-level network enforcement"}
+        },
         "capabilities": ["container isolation", "shim bridge"],
         "doctor_check": "podman provider",
         "setup_command": "install Podman; on macOS run `podman machine init && podman machine start`",
