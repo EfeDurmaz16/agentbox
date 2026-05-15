@@ -227,6 +227,10 @@ enum Commands {
         #[arg(long, default_value = "1024")]
         memory: u64,
 
+        /// Optional command timeout in seconds
+        #[arg(long = "timeout-seconds")]
+        timeout_seconds: Option<u64>,
+
         /// Add a read-only host mount as host_path:guest_path
         #[arg(long = "mount-ro")]
         read_only_mounts: Vec<String>,
@@ -2576,6 +2580,7 @@ struct RunOptions {
     workspace_mode: Option<String>,
     workspace_overlay_dir: Option<PathBuf>,
     memory: u64,
+    timeout_seconds: Option<u64>,
     read_only_mounts: Vec<String>,
     credential_files: Vec<String>,
     credential_env: Vec<String>,
@@ -2721,6 +2726,7 @@ async fn cmd_run(options: RunOptions) {
     };
     spec.resources = ResourcePolicy {
         memory_bytes: options.memory * 1024 * 1024,
+        timeout_seconds: options.timeout_seconds,
         ..ResourcePolicy::default()
     };
     if let Some(runtime) = options.runtime.as_deref() {
@@ -3073,7 +3079,7 @@ async fn cmd_run(options: RunOptions) {
             argv: options.command.clone(),
             working_dir: Some("/workspace".to_string()),
             env: HashMap::new(),
-            timeout_seconds: None,
+            timeout_seconds: options.timeout_seconds,
         };
 
         match manager.exec(&session.id, &exec_req).await {
@@ -7627,6 +7633,7 @@ async fn main() {
             workspace_mode,
             workspace_overlay_dir,
             memory,
+            timeout_seconds,
             read_only_mounts,
             credential_files,
             credential_env,
@@ -7652,6 +7659,7 @@ async fn main() {
                 workspace_mode,
                 workspace_overlay_dir,
                 memory,
+                timeout_seconds,
                 read_only_mounts,
                 credential_files,
                 credential_env,
