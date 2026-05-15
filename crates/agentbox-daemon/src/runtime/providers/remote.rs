@@ -951,6 +951,8 @@ pub struct RemoteAgentPodEvidenceStatusResponse {
     pub evidence_streams: Vec<RemoteAgentPodEvidenceStreamStatus>,
     #[serde(default)]
     pub pending_approvals: Vec<RemoteAgentPodPendingApprovalStatus>,
+    #[serde(default)]
+    pub credentials: Vec<RemoteAgentPodCredentialStatus>,
 }
 
 impl RemoteAgentPodEvidenceStatusResponse {
@@ -1004,6 +1006,63 @@ impl RemoteAgentPodEvidenceStatusResponse {
         }
         for approval in &self.pending_approvals {
             approval.validate()?;
+        }
+        for credential in &self.credentials {
+            credential.validate()?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteAgentPodCredentialStatus {
+    pub name: String,
+    pub kind: CredentialGrantKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guest_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bytes: Option<usize>,
+    pub one_time: bool,
+}
+
+impl RemoteAgentPodCredentialStatus {
+    pub fn validate(&self) -> Result<(), RuntimeError> {
+        if self.name.trim().is_empty() {
+            return Err(RuntimeError::ManifestRejected(
+                "remote credential status must include name".into(),
+            ));
+        }
+        match self.kind {
+            CredentialGrantKind::EnvVar => {}
+            CredentialGrantKind::FileMount => {
+                if self
+                    .guest_path
+                    .as_deref()
+                    .unwrap_or_default()
+                    .trim()
+                    .is_empty()
+                {
+                    return Err(RuntimeError::ManifestRejected(
+                        "remote file credential status must include guest path".into(),
+                    ));
+                }
+                validate_sha256_hex(
+                    self.sha256.as_deref().unwrap_or_default(),
+                    "remote file credential status hash",
+                )?;
+                if self.bytes.unwrap_or_default() == 0 {
+                    return Err(RuntimeError::ManifestRejected(
+                        "remote file credential status must include byte count".into(),
+                    ));
+                }
+            }
+            CredentialGrantKind::Socket | CredentialGrantKind::ProviderToken => {
+                return Err(RuntimeError::ManifestRejected(
+                    "remote credential status only supports environment and file grants".into(),
+                ));
+            }
         }
         Ok(())
     }
@@ -2688,6 +2747,14 @@ mod tests {
                     reason: "network first contact requires approval".into(),
                     created_at: Utc::now(),
                 }],
+                credentials: vec![RemoteAgentPodCredentialStatus {
+                    name: "OPENAI_API_KEY".into(),
+                    kind: CredentialGrantKind::EnvVar,
+                    guest_path: None,
+                    sha256: None,
+                    bytes: None,
+                    one_time: false,
+                }],
             };
             response.validate_for(&request)?;
             Ok(response)
@@ -3666,6 +3733,14 @@ mod tests {
                 reason: "network first contact requires approval".into(),
                 created_at: Utc::now(),
             }],
+            credentials: vec![RemoteAgentPodCredentialStatus {
+                name: "openai".into(),
+                kind: CredentialGrantKind::FileMount,
+                guest_path: Some("/workspace/.agentbox/credentials/openai".into()),
+                sha256: Some("a".repeat(64)),
+                bytes: Some(42),
+                one_time: true,
+            }],
         };
 
         response.validate_for(&request).unwrap();
@@ -3694,6 +3769,7 @@ mod tests {
             }],
             evidence_streams: Vec::new(),
             pending_approvals: Vec::new(),
+            credentials: Vec::new(),
         };
 
         let err = response.validate_for(&request).unwrap_err();

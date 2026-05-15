@@ -345,12 +345,13 @@ Worker routes that mutate session state fail the request if the configured
 state file cannot be serialized, prepared, or written; they do not acknowledge
 state-changing operations as durable when persistence fails.
 The status route returns the matching session status, command supervision
-counters, the last command exit code/timestamp, evidence metadata receipts, and
-stored bundle payload references, evidence stream status, and pending approval
-requests after binding the caller-provided `session_id` to the allocated
-`worker_session_id`. If a worker restarts from persisted state, running command
-counters are reset to zero because the current contract worker does not yet
-reattach to orphaned OS processes.
+counters, the last command exit code/timestamp, evidence metadata receipts,
+stored bundle payload references, evidence stream status, pending approval
+requests, and redacted env/file credential status after binding the
+caller-provided `session_id` to the allocated `worker_session_id`. If a worker
+restarts from persisted state, running command counters are reset to zero
+because the current contract worker does not yet reattach to orphaned OS
+processes.
 When the daemon-side provider creates a remote session, it persists the worker
 endpoint, worker session id, worker identity, and worker evidence endpoint in
 session labels so later exec/destroy calls can route back to the same worker.

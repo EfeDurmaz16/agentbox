@@ -7,12 +7,12 @@ use std::time::Instant;
 use agentbox_daemon::runtime::providers::remote::{
     Ed25519HandshakeVerifier, RemoteAgentPodApprovalGrantRequest,
     RemoteAgentPodApprovalGrantResponse, RemoteAgentPodCreateSessionRequest,
-    RemoteAgentPodCreateSessionResponse, RemoteAgentPodDestroySessionRequest,
-    RemoteAgentPodDestroySessionResponse, RemoteAgentPodEvidenceStreamChunkRequest,
-    RemoteAgentPodEvidenceStreamChunkResponse, RemoteAgentPodEvidenceStreamStatus,
-    RemoteAgentPodEvidenceUploadRequest, RemoteAgentPodEvidenceUploadResponse,
-    RemoteAgentPodExecRequest, RemoteAgentPodExecResponse, RemoteAgentPodHandshakeAck,
-    RemoteAgentPodHandshakeDescriptor, RemoteAgentPodLifecycleEvent,
+    RemoteAgentPodCreateSessionResponse, RemoteAgentPodCredentialStatus,
+    RemoteAgentPodDestroySessionRequest, RemoteAgentPodDestroySessionResponse,
+    RemoteAgentPodEvidenceStreamChunkRequest, RemoteAgentPodEvidenceStreamChunkResponse,
+    RemoteAgentPodEvidenceStreamStatus, RemoteAgentPodEvidenceUploadRequest,
+    RemoteAgentPodEvidenceUploadResponse, RemoteAgentPodExecRequest, RemoteAgentPodExecResponse,
+    RemoteAgentPodHandshakeAck, RemoteAgentPodHandshakeDescriptor, RemoteAgentPodLifecycleEvent,
     RemoteAgentPodPendingApprovalStatus, RemoteAgentPodWorkspaceBundle,
     RemoteAgentPodWorkspaceExportResponse, RemoteAgentPodWorkspaceFile,
 };
@@ -322,6 +322,7 @@ struct WorkerEvidenceStatusResponse {
     stored_evidence_bundles: Vec<WorkerStoredEvidenceBundleSnapshot>,
     evidence_streams: Vec<RemoteAgentPodEvidenceStreamStatus>,
     pending_approvals: Vec<RemoteAgentPodPendingApprovalStatus>,
+    credentials: Vec<RemoteAgentPodCredentialStatus>,
 }
 
 type WorkerRouteResult<T> = Result<Json<T>, (StatusCode, Json<WorkerError>)>;
@@ -1706,6 +1707,7 @@ async fn evidence_status(
             .iter()
             .map(worker_pending_approval_status)
             .collect(),
+        credentials: worker_credential_status(session),
     }))
 }
 
@@ -2312,6 +2314,31 @@ fn worker_pending_approval_status(
         reason: approval.reason.clone(),
         created_at: approval.created_at,
     }
+}
+
+fn worker_credential_status(session: &WorkerSession) -> Vec<RemoteAgentPodCredentialStatus> {
+    let mut credentials = Vec::new();
+    credentials.extend(session.env_credentials.iter().map(|credential| {
+        RemoteAgentPodCredentialStatus {
+            name: credential.name.clone(),
+            kind: CredentialGrantKind::EnvVar,
+            guest_path: None,
+            sha256: None,
+            bytes: None,
+            one_time: credential.one_time,
+        }
+    }));
+    credentials.extend(session.file_credentials.iter().map(|credential| {
+        RemoteAgentPodCredentialStatus {
+            name: credential.name.clone(),
+            kind: CredentialGrantKind::FileMount,
+            guest_path: Some(credential.guest_path.clone()),
+            sha256: Some(credential.sha256.clone()),
+            bytes: Some(credential.bytes),
+            one_time: credential.one_time,
+        }
+    }));
+    credentials
 }
 
 async fn require_matching_session(
@@ -4075,6 +4102,18 @@ mod tests {
             reason: "first contact requires approval".into(),
             created_at: sealed_at,
         });
+        session.env_credentials.push(WorkerEnvCredentialGrant {
+            name: "OPENAI_API_KEY".into(),
+            one_time: false,
+        });
+        session.file_credentials.push(WorkerFileCredentialGrant {
+            name: "openai".into(),
+            guest_path: "/workspace/.agentbox/credentials/openai".into(),
+            host_path: PathBuf::from("/tmp/workspace/.agentbox/credentials/openai"),
+            sha256: "d".repeat(64),
+            bytes: 31,
+            one_time: true,
+        });
         state
             .sessions
             .lock()
@@ -4124,6 +4163,23 @@ mod tests {
             response.pending_approvals[0].command_argv,
             vec!["curl", "https://approval.example.com"]
         );
+        assert_eq!(response.credentials.len(), 2);
+        assert_eq!(response.credentials[0].name, "OPENAI_API_KEY");
+        assert_eq!(response.credentials[0].kind, CredentialGrantKind::EnvVar);
+        assert_eq!(response.credentials[0].sha256, None);
+        assert_eq!(response.credentials[1].name, "openai");
+        assert_eq!(response.credentials[1].kind, CredentialGrantKind::FileMount);
+        assert_eq!(
+            response.credentials[1].guest_path.as_deref(),
+            Some("/workspace/.agentbox/credentials/openai")
+        );
+        let file_credential_hash = "d".repeat(64);
+        assert_eq!(
+            response.credentials[1].sha256.as_deref(),
+            Some(file_credential_hash.as_str())
+        );
+        assert_eq!(response.credentials[1].bytes, Some(31));
+        assert!(response.credentials[1].one_time);
     }
 
     #[tokio::test]
