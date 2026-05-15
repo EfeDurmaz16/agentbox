@@ -484,9 +484,53 @@ mod tests {
         assert!(provider.boundary_primitives().contains(&"seccomp"));
 
         let windows = AgentPodProvider::new(AgentPodProviderKind::Windows);
+        assert_provider_metadata(
+            &windows,
+            "agentpod-windows",
+            "windows",
+            &[
+                RuntimeCapability::WindowsJobObjects,
+                RuntimeCapability::AppContainer,
+                RuntimeCapability::FilesystemPolicy,
+                RuntimeCapability::NetworkPolicy,
+                RuntimeCapability::CredentialPolicy,
+                RuntimeCapability::ApprovalBridge,
+                RuntimeCapability::EvidenceExport,
+            ],
+        );
+        assert_eq!(windows.family(), ProviderFamily::NativeSandbox);
+        assert_eq!(
+            windows.implementation_status(),
+            ProviderImplementationStatus::DescriptorOnly
+        );
+        assert!(
+            windows.network_enforcement_capabilities().is_empty(),
+            "Windows descriptor must not claim active WFP enforcement"
+        );
+        assert_network_enforcement_metadata(&windows, &[]);
+        assert_eq!(
+            windows.bridge_transport_kinds(),
+            &[HostBridgeTransportKind::NamedPipe]
+        );
         assert!(windows.boundary_primitives().contains(&"job-objects"));
+        assert!(windows.boundary_primitives().contains(&"appcontainer"));
+        assert!(windows.boundary_primitives().contains(&"wfp"));
+        assert!(windows.boundary_primitives().contains(&"etw"));
         assert!(windows.boundary_primitives().contains(&"windows-sandbox"));
         assert!(windows.boundary_primitives().contains(&"hyper-v"));
+    }
+
+    #[tokio::test]
+    async fn windows_agentpod_provider_remains_descriptor_only() {
+        let provider = AgentPodProvider::new(AgentPodProviderKind::Windows);
+
+        assert_unavailable_provider_contract(&provider).await;
+        assert!(provider
+            .boundary_primitive_statuses()
+            .iter()
+            .all(|status| !status.active
+                && status.requires_gate == Some("AGENTBOX_WINDOWS_NATIVE=1")
+                && status.enforcement_scope.contains("execution is not wired")));
     }
 
     #[tokio::test]
