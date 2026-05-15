@@ -1,3 +1,5 @@
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+
 use crate::classify::{Bucket, Classification, CommandContext, PolicyConfig, PolicyNetworkMode};
 
 /// Extract domain from a URL string. Returns None if parsing fails.
@@ -53,6 +55,56 @@ fn is_metadata_endpoint_domain(domain: &str) -> bool {
     )
 }
 
+fn is_private_network_domain(domain: &str) -> bool {
+    match domain.parse::<IpAddr>() {
+        Ok(IpAddr::V4(ip)) => is_private_or_link_local_ipv4(ip),
+        Ok(IpAddr::V6(ip)) => is_private_or_link_local_ipv6(ip),
+        Err(_) => false,
+    }
+}
+
+fn is_private_or_link_local_ipv4(ip: Ipv4Addr) -> bool {
+    ip.is_private()
+        || ip.is_link_local()
+        || ip.is_broadcast()
+        || ip.is_documentation()
+        || ip.is_unspecified()
+}
+
+fn is_private_or_link_local_ipv6(ip: Ipv6Addr) -> bool {
+    ip.is_unique_local() || ip.is_unicast_link_local() || ip.is_unspecified()
+}
+
+fn classify_private_network_destination(
+    binary: &str,
+    domain: &str,
+    mode: PolicyNetworkMode,
+) -> Classification {
+    let reason = format!(
+        "{} to {} — private network destination requires explicit mediation",
+        binary, domain
+    );
+    match mode {
+        PolicyNetworkMode::None
+        | PolicyNetworkMode::DenyByDefault
+        | PolicyNetworkMode::AllowListed => Classification {
+            bucket: Bucket::Block,
+            reason,
+            notification_summary: None,
+        },
+        PolicyNetworkMode::ApprovalOnFirstContact
+        | PolicyNetworkMode::OpenWithGuardrails
+        | PolicyNetworkMode::Host => Classification {
+            bucket: Bucket::Approve,
+            reason,
+            notification_summary: Some(format!(
+                "Agent wants to contact private network destination {}",
+                domain
+            )),
+        },
+    }
+}
+
 /// Check if a command matches a pattern from always_allow / always_block.
 /// Patterns: "ls" (exact binary), "git push" (binary + subcommand), "npm *" (any npm invocation).
 fn command_matches_pattern(ctx: &CommandContext, pattern: &str) -> bool {
@@ -105,6 +157,14 @@ pub fn check_config_overrides(
                         ),
                         notification_summary: None,
                     });
+                }
+
+                if is_private_network_domain(&domain) {
+                    return Some(classify_private_network_destination(
+                        &ctx.binary,
+                        &domain,
+                        config.network_mode,
+                    ));
                 }
 
                 if config.denied_domains.iter().any(|d| {
@@ -905,6 +965,46 @@ mod tests {
             let c = classify(&ctx("curl", &[url]), &config);
             assert_eq!(c.bucket, Bucket::Block, "{url} should be blocked");
             assert!(c.reason.contains("metadata endpoint"));
+        }
+    }
+
+    #[test]
+    fn test_private_network_destinations_require_mediation() {
+        let config = PolicyConfig {
+            allowed_domains: vec!["10.0.0.5".into(), "192.168.1.20".into()],
+            always_allow: vec!["curl *".into()],
+            network_mode: PolicyNetworkMode::OpenWithGuardrails,
+            ..Default::default()
+        };
+
+        for url in [
+            "http://10.0.0.5/admin",
+            "http://172.16.4.10/status",
+            "http://192.168.1.20/router",
+            "http://169.254.10.20/service",
+            "http://[fd00::1234]/status",
+            "http://[fe80::1]/status",
+        ] {
+            let c = classify(&ctx("curl", &[url]), &config);
+            assert_eq!(c.bucket, Bucket::Approve, "{url} should require approval");
+            assert!(c.reason.contains("private network destination"));
+        }
+    }
+
+    #[test]
+    fn test_private_network_destinations_block_in_deny_modes() {
+        for mode in [
+            PolicyNetworkMode::None,
+            PolicyNetworkMode::DenyByDefault,
+            PolicyNetworkMode::AllowListed,
+        ] {
+            let config = PolicyConfig {
+                network_mode: mode,
+                ..Default::default()
+            };
+            let c = classify(&ctx("curl", &["http://192.168.1.20/router"]), &config);
+            assert_eq!(c.bucket, Bucket::Block, "{mode:?} should block private IPs");
+            assert!(c.reason.contains("private network destination"));
         }
     }
 
