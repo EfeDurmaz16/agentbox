@@ -908,4 +908,32 @@ assert "KillSwitchAck" in destroyed["lifecycle_events"]
 assert "WorkerDestroyed" in destroyed["lifecycle_events"]
 PY
 
+curl -fsS "http://127.0.0.1:${PORT}/sessions/${LONG_WORKER_SESSION_ID}/restart" \
+  -H 'content-type: application/json' \
+  --data "{\"session_id\":\"${LONG_SESSION_ID}\",\"worker_session_id\":\"${LONG_WORKER_SESSION_ID}\",\"reason\":\"smoke explicit restart\"}" \
+  >"$TMPDIR/restart-response.json"
+
+curl -fsS "http://127.0.0.1:${PORT}/sessions/${LONG_WORKER_SESSION_ID}/exec" \
+  -H 'content-type: application/json' \
+  --data "{\"session_id\":\"${LONG_SESSION_ID}\",\"worker_session_id\":\"${LONG_WORKER_SESSION_ID}\",\"command\":{\"argv\":[\"printf\",\"explicit-restart\"],\"working_dir\":null,\"env\":{},\"timeout_seconds\":5}}" \
+  >"$TMPDIR/restarted-long-exec-response.json"
+
+python3 - "$TMPDIR/restart-response.json" "$TMPDIR/restarted-long-exec-response.json" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], "r", encoding="utf-8") as fh:
+    restart = json.load(fh)
+with open(sys.argv[2], "r", encoding="utf-8") as fh:
+    exec_response = json.load(fh)
+
+assert restart["status"] == "Running"
+assert restart["restart_attempt"] == 1
+assert "WorkerRestarted" in restart["lifecycle_events"]
+assert "SessionResumed" in restart["lifecycle_events"]
+assert "EvidenceSealed" in restart["lifecycle_events"]
+assert exec_response["result"]["exit_code"] == 0
+assert exec_response["result"]["stdout"] == "explicit-restart"
+PY
+
 echo "remote worker smoke passed on 127.0.0.1:${PORT}"

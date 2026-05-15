@@ -385,6 +385,8 @@ pub enum RemoteAgentPodLifecycleEvent {
     EvidenceSealed,
     KillSwitchAck,
     WorkerDestroyed,
+    WorkerRestarted,
+    SessionResumed,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -710,6 +712,71 @@ impl RemoteAgentPodDestroySessionResponse {
             vec![RemoteAgentPodLifecycleEvent::WorkerDestroyed]
         };
         require_lifecycle_events(&self.lifecycle_events, &required, "destroy response")
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteAgentPodRestartSessionRequest {
+    pub session_id: String,
+    pub worker_session_id: String,
+    pub reason: String,
+}
+
+impl RemoteAgentPodRestartSessionRequest {
+    pub fn validate(&self) -> Result<(), RuntimeError> {
+        if self.session_id.trim().is_empty()
+            || self.worker_session_id.trim().is_empty()
+            || self.reason.trim().is_empty()
+        {
+            return Err(RuntimeError::ManifestRejected(
+                "remote AgentPod restart request must include session ids and reason".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteAgentPodRestartSessionResponse {
+    pub session_id: String,
+    pub worker_session_id: String,
+    pub status: RuntimeStatus,
+    pub restart_attempt: u64,
+    pub lifecycle_events: Vec<RemoteAgentPodLifecycleEvent>,
+}
+
+impl RemoteAgentPodRestartSessionResponse {
+    pub fn validate_for(
+        &self,
+        request: &RemoteAgentPodRestartSessionRequest,
+    ) -> Result<(), RuntimeError> {
+        request.validate()?;
+        if self.session_id != request.session_id
+            || self.worker_session_id != request.worker_session_id
+        {
+            return Err(RuntimeError::ManifestRejected(
+                "remote AgentPod restart response session ids do not match request".into(),
+            ));
+        }
+        if !matches!(self.status, RuntimeStatus::Running) {
+            return Err(RuntimeError::ManifestRejected(
+                "remote AgentPod restart response must report running status".into(),
+            ));
+        }
+        if self.restart_attempt == 0 {
+            return Err(RuntimeError::ManifestRejected(
+                "remote AgentPod restart response must include a restart attempt".into(),
+            ));
+        }
+        require_lifecycle_events(
+            &self.lifecycle_events,
+            &[
+                RemoteAgentPodLifecycleEvent::WorkerRestarted,
+                RemoteAgentPodLifecycleEvent::SessionResumed,
+                RemoteAgentPodLifecycleEvent::EvidenceSealed,
+            ],
+            "restart response",
+        )
     }
 }
 
@@ -3625,6 +3692,40 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("session ids"));
+    }
+
+    #[test]
+    fn remote_restart_response_requires_running_status_and_lifecycle_events() {
+        let request = RemoteAgentPodRestartSessionRequest {
+            session_id: "session-1".into(),
+            worker_session_id: "worker-session-1".into(),
+            reason: "operator restart".into(),
+        };
+        let stopped_response = RemoteAgentPodRestartSessionResponse {
+            session_id: "session-1".into(),
+            worker_session_id: "worker-session-1".into(),
+            status: RuntimeStatus::Stopped,
+            restart_attempt: 1,
+            lifecycle_events: vec![
+                RemoteAgentPodLifecycleEvent::WorkerRestarted,
+                RemoteAgentPodLifecycleEvent::SessionResumed,
+                RemoteAgentPodLifecycleEvent::EvidenceSealed,
+            ],
+        };
+
+        let stopped_err = stopped_response.validate_for(&request).unwrap_err();
+
+        assert!(stopped_err.to_string().contains("running status"));
+
+        let missing_event_response = RemoteAgentPodRestartSessionResponse {
+            status: RuntimeStatus::Running,
+            lifecycle_events: vec![RemoteAgentPodLifecycleEvent::WorkerRestarted],
+            ..stopped_response
+        };
+
+        let event_err = missing_event_response.validate_for(&request).unwrap_err();
+
+        assert!(event_err.to_string().contains("SessionResumed"));
     }
 
     #[test]

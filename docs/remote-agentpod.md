@@ -308,6 +308,10 @@ previous boot id, start time, recovered session count, and whether supervision
 state is memory-only or backed by `--state-dir`. Session evidence status embeds
 the same supervision block so operators can prove a session survived worker
 restart without treating arbitrary command replay as safe.
+Stopped or failed sessions can be explicitly resumed with
+`POST /sessions/{worker_session_id}/restart`. This re-arms the worker kill
+channel and marks the session running again, but it does not replay the previous
+command. Operators must issue a new exec request after restart.
 Worker contract violations such as unknown worker sessions, mismatched session
 ids, unsupported credential grant kinds, unpreparable workspace paths,
 stopped-session exec, or invalid evidence metadata return HTTP error statuses

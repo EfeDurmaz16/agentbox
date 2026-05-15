@@ -14,6 +14,7 @@ use agentbox_daemon::runtime::providers::remote::{
     RemoteAgentPodEvidenceUploadResponse, RemoteAgentPodExecRequest, RemoteAgentPodExecResponse,
     RemoteAgentPodHandshakeAck, RemoteAgentPodHandshakeDescriptor, RemoteAgentPodLifecycleEvent,
     RemoteAgentPodPendingApprovalStatus, RemoteAgentPodRestartPolicy,
+    RemoteAgentPodRestartSessionRequest, RemoteAgentPodRestartSessionResponse,
     RemoteAgentPodWorkspaceBundle, RemoteAgentPodWorkspaceExportResponse,
     RemoteAgentPodWorkspaceFile,
 };
@@ -114,6 +115,7 @@ struct WorkerSession {
     last_command_exit_code: Option<i32>,
     last_command_finished_at: Option<DateTime<Utc>>,
     restart_policy: RemoteAgentPodRestartPolicy,
+    restart_attempts: u64,
     heartbeat_interval_seconds: u64,
     last_heartbeat_at: DateTime<Utc>,
     evidence_receipts: Vec<WorkerEvidenceReceipt>,
@@ -246,6 +248,8 @@ struct WorkerSessionSnapshot {
     last_command_finished_at: Option<DateTime<Utc>>,
     #[serde(default)]
     restart_policy: RemoteAgentPodRestartPolicy,
+    #[serde(default)]
+    restart_attempts: u64,
     #[serde(default = "default_worker_heartbeat_interval_seconds")]
     heartbeat_interval_seconds: u64,
     #[serde(default)]
@@ -529,6 +533,7 @@ impl WorkerSession {
             last_command_exit_code: None,
             last_command_finished_at: None,
             restart_policy: lifecycle.restart_policy,
+            restart_attempts: 0,
             heartbeat_interval_seconds: lifecycle.heartbeat_interval_seconds,
             last_heartbeat_at: Utc::now(),
             evidence_receipts: Vec::new(),
@@ -545,6 +550,15 @@ impl WorkerSession {
     fn mark_stopped(&mut self) {
         self.status = RuntimeStatus::Stopped;
         let _ = self.kill_tx.send(true);
+    }
+
+    fn mark_restarted(&mut self) -> u64 {
+        let (kill_tx, _kill_rx) = watch::channel(false);
+        self.kill_tx = kill_tx;
+        self.status = RuntimeStatus::Running;
+        self.active_command_count = 0;
+        self.restart_attempts = self.restart_attempts.saturating_add(1);
+        self.restart_attempts
     }
 
     fn from_snapshot(snapshot: WorkerSessionSnapshot) -> Self {
@@ -575,6 +589,7 @@ impl WorkerSession {
             last_command_exit_code: snapshot.last_command_exit_code,
             last_command_finished_at: snapshot.last_command_finished_at,
             restart_policy: snapshot.restart_policy,
+            restart_attempts: snapshot.restart_attempts,
             heartbeat_interval_seconds: snapshot.heartbeat_interval_seconds,
             last_heartbeat_at: snapshot.last_heartbeat_at.unwrap_or_else(Utc::now),
             evidence_receipts: snapshot
@@ -658,6 +673,7 @@ impl WorkerSession {
             last_command_exit_code: self.last_command_exit_code,
             last_command_finished_at: self.last_command_finished_at,
             restart_policy: self.restart_policy.clone(),
+            restart_attempts: self.restart_attempts,
             heartbeat_interval_seconds: self.heartbeat_interval_seconds,
             last_heartbeat_at: Some(self.last_heartbeat_at),
             evidence_receipts: self
@@ -834,6 +850,10 @@ pub fn router(config: RemoteWorkerConfig) -> Router {
         .route(
             "/sessions/{worker_session_id}/workspace/export",
             get(export_workspace),
+        )
+        .route(
+            "/sessions/{worker_session_id}/restart",
+            post(restart_session),
         )
         .route(
             "/sessions/{worker_session_id}/destroy",
@@ -1934,6 +1954,54 @@ async fn export_workspace(
         status: session.status.clone(),
         workspace_bundle: bundle,
         lifecycle_events: vec![RemoteAgentPodLifecycleEvent::EvidenceSealed],
+    }))
+}
+
+async fn restart_session(
+    State(state): State<Arc<RemoteWorkerState>>,
+    AxumPath(route_worker_session_id): AxumPath<String>,
+    Json(request): Json<RemoteAgentPodRestartSessionRequest>,
+) -> WorkerRouteResult<RemoteAgentPodRestartSessionResponse> {
+    require_route_worker_session_id(&route_worker_session_id, &request.worker_session_id)?;
+    request
+        .validate()
+        .map_err(|err| worker_error(StatusCode::BAD_REQUEST, err.to_string()))?;
+    let restart_attempt = {
+        let mut sessions = state.sessions.lock().await;
+        let Some(session) = sessions.get_mut(&request.worker_session_id) else {
+            return Err(worker_error(
+                StatusCode::NOT_FOUND,
+                format!(
+                    "agentbox remote worker session {} has not been created",
+                    request.worker_session_id
+                ),
+            ));
+        };
+        if session.session_id != request.session_id {
+            return Err(worker_error(
+                StatusCode::CONFLICT,
+                "agentbox remote worker session id does not match worker session",
+            ));
+        }
+        if matches!(session.status, RuntimeStatus::Running) {
+            return Err(worker_error(
+                StatusCode::CONFLICT,
+                "agentbox remote worker can restart only stopped or failed sessions",
+            ));
+        }
+        session.mark_restarted()
+    };
+    persist_sessions(&state).await.map_err(worker_state_error)?;
+    Ok(Json(RemoteAgentPodRestartSessionResponse {
+        session_id: request.session_id,
+        worker_session_id: request.worker_session_id,
+        status: RuntimeStatus::Running,
+        restart_attempt,
+        lifecycle_events: vec![
+            RemoteAgentPodLifecycleEvent::WorkerRestarted,
+            RemoteAgentPodLifecycleEvent::SessionResumed,
+            RemoteAgentPodLifecycleEvent::EvidenceSealed,
+        ],
     }))
 }
 
@@ -4167,6 +4235,70 @@ mod tests {
         assert_eq!(destroy.status, RuntimeStatus::Stopped);
         assert_eq!(response.result.exit_code, 130);
         assert!(response.result.stderr.contains("killed"));
+    }
+
+    #[tokio::test]
+    async fn restart_session_resumes_stopped_session_for_later_exec() {
+        let config = RemoteWorkerConfig::new(
+            "worker.local/dev",
+            "https://worker.example.com/agentpod/evidence",
+            SigningKey::from_bytes(&[41_u8; 32]),
+        );
+        let state = test_state(config);
+        let mut session = WorkerSession::new(
+            "session-1".into(),
+            std::env::temp_dir(),
+            WorkerPolicy::default(),
+        );
+        session.mark_stopped();
+        state
+            .sessions
+            .lock()
+            .await
+            .insert("worker-session-1".into(), session);
+
+        let restart = restart_session(
+            State(state.clone()),
+            worker_session_path(),
+            Json(RemoteAgentPodRestartSessionRequest {
+                session_id: "session-1".into(),
+                worker_session_id: "worker-session-1".into(),
+                reason: "operator restart".into(),
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+
+        assert_eq!(restart.status, RuntimeStatus::Running);
+        assert_eq!(restart.restart_attempt, 1);
+        assert!(restart
+            .lifecycle_events
+            .contains(&RemoteAgentPodLifecycleEvent::WorkerRestarted));
+        assert!(restart
+            .lifecycle_events
+            .contains(&RemoteAgentPodLifecycleEvent::SessionResumed));
+
+        let exec = exec_command(
+            State(state),
+            worker_session_path(),
+            Json(RemoteAgentPodExecRequest {
+                session_id: "session-1".into(),
+                worker_session_id: "worker-session-1".into(),
+                command: ExecCommand {
+                    argv: vec!["printf".into(), "restarted".into()],
+                    working_dir: None,
+                    env: HashMap::new(),
+                    timeout_seconds: Some(5),
+                },
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+
+        assert_eq!(exec.result.exit_code, 0);
+        assert_eq!(exec.result.stdout, "restarted");
     }
 
     #[tokio::test]
