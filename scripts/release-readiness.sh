@@ -67,6 +67,7 @@ validate_json_file "$ARTIFACT_DIR/setup-plan.json" \
   "data.get('schema_version') == 1 and data.get('required_failed', 0) + data.get('advisory_failed', 0) == data.get('failed', 0) and data.get('steps') is not None"
 
 run_step cli-contract-smoke bash scripts/smoke-cli-contracts.sh
+run_step v02-demo bash scripts/demo-v0.2.sh
 run_step remote-worker-smoke bash scripts/smoke-remote-worker.sh
 
 if [ "$RUN_LIVE_SMOKE" = "1" ]; then

@@ -90,6 +90,7 @@ doctor report without mutating host state.
 ## Minipods And Providers
 
 - [ ] `agentbox minipod-spec hermes --workspace .` emits valid JSON.
+- [ ] `scripts/demo-v0.2.sh` passes.
 - [ ] `scripts/demo-autonomous-agent.sh` passes.
 - [ ] macOS native plan compiler output is tested without claiming execution.
 - [ ] `agentbox doctor` reports macOS native plan, Apple Virtualization, and
