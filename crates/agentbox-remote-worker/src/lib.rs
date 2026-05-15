@@ -68,7 +68,34 @@ impl RemoteWorkerConfig {
 
 struct RemoteWorkerState {
     config: RemoteWorkerConfig,
+    supervision: WorkerSupervisionState,
     sessions: Mutex<HashMap<String, WorkerSession>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct WorkerSupervisionState {
+    schema_version: i64,
+    boot_id: String,
+    boot_count: u64,
+    previous_boot_id: Option<String>,
+    started_at: DateTime<Utc>,
+    recovered_sessions: usize,
+    state_dir: Option<PathBuf>,
+    persistence: WorkerSupervisionPersistence,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+enum WorkerSupervisionPersistence {
+    MemoryOnly,
+    StateDir,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct WorkerSupervisionSnapshot {
+    schema_version: i64,
+    boot_id: String,
+    boot_count: u64,
+    started_at: DateTime<Utc>,
 }
 
 #[derive(Clone)]
@@ -362,6 +389,17 @@ struct WorkerEvidenceStatusResponse {
     evidence_streams: Vec<RemoteAgentPodEvidenceStreamStatus>,
     pending_approvals: Vec<RemoteAgentPodPendingApprovalStatus>,
     credentials: Vec<RemoteAgentPodCredentialStatus>,
+    supervision: WorkerSupervisionStatus,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct WorkerSupervisionStatus {
+    boot_id: String,
+    boot_count: u64,
+    previous_boot_id: Option<String>,
+    started_at: DateTime<Utc>,
+    recovered_sessions: usize,
+    persistence: WorkerSupervisionPersistence,
 }
 
 type WorkerRouteResult<T> = Result<Json<T>, (StatusCode, Json<WorkerError>)>;
@@ -680,9 +718,96 @@ fn default_worker_heartbeat_interval_seconds() -> u64 {
     30
 }
 
+impl WorkerSupervisionState {
+    fn memory_only(recovered_sessions: usize) -> Self {
+        let started_at = Utc::now();
+        Self {
+            schema_version: 1,
+            boot_id: worker_boot_id(started_at),
+            boot_count: 1,
+            previous_boot_id: None,
+            started_at,
+            recovered_sessions,
+            state_dir: None,
+            persistence: WorkerSupervisionPersistence::MemoryOnly,
+        }
+    }
+
+    fn status(&self) -> WorkerSupervisionStatus {
+        WorkerSupervisionStatus {
+            boot_id: self.boot_id.clone(),
+            boot_count: self.boot_count,
+            previous_boot_id: self.previous_boot_id.clone(),
+            started_at: self.started_at,
+            recovered_sessions: self.recovered_sessions,
+            persistence: self.persistence.clone(),
+        }
+    }
+
+    fn snapshot(&self) -> WorkerSupervisionSnapshot {
+        WorkerSupervisionSnapshot {
+            schema_version: self.schema_version,
+            boot_id: self.boot_id.clone(),
+            boot_count: self.boot_count,
+            started_at: self.started_at,
+        }
+    }
+}
+
+fn worker_boot_id(started_at: DateTime<Utc>) -> String {
+    format!(
+        "worker-{}-{}",
+        std::process::id(),
+        started_at.timestamp_nanos_opt().unwrap_or_default()
+    )
+}
+
+fn load_or_initialize_supervision(
+    config: &RemoteWorkerConfig,
+    recovered_sessions: usize,
+) -> Result<WorkerSupervisionState, String> {
+    let Some(path) = worker_supervision_path(config) else {
+        return Ok(WorkerSupervisionState::memory_only(recovered_sessions));
+    };
+    let previous = if path.exists() {
+        let contents = std::fs::read_to_string(&path)
+            .map_err(|err| format!("failed to read remote worker supervision state: {err}"))?;
+        if contents.trim().is_empty() {
+            None
+        } else {
+            Some(
+                serde_json::from_str::<WorkerSupervisionSnapshot>(&contents).map_err(|err| {
+                    format!("failed to parse remote worker supervision state: {err}")
+                })?,
+            )
+        }
+    } else {
+        None
+    };
+    let started_at = Utc::now();
+    let state = WorkerSupervisionState {
+        schema_version: 1,
+        boot_id: worker_boot_id(started_at),
+        boot_count: previous
+            .as_ref()
+            .map(|snapshot| snapshot.boot_count.saturating_add(1))
+            .unwrap_or(1),
+        previous_boot_id: previous.map(|snapshot| snapshot.boot_id),
+        started_at,
+        recovered_sessions,
+        state_dir: config.state_dir.clone(),
+        persistence: WorkerSupervisionPersistence::StateDir,
+    };
+    persist_supervision_snapshot(&path, &state.snapshot())?;
+    Ok(state)
+}
+
 pub fn router(config: RemoteWorkerConfig) -> Router {
     let sessions = load_persisted_sessions(&config).unwrap_or_default();
+    let supervision = load_or_initialize_supervision(&config, sessions.len())
+        .unwrap_or_else(|_| WorkerSupervisionState::memory_only(sessions.len()));
     Router::new()
+        .route("/worker/status", get(worker_status))
         .route("/handshake", post(handshake))
         .route("/sessions", post(create_session))
         .route("/sessions/{worker_session_id}/exec", post(exec_command))
@@ -716,6 +841,7 @@ pub fn router(config: RemoteWorkerConfig) -> Router {
         )
         .with_state(Arc::new(RemoteWorkerState {
             config,
+            supervision,
             sessions: Mutex::new(sessions),
         }))
 }
@@ -723,6 +849,12 @@ pub fn router(config: RemoteWorkerConfig) -> Router {
 pub async fn serve(addr: SocketAddr, config: RemoteWorkerConfig) -> std::io::Result<()> {
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, router(config)).await
+}
+
+async fn worker_status(
+    State(state): State<Arc<RemoteWorkerState>>,
+) -> Json<WorkerSupervisionStatus> {
+    Json(state.supervision.status())
 }
 
 async fn handshake(
@@ -1773,6 +1905,7 @@ async fn evidence_status(
             .map(worker_pending_approval_status)
             .collect(),
         credentials: worker_credential_status(session),
+        supervision: state.supervision.status(),
     }))
 }
 
@@ -2545,6 +2678,38 @@ fn worker_state_path(config: &RemoteWorkerConfig) -> Option<PathBuf> {
     })
 }
 
+fn worker_supervision_path(config: &RemoteWorkerConfig) -> Option<PathBuf> {
+    config.state_dir.as_ref().map(|state_dir| {
+        if state_dir.extension().is_some() {
+            worker_state_root(state_dir).join("worker-supervision.json")
+        } else {
+            state_dir.join("worker-supervision.json")
+        }
+    })
+}
+
+fn persist_supervision_snapshot(
+    path: &Path,
+    snapshot: &WorkerSupervisionSnapshot,
+) -> Result<(), String> {
+    let contents = serde_json::to_string_pretty(snapshot)
+        .map_err(|err| format!("failed to serialize remote worker supervision state: {err}"))?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|err| {
+            format!(
+                "failed to prepare remote worker supervision directory {}: {err}",
+                parent.display()
+            )
+        })?;
+    }
+    std::fs::write(path, contents).map_err(|err| {
+        format!(
+            "failed to write remote worker supervision state {}: {err}",
+            path.display()
+        )
+    })
+}
+
 fn worker_state_root(state_dir: &Path) -> PathBuf {
     if state_dir.extension().is_some() {
         state_dir
@@ -2634,6 +2799,7 @@ mod tests {
     fn test_state(config: RemoteWorkerConfig) -> Arc<RemoteWorkerState> {
         Arc::new(RemoteWorkerState {
             config,
+            supervision: WorkerSupervisionState::memory_only(0),
             sessions: Mutex::new(HashMap::new()),
         })
     }
@@ -4254,6 +4420,61 @@ mod tests {
         );
         assert_eq!(response.credentials[1].bytes, Some(31));
         assert!(response.credentials[1].one_time);
+        assert_eq!(response.supervision.boot_count, 1);
+        assert_eq!(response.supervision.recovered_sessions, 0);
+        assert_eq!(
+            response.supervision.persistence,
+            WorkerSupervisionPersistence::MemoryOnly
+        );
+    }
+
+    #[tokio::test]
+    async fn worker_status_reports_supervision_state() {
+        let config = RemoteWorkerConfig::new(
+            "worker.local/dev",
+            "https://worker.example.com/agentpod/evidence",
+            SigningKey::from_bytes(&[39_u8; 32]),
+        );
+        let state = test_state(config);
+
+        let response = worker_status(State(state)).await.0;
+
+        assert_eq!(response.boot_count, 1);
+        assert_eq!(response.recovered_sessions, 0);
+        assert_eq!(
+            response.persistence,
+            WorkerSupervisionPersistence::MemoryOnly
+        );
+        assert!(response.boot_id.starts_with("worker-"));
+    }
+
+    #[test]
+    fn supervision_state_persists_boot_count_for_state_dir() {
+        let state_dir = std::env::temp_dir().join(format!(
+            "agentbox-remote-worker-supervision-state-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&state_dir);
+        let config = RemoteWorkerConfig::new(
+            "worker.local/dev",
+            "https://worker.example.com/agentpod/evidence",
+            SigningKey::from_bytes(&[40_u8; 32]),
+        )
+        .with_state_dir(&state_dir);
+
+        let first = load_or_initialize_supervision(&config, 0).unwrap();
+        let second = load_or_initialize_supervision(&config, 2).unwrap();
+
+        assert_eq!(first.boot_count, 1);
+        assert_eq!(second.boot_count, 2);
+        assert_eq!(
+            second.previous_boot_id.as_deref(),
+            Some(first.boot_id.as_str())
+        );
+        assert_eq!(second.recovered_sessions, 2);
+        assert_eq!(second.persistence, WorkerSupervisionPersistence::StateDir);
+        assert!(worker_supervision_path(&config).unwrap().exists());
+        let _ = std::fs::remove_dir_all(state_dir);
     }
 
     #[tokio::test]

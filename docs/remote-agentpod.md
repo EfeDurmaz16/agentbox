@@ -302,6 +302,12 @@ receipt metadata are written to `worker-sessions.json` and loaded again when the
 worker starts. The smoke test restarts the worker process with the same state
 directory and verifies that a previously created running session can execute
 again after reload.
+The worker also writes `worker-supervision.json` next to persisted sessions and
+exposes `/worker/status`. That route reports the current boot id, boot count,
+previous boot id, start time, recovered session count, and whether supervision
+state is memory-only or backed by `--state-dir`. Session evidence status embeds
+the same supervision block so operators can prove a session survived worker
+restart without treating arbitrary command replay as safe.
 Worker contract violations such as unknown worker sessions, mismatched session
 ids, unsupported credential grant kinds, unpreparable workspace paths,
 stopped-session exec, or invalid evidence metadata return HTTP error statuses

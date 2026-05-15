@@ -700,6 +700,9 @@ assert data["restart_policy"]["strategy"] == "OnFailure"
 assert data["restart_policy"]["max_attempts"] == 2
 assert data["heartbeat_interval_seconds"] == 30
 assert data["last_heartbeat_at"]
+assert data["supervision"]["boot_count"] == 1
+assert data["supervision"]["persistence"] == "StateDir"
+assert data["supervision"]["recovered_sessions"] == 0
 assert data["kill_switch_armed"] is True
 assert data["evidence_sealed"] is True
 assert data["evidence_receipts"][0]["bundle_sha256"] == "f" * 64
@@ -748,6 +751,21 @@ assert matches[0]["evidence_streams"][0]["stream_sha256"] == expected_stream_has
 assert matches[0]["evidence_streams"][0]["contents_utf8"] == "remote stream\n"
 PY
 
+curl -fsS "http://127.0.0.1:${PORT}/worker/status" >"$TMPDIR/worker-status-before-restart.json"
+
+python3 - "$TMPDIR/worker-status-before-restart.json" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], "r", encoding="utf-8") as fh:
+    data = json.load(fh)
+
+assert data["boot_count"] == 1
+assert data["previous_boot_id"] is None
+assert data["persistence"] == "StateDir"
+assert data["boot_id"].startswith("worker-")
+PY
+
 kill "$WORKER_PID"
 wait "$WORKER_PID" 2>/dev/null || true
 WORKER_PID=""
@@ -769,6 +787,24 @@ for _ in $(seq 1 50); do
   fi
   sleep 0.2
 done
+
+curl -fsS "http://127.0.0.1:${PORT}/worker/status" >"$TMPDIR/worker-status-after-restart.json"
+
+python3 - "$TMPDIR/worker-status-before-restart.json" "$TMPDIR/worker-status-after-restart.json" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], "r", encoding="utf-8") as fh:
+    before = json.load(fh)
+with open(sys.argv[2], "r", encoding="utf-8") as fh:
+    after = json.load(fh)
+
+assert after["boot_count"] == before["boot_count"] + 1
+assert after["previous_boot_id"] == before["boot_id"]
+assert after["boot_id"] != before["boot_id"]
+assert after["recovered_sessions"] >= 1
+assert after["persistence"] == "StateDir"
+PY
 
 curl -fsS "http://127.0.0.1:${PORT}/sessions/${WORKER_SESSION_ID}/exec" \
   -H 'content-type: application/json' \
