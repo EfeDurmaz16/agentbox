@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use crate::runtime::provider::{RuntimeError, RuntimeProvider};
 use crate::runtime::providers::agentpod::{AgentPodProvider, AgentPodProviderKind};
+use crate::runtime::providers::direct_host::DirectHostRuntimeProvider;
 use crate::runtime::providers::podman::PodmanRuntimeProvider;
 use crate::runtime::providers::remote::RemoteAgentPodProvider;
 use crate::runtime::types::AgentPodRiskLevel;
@@ -120,7 +121,12 @@ impl RuntimeProviderRegistry {
         };
 
         match risk {
-            AgentPodRiskLevel::Low | AgentPodRiskLevel::Medium => self
+            AgentPodRiskLevel::Low => self
+                .providers
+                .contains_key("direct-host")
+                .then(|| "direct-host".to_string())
+                .or_else(|| self.providers.keys().next().cloned()),
+            AgentPodRiskLevel::Medium => self
                 .providers
                 .contains_key("podman")
                 .then(|| "podman".to_string())
@@ -157,6 +163,7 @@ impl RuntimeProviderRegistry {
 
     pub fn with_local_providers(agentbox_socket: String, shim_binary: String) -> Self {
         let mut registry = Self::new();
+        registry.register(Arc::new(DirectHostRuntimeProvider::new()));
         registry.register(Arc::new(PodmanRuntimeProvider::new(
             agentbox_socket,
             shim_binary,
@@ -312,13 +319,14 @@ mod tests {
             "/tmp/agentbox-shim".into(),
         );
 
-        assert_eq!(registry.default_provider().unwrap().name(), "podman");
+        assert_eq!(registry.default_provider().unwrap().name(), "direct-host");
         assert_eq!(
             registry.names(),
             vec![
                 "agentpod-linux",
                 "agentpod-macos",
                 "agentpod-windows",
+                "direct-host",
                 "podman",
                 "remote-agentpod"
             ]
@@ -387,5 +395,22 @@ mod tests {
 
         assert_eq!(explanation.selected_provider, "podman");
         assert!(explanation.reason.contains("governed local execution"));
+    }
+
+    #[test]
+    fn low_risk_selection_uses_direct_host_provider() {
+        let registry = RuntimeProviderRegistry::with_local_providers(
+            "/tmp/agentbox.sock".into(),
+            "/tmp/agentbox-shim".into(),
+        );
+        let explanation = registry
+            .explain_selection(&ProviderSelectionRequest {
+                preferred_provider: None,
+                risk: AgentPodRiskLevel::Low,
+            })
+            .unwrap();
+
+        assert_eq!(explanation.selected_provider, "direct-host");
+        assert!(explanation.reason.contains("lowest available"));
     }
 }

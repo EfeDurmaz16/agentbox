@@ -196,6 +196,9 @@ agentbox bridge-health --json
 # Run an agent in a governed local minipod
 agentbox run "openclaw start"
 
+# Run a low-risk command through the shipped direct-host runtime path
+agentbox run --provider direct-host --risk low --json -- echo ok
+
 # Preview the AgentPod run plan without requiring a runnable backend
 agentbox run --plan --risk high --workspace-mode overlay-review "codex"
 # The preview includes provider selection, candidates, backend actions,

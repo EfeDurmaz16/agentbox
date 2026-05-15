@@ -119,6 +119,12 @@ log "checking AgentPod run plan JSON"
 "${CLI[@]}" run --plan --json -- echo agentbox-contract >"$TMPDIR/run-plan.json"
 validate_json "$TMPDIR/run-plan.json" \
   "data.get('schema_version') == 1 and data.get('selected_provider', {}).get('availability_check') == 'not performed by --plan' and data.get('manifest', {}).get('kind') == 'AgentPod' and len(data.get('backend_actions', [])) >= 3"
+"${CLI[@]}" run --plan --risk low --json -- echo agentbox-contract >"$TMPDIR/run-plan-low.json"
+validate_json "$TMPDIR/run-plan-low.json" \
+  "data.get('schema_version') == 1 and data.get('selected_provider', {}).get('name') == 'direct-host' and all('not generally runnable' not in warning for warning in data.get('warnings', []))"
+"${CLI[@]}" run --provider direct-host --risk low --json -- echo agentbox-contract >"$TMPDIR/run-direct-host.json"
+validate_json "$TMPDIR/run-direct-host.json" \
+  "data.get('schema_version') == 1 and data.get('session', {}).get('provider') == 'direct-host' and data.get('command_result', {}).get('stdout') == 'agentbox-contract\n' and data.get('destroyed') == True"
 
 log "checking workspace review mode manifests"
 "${CLI[@]}" minipod-spec codex \

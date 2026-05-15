@@ -195,7 +195,7 @@ enum Commands {
         #[arg(long = "risk", default_value = "medium")]
         risk: String,
 
-        /// Runtime provider: auto, podman, agentpod-macos, agentpod-linux, agentpod-windows, remote-agentpod
+        /// Runtime provider: auto, direct-host, podman, agentpod-macos, agentpod-linux, agentpod-windows, remote-agentpod
         #[arg(long = "provider", default_value = "auto")]
         provider: String,
 
@@ -2734,7 +2734,10 @@ async fn cmd_run(options: RunOptions) {
             "plan output does not start a backend, create a session, hydrate credentials, or run the command"
                 .to_string(),
         ];
-        if selection.selected_provider != "podman" {
+        if !matches!(
+            selection.selected_provider.as_str(),
+            "podman" | "direct-host"
+        ) {
             warnings.push(format!(
                 "{} is not generally runnable in this build; execution may require a platform gate or future provider wiring",
                 selection.selected_provider
@@ -2814,7 +2817,10 @@ async fn cmd_run(options: RunOptions) {
         return;
     }
 
-    if selection.selected_provider != "podman" {
+    if !matches!(
+        selection.selected_provider.as_str(),
+        "podman" | "direct-host"
+    ) {
         let selected_provider = registry
             .get(&selection.selected_provider)
             .unwrap_or_else(|e| {
@@ -2966,6 +2972,8 @@ async fn cmd_run(options: RunOptions) {
 
         if selection.selected_provider == "podman" {
             println!("  Agentbox: socket + shims injected");
+        } else if selection.selected_provider == "direct-host" {
+            println!("  Agentbox: direct host process mediated by RuntimeManager policy");
         } else {
             println!("  Agentbox: native prototype executor");
         }
@@ -5603,7 +5611,7 @@ fn provider_status_rows() -> Vec<serde_json::Value> {
         let provider = registry
             .get(name)
             .expect("provider name came from registry");
-        if provider.name() == "podman" {
+        if matches!(provider.name(), "podman" | "direct-host") {
             continue;
         }
         rows.push(serde_json::json!({
