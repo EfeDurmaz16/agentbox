@@ -37,6 +37,8 @@ pub enum AgentPodPrimitive {
     AppContainer,
     Wfp,
     Etw,
+    WindowsSandbox,
+    HyperV,
 }
 
 impl AgentPodPrimitive {
@@ -57,6 +59,8 @@ impl AgentPodPrimitive {
             Self::AppContainer => "appcontainer",
             Self::Wfp => "wfp",
             Self::Etw => "etw",
+            Self::WindowsSandbox => "windows-sandbox",
+            Self::HyperV => "hyper-v",
         }
     }
 }
@@ -141,6 +145,8 @@ impl AgentPodProviderKind {
                 AgentPodPrimitive::AppContainer,
                 AgentPodPrimitive::Wfp,
                 AgentPodPrimitive::Etw,
+                AgentPodPrimitive::WindowsSandbox,
+                AgentPodPrimitive::HyperV,
             ],
         }
     }
@@ -444,6 +450,11 @@ mod tests {
         );
         assert!(provider.boundary_primitives().contains(&"user-namespaces"));
         assert!(provider.boundary_primitives().contains(&"seccomp"));
+
+        let windows = AgentPodProvider::new(AgentPodProviderKind::Windows);
+        assert!(windows.boundary_primitives().contains(&"job-objects"));
+        assert!(windows.boundary_primitives().contains(&"windows-sandbox"));
+        assert!(windows.boundary_primitives().contains(&"hyper-v"));
     }
 
     #[tokio::test]
