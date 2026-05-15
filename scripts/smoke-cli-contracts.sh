@@ -40,9 +40,9 @@ set +e
 doctor_status=$?
 set -e
 validate_json "$TMPDIR/doctor.json" \
-  "data.get('schema_version') == 1 and data.get('checks') is not None and data.get('ok', 0) + data.get('failed', 0) == len(data.get('checks', [])) and any(c.get('name') == 'agentbox-shim binary' for c in data.get('checks', []))"
+  "data.get('schema_version') == 1 and data.get('checks') is not None and data.get('ok', 0) + data.get('failed', 0) == len(data.get('checks', [])) and data.get('required_failed', 0) + data.get('advisory_failed', 0) == data.get('failed', 0) and any(c.get('name') == 'agentbox-shim binary' and c.get('severity') == 'required' and c.get('release_blocker') == (not c.get('ok')) for c in data.get('checks', []))"
 if [ "$doctor_status" -ne 0 ]; then
-  validate_json "$TMPDIR/doctor.json" "data.get('failed', 0) > 0"
+  validate_json "$TMPDIR/doctor.json" "data.get('required_failed', 0) > 0"
 fi
 
 log "checking AgentPod run plan JSON"

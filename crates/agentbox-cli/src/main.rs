@@ -881,7 +881,7 @@ fn cmd_doctor(json: bool) {
             "{}",
             serde_json::to_string_pretty(&report).expect("failed to serialize doctor report")
         );
-        if report.failed > 0 {
+        if report.required_failed > 0 {
             std::process::exit(1);
         }
         return;
@@ -891,17 +891,27 @@ fn cmd_doctor(json: bool) {
     println!("{}", "-".repeat(64));
 
     for check in &report.checks {
-        let marker = if check.ok { "ok" } else { "fail" };
-        println!("{:<6} {:<24} {}", marker, check.name, check.detail);
+        let marker = match (check.ok, check.required) {
+            (true, _) => "ok",
+            (false, true) => "fail",
+            (false, false) => "warn",
+        };
+        println!(
+            "{:<6} {:<24} {:<8} {}",
+            marker, check.name, check.severity, check.detail
+        );
         if !check.ok {
             println!("       fix: {}", check.fix);
         }
     }
 
     println!("{}", "-".repeat(64));
-    println!("summary: {} ok, {} failed", report.ok, report.failed);
+    println!(
+        "summary: {} ok, {} required failed, {} advisory failed",
+        report.ok, report.required_failed, report.advisory_failed
+    );
 
-    if report.failed > 0 {
+    if report.required_failed > 0 {
         std::process::exit(1);
     }
 }
@@ -1027,16 +1037,25 @@ struct DoctorReport {
     platform: String,
     ok: usize,
     failed: usize,
+    required_failed: usize,
+    advisory_failed: usize,
     checks: Vec<DoctorCheck>,
 }
 
 fn doctor_report(checks: Vec<DoctorCheck>) -> DoctorReport {
     let failed = checks.iter().filter(|check| !check.ok).count();
+    let required_failed = checks
+        .iter()
+        .filter(|check| !check.ok && check.required)
+        .count();
+    let advisory_failed = failed - required_failed;
     DoctorReport {
         schema_version: 1,
         platform: std::env::consts::OS.to_string(),
         ok: checks.len() - failed,
         failed,
+        required_failed,
+        advisory_failed,
         checks,
     }
 }
@@ -1045,6 +1064,9 @@ fn doctor_report(checks: Vec<DoctorCheck>) -> DoctorReport {
 struct DoctorCheck {
     name: &'static str,
     ok: bool,
+    severity: &'static str,
+    required: bool,
+    release_blocker: bool,
     detail: String,
     fix: &'static str,
 }
@@ -1053,6 +1075,26 @@ fn doctor_check(name: &'static str, ok: bool, detail: String, fix: &'static str)
     DoctorCheck {
         name,
         ok,
+        severity: "required",
+        required: true,
+        release_blocker: !ok,
+        detail,
+        fix,
+    }
+}
+
+fn doctor_advisory_check(
+    name: &'static str,
+    ok: bool,
+    detail: String,
+    fix: &'static str,
+) -> DoctorCheck {
+    DoctorCheck {
+        name,
+        ok,
+        severity: "advisory",
+        required: false,
+        release_blocker: false,
         detail,
         fix,
     }
@@ -1151,25 +1193,25 @@ fn macos_native_doctor_checks() -> Vec<DoctorCheck> {
     let virtualization_framework =
         Path::new("/System/Library/Frameworks/Virtualization.framework").exists();
     vec![
-        doctor_check(
+        doctor_advisory_check(
             "macOS native plan",
             true,
             "compiler available; provider execution remains unavailable".to_string(),
             "no action needed for planning; native execution still needs runner wiring",
         ),
-        doctor_check(
+        doctor_advisory_check(
             "Apple Virtualization",
             virtualization_framework,
             "/System/Library/Frameworks/Virtualization.framework".to_string(),
             "use macOS 11+ with Apple Virtualization framework available",
         ),
-        doctor_check(
+        doctor_advisory_check(
             "Endpoint Security entitlement",
             current_executable_has_entitlement("com.apple.developer.endpoint-security.client"),
             current_executable_entitlement_detail("com.apple.developer.endpoint-security.client"),
             "sign the future system extension with the Endpoint Security entitlement",
         ),
-        doctor_check(
+        doctor_advisory_check(
             "Network Extension entitlement",
             current_executable_has_entitlement("com.apple.developer.networking.networkextension"),
             current_executable_entitlement_detail(
@@ -1182,26 +1224,26 @@ fn macos_native_doctor_checks() -> Vec<DoctorCheck> {
 
 fn linux_native_doctor_checks() -> Vec<DoctorCheck> {
     vec![
-        doctor_check(
+        doctor_advisory_check(
             "Linux native plan",
             true,
             "compiler available; gated prototype execution requires AGENTBOX_LINUX_NATIVE=1"
                 .to_string(),
             "inspect with `agentbox native-plan --provider agentpod-linux -- <cmd>`",
         ),
-        doctor_check(
+        doctor_advisory_check(
             "Linux user namespace",
             linux_user_namespace_available(),
             linux_user_namespace_detail(),
             "enable unprivileged user namespaces or run on a kernel/distribution that supports them",
         ),
-        doctor_check(
+        doctor_advisory_check(
             "Linux cgroups v2",
             Path::new("/sys/fs/cgroup/cgroup.controllers").exists(),
             "/sys/fs/cgroup/cgroup.controllers".to_string(),
             "boot with cgroup v2 enabled",
         ),
-        doctor_check(
+        doctor_advisory_check(
             "Linux seccomp",
             Path::new("/proc/sys/kernel/seccomp/actions_avail").exists(),
             fs::read_to_string("/proc/sys/kernel/seccomp/actions_avail")
@@ -1209,7 +1251,7 @@ fn linux_native_doctor_checks() -> Vec<DoctorCheck> {
                 .unwrap_or_else(|_| "seccomp actions file not readable".to_string()),
             "use a kernel with seccomp enabled",
         ),
-        doctor_check(
+        doctor_advisory_check(
             "Linux Landlock ABI",
             linux_landlock_abi_version().is_some(),
             linux_landlock_abi_version()
@@ -1259,38 +1301,38 @@ fn linux_landlock_abi_version() -> Option<i64> {
 
 fn windows_native_doctor_checks() -> Vec<DoctorCheck> {
     vec![
-        doctor_check(
+        doctor_advisory_check(
             "Windows native plan",
             true,
             "Job Object plan compiler available; provider execution remains unavailable"
                 .to_string(),
             "inspect docs/windows-native-provider.md before enabling Windows execution",
         ),
-        doctor_check(
+        doctor_advisory_check(
             "Windows Job Objects",
             true,
             "plan/controller modeled; Win32 apply path is not wired".to_string(),
             "wire and live-test Job Object process containment before enabling execution",
         ),
-        doctor_check(
+        doctor_advisory_check(
             "Windows AppContainer",
             false,
             "planned authority boundary; descriptor and live tests are not implemented".to_string(),
             "add AppContainer descriptor plus Windows live containment tests",
         ),
-        doctor_check(
+        doctor_advisory_check(
             "Windows WFP",
             false,
             "planned network boundary; no packet/domain denial proof yet".to_string(),
             "add WFP integration only with live network denial tests",
         ),
-        doctor_check(
+        doctor_advisory_check(
             "Windows ETW",
             false,
             "planned evidence boundary; event capture is not wired".to_string(),
             "add ETW session/event capture linked to Agentbox session ids",
         ),
-        doctor_check(
+        doctor_advisory_check(
             "Windows VM boundary",
             false,
             "Windows Sandbox/Hyper-V remain planned for higher-risk cells".to_string(),
@@ -5968,15 +6010,22 @@ mod tests {
         let report = doctor_report(vec![
             doctor_check("ready", true, "ok".into(), "none"),
             doctor_check("missing", false, "not found".into(), "install it"),
+            doctor_advisory_check("planned", false, "not wired".into(), "track roadmap"),
         ]);
 
         assert_eq!(report.schema_version, 1);
         assert_eq!(report.ok, 1);
-        assert_eq!(report.failed, 1);
-        assert_eq!(report.checks.len(), 2);
+        assert_eq!(report.failed, 2);
+        assert_eq!(report.required_failed, 1);
+        assert_eq!(report.advisory_failed, 1);
+        assert_eq!(report.checks.len(), 3);
         let payload = serde_json::to_value(&report).unwrap();
         assert_eq!(payload["checks"][1]["name"], "missing");
+        assert_eq!(payload["checks"][1]["severity"], "required");
+        assert_eq!(payload["checks"][1]["release_blocker"], true);
         assert_eq!(payload["checks"][1]["fix"], "install it");
+        assert_eq!(payload["checks"][2]["severity"], "advisory");
+        assert_eq!(payload["checks"][2]["release_blocker"], false);
     }
 
     #[test]

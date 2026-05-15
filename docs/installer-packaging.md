@@ -143,7 +143,10 @@ the failure as a release blocker. Do not convert missing daemon, PATH, shim,
 Podman, audit, or native-provider readiness into a fake pass.
 
 The script emits machine-readable `doctor.json` and `providers.json` artifacts
-under `target/agentbox-release-readiness` by default. Packaging jobs may set
+under `target/agentbox-release-readiness` by default. `doctor.json` separates
+required failures from advisory native-provider prerequisites so installers can
+block on broken source/runtime setup without pretending planned kernel, system
+extension, or VM work is already shipped. Packaging jobs may set
 `AGENTBOX_RELEASE_ARTIFACT_DIR` to persist those files with installer logs.
 
 ## Do Not Ship Rule

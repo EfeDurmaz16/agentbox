@@ -53,9 +53,9 @@ cargo run --locked -q -p agentbox-cli -- doctor --json >"$ARTIFACT_DIR/doctor.js
 doctor_status=$?
 set -e
 validate_json_file "$ARTIFACT_DIR/doctor.json" \
-  "data.get('schema_version') == 1 and data.get('ok', 0) + data.get('failed', 0) == len(data.get('checks', []))"
+  "data.get('schema_version') == 1 and data.get('ok', 0) + data.get('failed', 0) == len(data.get('checks', [])) and data.get('required_failed', 0) + data.get('advisory_failed', 0) == data.get('failed', 0)"
 if [ "$doctor_status" -ne 0 ] && [ "$ALLOW_DOCTOR_FAILURE" != "1" ]; then
-  echo "error: doctor --json reported failed readiness checks" >&2
+  echo "error: doctor --json reported required failed readiness checks" >&2
   echo "hint: inspect $ARTIFACT_DIR/doctor.json or set AGENTBOX_RELEASE_ALLOW_DOCTOR_FAILURE=1 for an explicitly blocked candidate" >&2
   exit "$doctor_status"
 fi
