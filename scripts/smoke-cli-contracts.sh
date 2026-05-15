@@ -131,7 +131,7 @@ validate_json "$TMPDIR/native-plan-auto.json" \
 log "checking high-risk provider recommendation truth"
 "${CLI[@]}" run --plan --risk high --json -- echo agentbox-contract >"$TMPDIR/run-plan-high.json"
 validate_json "$TMPDIR/run-plan-high.json" \
-  "data.get('schema_version') == 1 and data.get('selected_provider', {}).get('name', '').startswith('agentpod-') and len(data.get('selected_provider', {}).get('boundary_primitives', [])) >= 1 and any('not generally runnable' in warning for warning in data.get('warnings', []))"
+  "data.get('schema_version') == 1 and data.get('selected_provider', {}).get('name', '').startswith('agentpod-') and len(data.get('selected_provider', {}).get('boundary_primitives', [])) >= 1 and any(s.get('active') == False and s.get('requires_gate') and s.get('enforcement_scope') for s in data.get('selected_provider', {}).get('boundary_primitive_statuses', [])) and any('not generally runnable' in warning for warning in data.get('warnings', []))"
 
 log "checking macOS native plan compiler truth"
 AGENTBOX_MACOS_NATIVE= "${CLI[@]}" native-plan \

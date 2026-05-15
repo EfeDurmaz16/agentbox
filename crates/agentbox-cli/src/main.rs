@@ -2230,9 +2230,19 @@ struct RunPlanProvider {
     selection_reason: String,
     bridge_transports: Vec<String>,
     boundary_primitives: Vec<String>,
+    boundary_primitive_statuses: Vec<RunPlanBoundaryPrimitiveStatus>,
     capabilities: Vec<String>,
     network_enforcement: Vec<String>,
     availability_check: String,
+}
+
+#[derive(Serialize)]
+struct RunPlanBoundaryPrimitiveStatus {
+    primitive: String,
+    status: String,
+    active: bool,
+    requires_gate: Option<String>,
+    enforcement_scope: String,
 }
 
 #[derive(Serialize)]
@@ -2447,6 +2457,17 @@ async fn cmd_run(options: RunOptions) {
                     .boundary_primitives()
                     .iter()
                     .map(|primitive| (*primitive).to_string())
+                    .collect(),
+                boundary_primitive_statuses: selected_provider
+                    .boundary_primitive_statuses()
+                    .into_iter()
+                    .map(|primitive| RunPlanBoundaryPrimitiveStatus {
+                        primitive: primitive.primitive.to_string(),
+                        status: format_provider_status(primitive.status).to_string(),
+                        active: primitive.active,
+                        requires_gate: primitive.requires_gate.map(str::to_string),
+                        enforcement_scope: primitive.enforcement_scope.to_string(),
+                    })
                     .collect(),
                 capabilities: selected_provider
                     .capabilities()
