@@ -1,3 +1,4 @@
+use std::path::{Component, Path, PathBuf};
 use std::time::Instant;
 
 use async_trait::async_trait;
@@ -120,7 +121,7 @@ async fn run_direct_command(
             .iter()
             .map(|(key, value)| (key.as_str(), value.as_str())),
     );
-    if let Some(working_dir) = direct_working_dir(command, session) {
+    if let Some(working_dir) = direct_working_dir(command, session)? {
         process.current_dir(working_dir);
     }
 
@@ -148,13 +149,48 @@ async fn run_direct_command(
 fn direct_working_dir(
     command: &ExecCommand,
     session: Option<&RuntimeSession>,
-) -> Option<std::path::PathBuf> {
-    let requested = command.working_dir.as_deref()?;
-    let session = session?;
-    if requested == session.spec.filesystem.workspace_guest_path {
-        return Some(session.spec.filesystem.workspace_host_path.clone());
+) -> Result<Option<PathBuf>, RuntimeError> {
+    let Some(requested) = command.working_dir.as_deref() else {
+        return Ok(None);
+    };
+    let Some(session) = session else {
+        return Ok(Some(PathBuf::from(requested)));
+    };
+
+    let guest_workspace = session
+        .spec
+        .filesystem
+        .workspace_guest_path
+        .trim_end_matches('/');
+    if requested == guest_workspace {
+        return Ok(Some(session.spec.filesystem.workspace_host_path.clone()));
     }
-    Some(std::path::PathBuf::from(requested))
+    if let Some(relative) = requested.strip_prefix(&format!("{guest_workspace}/")) {
+        let relative = safe_relative_guest_path(relative)?;
+        return Ok(Some(
+            session.spec.filesystem.workspace_host_path.join(relative),
+        ));
+    }
+
+    Err(RuntimeError::PolicyDenied(format!(
+        "direct-host working directory must stay under {guest_workspace}: {requested}"
+    )))
+}
+
+fn safe_relative_guest_path(relative: &str) -> Result<PathBuf, RuntimeError> {
+    let mut normalized = PathBuf::new();
+    for component in Path::new(relative).components() {
+        match component {
+            Component::Normal(part) => normalized.push(part),
+            Component::CurDir => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                return Err(RuntimeError::PolicyDenied(format!(
+                    "direct-host working directory contains unsafe path component: {relative}"
+                )));
+            }
+        }
+    }
+    Ok(normalized)
 }
 
 #[cfg(test)]
@@ -209,5 +245,65 @@ mod tests {
             .unwrap_err();
 
         assert!(err.to_string().contains("cannot be empty"));
+    }
+
+    #[tokio::test]
+    async fn direct_host_provider_maps_workspace_subdirectories() {
+        let workspace = std::env::temp_dir().join(format!(
+            "agentbox-direct-host-subdir-test-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(workspace.join("src")).unwrap();
+        let spec = MinipodSpec::for_agent_task("direct", &workspace);
+        let provider = DirectHostRuntimeProvider::new();
+        let session = provider.create(&spec).await.unwrap();
+        let result = provider
+            .exec_session(
+                &session,
+                &ExecCommand {
+                    argv: vec!["pwd".into()],
+                    working_dir: Some("/workspace/src".into()),
+                    env: HashMap::new(),
+                    timeout_seconds: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(
+            result.stdout.trim(),
+            std::fs::canonicalize(workspace.join("src"))
+                .unwrap()
+                .to_string_lossy()
+        );
+        std::fs::remove_dir_all(&workspace).ok();
+    }
+
+    #[tokio::test]
+    async fn direct_host_provider_rejects_working_dir_outside_workspace() {
+        let workspace = std::env::temp_dir().join(format!(
+            "agentbox-direct-host-outside-test-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&workspace).unwrap();
+        let spec = MinipodSpec::for_agent_task("direct", &workspace);
+        let provider = DirectHostRuntimeProvider::new();
+        let session = provider.create(&spec).await.unwrap();
+        let err = provider
+            .exec_session(
+                &session,
+                &ExecCommand {
+                    argv: vec!["pwd".into()],
+                    working_dir: Some("/tmp".into()),
+                    env: HashMap::new(),
+                    timeout_seconds: None,
+                },
+            )
+            .await
+            .unwrap_err();
+
+        assert!(err.to_string().contains("must stay under /workspace"));
+        std::fs::remove_dir_all(&workspace).ok();
     }
 }
