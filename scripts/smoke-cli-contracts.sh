@@ -103,7 +103,7 @@ validate_json "$TMPDIR/setup-dry-run-direct-host.json" \
   "data.get('schema_version') == 1 and data.get('dry_run') == True and data.get('provider') == 'direct-host' and data.get('remote_endpoint') is None and data.get('setup_plan', {}).get('provider') == 'direct-host' and any('agentbox start' in command for command in data.get('operator_commands', []))"
 "${CLI[@]}" setup --dry-run --wizard --provider direct-host --json >"$TMPDIR/setup-wizard-direct-host.json"
 validate_json "$TMPDIR/setup-wizard-direct-host.json" \
-  "data.get('schema_version') == 1 and data.get('wizard') == True and data.get('dry_run') == True and any(step.get('title') == 'Install local command shims' and step.get('command') == 'agentbox setup --provider direct-host' for step in data.get('wizard_steps', [])) and any(step.get('title') == 'Verify readiness' and step.get('command') == 'agentbox doctor' for step in data.get('wizard_steps', []))"
+  "data.get('schema_version') == 1 and data.get('wizard') == True and data.get('dry_run') == True and any(step.get('title') == 'Install local command shims' and step.get('command') == 'agentbox setup --provider direct-host' for step in data.get('wizard_steps', [])) and any(step.get('title') == 'Inspect provider bridge readiness' and step.get('command') == 'agentbox bridge-health --provider direct-host' for step in data.get('wizard_steps', [])) and any(step.get('title') == 'Verify readiness' and step.get('command') == 'agentbox doctor' for step in data.get('wizard_steps', []))"
 
 log "checking pods JSON truth"
 "${CLI[@]}" pods --json >"$TMPDIR/pods.json"

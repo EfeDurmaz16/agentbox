@@ -1734,6 +1734,17 @@ fn setup_wizard_steps(
 
     push_setup_wizard_step(
         &mut steps,
+        "Inspect provider bridge readiness",
+        "info",
+        "Check which provider bridge capabilities are active, supported, gated, or metadata-only before running autonomous work.",
+        Some(match provider {
+            "all" => "agentbox bridge-health".to_string(),
+            provider => format!("agentbox bridge-health --provider {provider}"),
+        }),
+    );
+
+    push_setup_wizard_step(
+        &mut steps,
         "Verify readiness",
         if plan.required_failed == 0 {
             "ready"
