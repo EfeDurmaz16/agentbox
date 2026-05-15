@@ -169,6 +169,22 @@ with a Podman compatibility adapter because that gives a runnable backend while
 the native `agentpod-macos`, `agentpod-linux`, and `agentpod-windows` providers
 are being built. Podman is not the architecture; it is the bootstrap backend.
 
+For day-to-day macOS use, the shipped `direct-host` path is the low-friction
+starting point: Agentbox installs PATH shims, runs a local daemon over a Unix
+socket, classifies host-impacting commands, and writes hash-chained SQLite audit
+events. It is not a filesystem, process, or packet sandbox.
+
+```bash
+# Inspect the direct-host setup plan without changing the machine
+agentbox setup-plan --provider direct-host
+agentbox setup --dry-run --provider direct-host --json
+
+# Usual recovery path when an old daemon socket/pid was left behind
+agentbox clean && agentbox start
+export PATH="$HOME/.agentbox/shims:$PATH"
+agentbox doctor
+```
+
 ```bash
 # Run an agent in a governed local minipod
 agentbox run "openclaw start"

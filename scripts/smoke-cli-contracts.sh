@@ -32,7 +32,7 @@ PY
 log "checking provider truth JSON"
 "${CLI[@]}" providers --json >"$TMPDIR/providers.json"
 validate_json "$TMPDIR/providers.json" \
-  "any(p.get('provider') == 'podman' and p.get('setup_command') and p.get('verification_command') for p in data) and any(p.get('provider') == 'remote-agentpod' and p.get('status') == 'experimental' and p.get('setup_command') and p.get('doctor_check') == 'remote-agentpod endpoint' for p in data) and any(p.get('provider') == 'agentpod-windows' and 'job-objects' in p.get('boundary_primitives', []) and 'wfp' in p.get('boundary_primitives', []) and 'windows-sandbox' in p.get('boundary_primitives', []) and 'hyper-v' in p.get('boundary_primitives', []) for p in data) and any(p.get('provider') == 'agentpod-linux' and 'user-namespaces' in p.get('boundary_primitives', []) and 'seccomp' in p.get('boundary_primitives', []) and p.get('verification_command') for p in data)"
+  "any(p.get('provider') == 'direct-host' and p.get('status') == 'shipped' and p.get('doctor_check') == 'daemon socket' and 'path-shim' in p.get('boundary_primitives', []) and p.get('network') == 'command-mediation' for p in data) and any(p.get('provider') == 'podman' and p.get('setup_command') and p.get('verification_command') for p in data) and any(p.get('provider') == 'remote-agentpod' and p.get('status') == 'experimental' and p.get('setup_command') and p.get('doctor_check') == 'remote-agentpod endpoint' for p in data) and any(p.get('provider') == 'agentpod-windows' and 'job-objects' in p.get('boundary_primitives', []) and 'wfp' in p.get('boundary_primitives', []) and 'windows-sandbox' in p.get('boundary_primitives', []) and 'hyper-v' in p.get('boundary_primitives', []) for p in data) and any(p.get('provider') == 'agentpod-linux' and 'user-namespaces' in p.get('boundary_primitives', []) and 'seccomp' in p.get('boundary_primitives', []) and p.get('verification_command') for p in data)"
 
 log "checking daemon cleanup command surface"
 "${CLI[@]}" clean --help >"$TMPDIR/clean-help.txt"
@@ -80,12 +80,18 @@ validate_json "$TMPDIR/setup-plan.json" \
 "${CLI[@]}" setup-plan --provider remote-agentpod --json >"$TMPDIR/setup-plan-remote.json"
 validate_json "$TMPDIR/setup-plan-remote.json" \
   "data.get('schema_version') == 1 and data.get('provider') == 'remote-agentpod' and all(step.get('check') == 'remote-agentpod endpoint' for step in data.get('steps', []))"
+"${CLI[@]}" setup-plan --provider direct-host --json >"$TMPDIR/setup-plan-direct-host.json"
+validate_json "$TMPDIR/setup-plan-direct-host.json" \
+  "data.get('schema_version') == 1 and data.get('provider') == 'direct-host' and all(step.get('check') in ['daemon process', 'daemon socket', 'shim directory', 'shim binaries', 'shim PATH priority', 'audit database'] for step in data.get('steps', []))"
 "${CLI[@]}" setup --dry-run --provider remote-agentpod --json >"$TMPDIR/setup-dry-run-remote.json"
 validate_json "$TMPDIR/setup-dry-run-remote.json" \
   "data.get('schema_version') == 1 and data.get('dry_run') == True and data.get('provider') == 'remote-agentpod' and data.get('shims') is None and data.get('setup_plan', {}).get('provider') == 'remote-agentpod' and 'export AGENTBOX_REMOTE_AGENTPOD_ENDPOINT=https://worker.example.com/agentpod' in data.get('operator_commands', [])"
 "${CLI[@]}" setup --dry-run --provider remote-agentpod --endpoint https://agentpod.example.com/run --json >"$TMPDIR/setup-dry-run-remote-endpoint.json"
 validate_json "$TMPDIR/setup-dry-run-remote-endpoint.json" \
   "data.get('remote_endpoint') == 'https://agentpod.example.com/run' and 'export AGENTBOX_REMOTE_AGENTPOD_ENDPOINT=https://agentpod.example.com/run' in data.get('operator_commands', []) and 'agentbox remote-handshake --endpoint https://agentpod.example.com/run' in data.get('operator_commands', [])"
+"${CLI[@]}" setup --dry-run --provider direct-host --json >"$TMPDIR/setup-dry-run-direct-host.json"
+validate_json "$TMPDIR/setup-dry-run-direct-host.json" \
+  "data.get('schema_version') == 1 and data.get('dry_run') == True and data.get('provider') == 'direct-host' and data.get('remote_endpoint') is None and data.get('setup_plan', {}).get('provider') == 'direct-host' and any('agentbox start' in command for command in data.get('operator_commands', []))"
 
 log "checking pods JSON truth"
 "${CLI[@]}" pods --json >"$TMPDIR/pods.json"
