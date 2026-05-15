@@ -29,6 +29,13 @@ export PATH="$HOME/.agentbox/shims:$PATH"
 cargo run -p agentbox-cli -- doctor
 ```
 
+For a non-mutating guided flow that installers and operators can render first:
+
+```sh
+cargo run -p agentbox-cli -- setup --dry-run --wizard
+cargo run -p agentbox-cli -- setup --dry-run --wizard --json
+```
+
 The installer work should keep this path working. Source builds are the
 fallback for all platforms until packages are reproducible, signed where
 appropriate, and verified on clean hosts.

@@ -46,6 +46,10 @@ enum Commands {
         #[arg(long)]
         json: bool,
 
+        /// Print a guided setup wizard with ordered next steps
+        #[arg(long)]
+        wizard: bool,
+
         /// Show what setup would do without changing host state
         #[arg(long)]
         dry_run: bool,
@@ -826,7 +830,13 @@ fn cmd_clean() {
     }
 }
 
-fn cmd_setup(json: bool, dry_run: bool, provider: Option<String>, endpoint: Option<String>) {
+fn cmd_setup(
+    json: bool,
+    wizard: bool,
+    dry_run: bool,
+    provider: Option<String>,
+    endpoint: Option<String>,
+) {
     use agentbox_daemon::config;
 
     let provider_filter = provider.as_deref().map(normalize_setup_provider_filter);
@@ -892,17 +902,26 @@ fn cmd_setup(json: bool, dry_run: bool, provider: Option<String>, endpoint: Opti
     let report = build_doctor_report();
     let plan = setup_plan_from_doctor(&report, provider_filter.as_deref());
     let operator_commands = setup_operator_commands(&plan, remote_endpoint.as_deref());
+    let wizard_steps = setup_wizard_steps(
+        &plan,
+        &operator_commands,
+        provider_filter.as_deref(),
+        dry_run,
+        remote_endpoint.as_deref(),
+    );
     let setup_report = SetupReport {
         schema_version: 1,
         platform: std::env::consts::OS.to_string(),
         provider: provider_filter.clone(),
         dry_run,
+        wizard,
         actions,
         config: config_summary,
         shims: shim_summary,
         remote_endpoint,
         operator_commands,
         setup_plan: plan,
+        wizard_steps,
     };
 
     if json {
@@ -920,6 +939,9 @@ fn cmd_setup(json: bool, dry_run: bool, provider: Option<String>, endpoint: Opti
     }
     if setup_report.dry_run {
         println!("mode:     dry-run");
+    }
+    if setup_report.wizard {
+        println!("wizard:   guided");
     }
     if let Some(config) = &setup_report.config {
         println!("config:   {}", config.config_path);
@@ -940,6 +962,17 @@ fn cmd_setup(json: bool, dry_run: bool, provider: Option<String>, endpoint: Opti
         println!("Operator commands:");
         for command in &setup_report.operator_commands {
             println!("  {command}");
+        }
+    }
+    if setup_report.wizard {
+        println!();
+        println!("Wizard:");
+        for step in &setup_report.wizard_steps {
+            println!("  {}. [{}] {}", step.step, step.status, step.title);
+            println!("     {}", step.detail);
+            if let Some(command) = &step.command {
+                println!("     command: {command}");
+            }
         }
     }
     println!();
@@ -1394,12 +1427,14 @@ struct SetupReport {
     platform: String,
     provider: Option<String>,
     dry_run: bool,
+    wizard: bool,
     actions: Vec<SetupAction>,
     config: Option<SetupConfigSummary>,
     shims: Option<SetupShimSummary>,
     remote_endpoint: Option<String>,
     operator_commands: Vec<String>,
     setup_plan: SetupPlan,
+    wizard_steps: Vec<SetupWizardStep>,
 }
 
 #[derive(Serialize)]
@@ -1422,6 +1457,15 @@ struct SetupShimSummary {
     shim_binary: String,
     created: usize,
     skipped: usize,
+}
+
+#[derive(Serialize)]
+struct SetupWizardStep {
+    step: usize,
+    title: String,
+    status: String,
+    detail: String,
+    command: Option<String>,
 }
 
 fn setup_plan_from_doctor(report: &DoctorReport, provider: Option<&str>) -> SetupPlan {
@@ -1500,6 +1544,166 @@ fn setup_operator_commands(plan: &SetupPlan, remote_endpoint: Option<&str>) -> V
     commands.sort();
     commands.dedup();
     commands
+}
+
+fn setup_wizard_steps(
+    plan: &SetupPlan,
+    operator_commands: &[String],
+    provider: Option<&str>,
+    dry_run: bool,
+    remote_endpoint: Option<&str>,
+) -> Vec<SetupWizardStep> {
+    let provider = provider.unwrap_or("all");
+    let mut steps = Vec::new();
+    push_setup_wizard_step(
+        &mut steps,
+        "Prepare Agentbox binaries",
+        if setup_plan_has_check(plan, "agentbox-daemon binary")
+            || setup_plan_has_check(plan, "agentbox-shim binary")
+        {
+            "required"
+        } else {
+            "ready"
+        },
+        "Build the CLI, daemon, and shim before installing or starting local governance.",
+        Some("cargo build --release"),
+    );
+
+    if matches!(provider, "all" | "direct-host") {
+        push_setup_wizard_step(
+            &mut steps,
+            "Install local command shims",
+            if setup_plan_has_check(plan, "installed shims") {
+                "required"
+            } else if dry_run {
+                "planned"
+            } else {
+                "ready"
+            },
+            "Create guarded command links in ~/.agentbox/shims without silently editing shell startup files.",
+            Some("agentbox setup --provider direct-host"),
+        );
+        push_setup_wizard_step(
+            &mut steps,
+            "Put Agentbox first on PATH",
+            if setup_plan_has_check(plan, "shim PATH priority") {
+                "required"
+            } else {
+                "ready"
+            },
+            "Export the shim directory first so terminal agents hit the policy boundary before host commands.",
+            Some("export PATH=\"$HOME/.agentbox/shims:$PATH\""),
+        );
+        push_setup_wizard_step(
+            &mut steps,
+            "Start the local daemon",
+            if setup_plan_has_check(plan, "daemon process")
+                || setup_plan_has_check(plan, "daemon socket")
+            {
+                "required"
+            } else {
+                "ready"
+            },
+            "Run the local policy, approval, and audit daemon used by the shims and direct-host provider.",
+            Some("agentbox start"),
+        );
+    }
+
+    if matches!(provider, "all" | "podman") {
+        push_setup_wizard_step(
+            &mut steps,
+            "Prepare Podman compatibility provider",
+            if setup_plan_has_check(plan, "podman provider")
+                || setup_plan_has_check(plan, "podman machine")
+            {
+                "optional"
+            } else {
+                "ready"
+            },
+            "Install and start Podman only if you want the compatibility backend; this is not native AgentPod execution.",
+            Some("podman machine init && podman machine start"),
+        );
+    }
+
+    if matches!(provider, "all" | "remote-agentpod") {
+        let command = remote_endpoint
+            .map(|endpoint| format!("export AGENTBOX_REMOTE_AGENTPOD_ENDPOINT={endpoint}"))
+            .or_else(|| {
+                operator_commands
+                    .iter()
+                    .find(|command| {
+                        command.starts_with("export AGENTBOX_REMOTE_AGENTPOD_ENDPOINT=")
+                    })
+                    .cloned()
+            })
+            .unwrap_or_else(|| {
+                "export AGENTBOX_REMOTE_AGENTPOD_ENDPOINT=https://worker.example.com/agentpod"
+                    .to_string()
+            });
+        push_setup_wizard_step(
+            &mut steps,
+            "Attach a remote AgentPod worker",
+            if setup_plan_has_check(plan, "remote-agentpod endpoint") {
+                "optional"
+            } else {
+                "ready"
+            },
+            "Configure a HTTPS worker endpoint before using remote-agentpod; loopback HTTP requires the explicit dev gate.",
+            Some(command),
+        );
+    }
+
+    if matches!(
+        provider,
+        "all" | "agentpod-macos" | "agentpod-linux" | "agentpod-windows"
+    ) {
+        let native_command = match provider {
+            "agentpod-linux" => "agentbox native-plan --provider agentpod-linux -- <cmd>",
+            "agentpod-windows" => "agentbox native-plan --provider agentpod-windows -- <cmd>",
+            _ => "agentbox native-plan --provider agentpod-macos -- <cmd>",
+        };
+        push_setup_wizard_step(
+            &mut steps,
+            "Inspect native AgentPod plan",
+            "prototype",
+            "Native providers are descriptor/prototype surfaces until platform-specific execution and denial tests land.",
+            Some(native_command),
+        );
+    }
+
+    push_setup_wizard_step(
+        &mut steps,
+        "Verify readiness",
+        if plan.required_failed == 0 {
+            "ready"
+        } else {
+            "required"
+        },
+        "Run doctor after each setup step; required failures block the shipped direct-host path and advisory failures track optional providers.",
+        Some("agentbox doctor"),
+    );
+
+    steps
+}
+
+fn setup_plan_has_check(plan: &SetupPlan, check_name: &str) -> bool {
+    plan.steps.iter().any(|step| step.check == check_name)
+}
+
+fn push_setup_wizard_step(
+    steps: &mut Vec<SetupWizardStep>,
+    title: &str,
+    status: &str,
+    detail: &str,
+    command: Option<impl Into<String>>,
+) {
+    steps.push(SetupWizardStep {
+        step: steps.len() + 1,
+        title: title.to_string(),
+        status: status.to_string(),
+        detail: detail.to_string(),
+        command: command.map(Into::into),
+    });
 }
 
 fn normalize_setup_provider_filter(provider: &str) -> String {
@@ -6623,10 +6827,11 @@ async fn main() {
         Commands::Clean => cmd_clean(),
         Commands::Setup {
             json,
+            wizard,
             dry_run,
             provider,
             endpoint,
-        } => cmd_setup(json, dry_run, provider, endpoint),
+        } => cmd_setup(json, wizard, dry_run, provider, endpoint),
         Commands::Stop => cmd_stop(),
         Commands::Status => cmd_status(),
         Commands::Doctor { json } => cmd_doctor(json),

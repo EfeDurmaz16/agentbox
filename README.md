@@ -81,6 +81,9 @@ cargo build --release
 # Install shims (creates symlinks for 28 dangerous commands)
 cargo run -p agentbox-cli -- install
 
+# Or preview the guided setup flow without mutating host state
+cargo run -p agentbox-cli -- setup --dry-run --wizard
+
 # Add shims to your PATH (add to ~/.zshrc for persistence)
 export PATH="$HOME/.agentbox/shims:$PATH"
 
