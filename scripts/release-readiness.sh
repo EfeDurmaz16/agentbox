@@ -60,6 +60,11 @@ if [ "$doctor_status" -ne 0 ] && [ "$ALLOW_DOCTOR_FAILURE" != "1" ]; then
   exit "$doctor_status"
 fi
 
+log "setup plan JSON"
+cargo run --locked -q -p agentbox-cli -- setup-plan --json >"$ARTIFACT_DIR/setup-plan.json"
+validate_json_file "$ARTIFACT_DIR/setup-plan.json" \
+  "data.get('schema_version') == 1 and data.get('required_failed', 0) + data.get('advisory_failed', 0) == data.get('failed', 0) and data.get('steps') is not None"
+
 run_step cli-contract-smoke bash scripts/smoke-cli-contracts.sh
 run_step remote-worker-smoke bash scripts/smoke-remote-worker.sh
 
@@ -91,6 +96,7 @@ manifest = {
     "artifact_dir": str(artifact_dir),
     "doctor_json": "doctor.json",
     "providers_json": "providers.json",
+    "setup_plan_json": "setup-plan.json",
 }
 (artifact_dir / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
 PY

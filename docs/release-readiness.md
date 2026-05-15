@@ -40,11 +40,13 @@ The consolidated release gate is:
 scripts/release-readiness.sh
 ```
 
-It writes `doctor.json`, `providers.json`, logs, and `manifest.json` under
-`target/agentbox-release-readiness` by default. `doctor.json` separates
-`required_failed` from `advisory_failed`; required failures block the release,
-while advisory failures track planned or prototype provider prerequisites. If
-local required doctor checks are expected to fail on a candidate host, set
+It writes `doctor.json`, `setup-plan.json`, `providers.json`, logs, and
+`manifest.json` under `target/agentbox-release-readiness` by default.
+`doctor.json` separates `required_failed` from `advisory_failed`; required
+failures block the release, while advisory failures track planned or prototype
+provider prerequisites. `setup-plan.json` records the next operator action to
+surface in installer or package UX. If local required doctor checks are expected
+to fail on a candidate host, set
 `AGENTBOX_RELEASE_ALLOW_DOCTOR_FAILURE=1` and treat the generated `doctor.json`
 as an explicit release blocker rather than a pass. Optional platform/live smoke
 scripts run only with `AGENTBOX_RELEASE_LIVE_SMOKE=1`.
