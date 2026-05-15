@@ -28,6 +28,7 @@ cargo test --workspace
 cargo build --release
 cargo run -p agentbox-cli -- doctor --json
 cargo run -p agentbox-cli -- providers --json
+cargo run -p agentbox-cli -- bridge-health --json
 cargo run -p agentbox-cli -- evidence --verify
 ```
 
@@ -40,12 +41,14 @@ The consolidated release gate is:
 scripts/release-readiness.sh
 ```
 
-It writes `doctor.json`, `setup-plan.json`, `providers.json`, `signing.json`,
-logs, and `manifest.json` under `target/agentbox-release-readiness` by default.
+It writes `doctor.json`, `setup-plan.json`, `providers.json`,
+`bridge-health.json`, `signing.json`, logs, and `manifest.json` under
+`target/agentbox-release-readiness` by default.
 `doctor.json` separates `required_failed` from `advisory_failed`; required
 failures block the release, while advisory failures track planned or prototype
 provider prerequisites. `providers.json` is checked for primitive-level
-status/gate/scope metadata so release artifacts cannot silently drop the
+status/gate/scope metadata and `bridge-health.json` is checked for readiness
+verdicts and claim boundaries, so release artifacts cannot silently drop the
 provider truth contract. `signing.json` is an explicit unsigned placeholder; it
 prevents release notes or packaging jobs from implying signed artifacts before
 real signing/attestation exists. `setup-plan.json` records the next operator
@@ -76,6 +79,9 @@ doctor report without mutating host state.
 - [ ] `agentbox providers` separates shipped, experimental, unavailable, and
       planned surfaces, including primitive-level active/gate/scope metadata in
       JSON output.
+- [ ] `agentbox bridge-health --json` records each provider's active,
+      supported, gated, or metadata-only host-bridge readiness without implying
+      provider execution proof.
 
 ## Daemon And Shims
 

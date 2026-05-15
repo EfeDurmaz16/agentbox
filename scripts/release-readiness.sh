@@ -48,6 +48,11 @@ cargo run --locked -q -p agentbox-cli -- providers --json >"$ARTIFACT_DIR/provid
 validate_json_file "$ARTIFACT_DIR/providers.json" \
   "any(p.get('provider') == 'direct-host' and any(s.get('primitive') == 'path-shim' and s.get('status') == 'shipped' and s.get('active') == True for s in p.get('boundary_primitive_statuses', [])) for p in data) and any(p.get('provider') == 'podman' and any(s.get('primitive') == 'guest-shim' and s.get('requires_gate') for s in p.get('boundary_primitive_statuses', [])) for p in data) and any(p.get('provider') == 'remote-agentpod' for p in data) and any(p.get('provider') == 'agentpod-linux' and any(s.get('primitive') == 'seccomp' and s.get('status') == 'prototype' and s.get('active') == False for s in p.get('boundary_primitive_statuses', [])) for p in data)"
 
+log "bridge health JSON"
+cargo run --locked -q -p agentbox-cli -- bridge-health --json >"$ARTIFACT_DIR/bridge-health.json"
+validate_json_file "$ARTIFACT_DIR/bridge-health.json" \
+  "all(p.get('bridge_health') and p.get('readiness') for p in data) and any(p.get('provider') == 'direct-host' and p.get('readiness', {}).get('verdict') == 'active-command-mediation' and p.get('bridge_health', {}).get('policy', {}).get('active') == True for p in data) and any(p.get('provider') == 'remote-agentpod' and p.get('readiness', {}).get('verdict') == 'endpoint-gated' and p.get('bridge_health', {}).get('approval', {}).get('supported') == True for p in data) and any(p.get('provider') == 'agentpod-macos' and p.get('readiness', {}).get('verdict') == 'metadata-only' for p in data)"
+
 log "doctor JSON"
 set +e
 cargo run --locked -q -p agentbox-cli -- doctor --json >"$ARTIFACT_DIR/doctor.json"
@@ -98,6 +103,7 @@ manifest = {
     "artifact_dir": str(artifact_dir),
     "doctor_json": "doctor.json",
     "providers_json": "providers.json",
+    "bridge_health_json": "bridge-health.json",
     "setup_plan_json": "setup-plan.json",
 }
 (artifact_dir / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
