@@ -122,6 +122,9 @@ validate_json "$TMPDIR/run-plan.json" \
 "${CLI[@]}" run --plan --risk low --json -- echo agentbox-contract >"$TMPDIR/run-plan-low.json"
 validate_json "$TMPDIR/run-plan-low.json" \
   "data.get('schema_version') == 1 and data.get('selected_provider', {}).get('name') == 'direct-host' and all('not generally runnable' not in warning for warning in data.get('warnings', []))"
+"${CLI[@]}" run --plan --provider agentpod-linux --deny-syscall kill --json -- /bin/true >"$TMPDIR/run-plan-seccomp.json"
+validate_json "$TMPDIR/run-plan-seccomp.json" \
+  "data.get('manifest', {}).get('seccomp', {}).get('enabled') == True and data.get('manifest', {}).get('seccomp', {}).get('rules', [])[0].get('syscall') == 'kill' and any(status.get('primitive') == 'seccomp' and 'BPF seccomp loader' in status.get('enforcement_scope', '') for status in data.get('selected_provider', {}).get('boundary_primitive_statuses', []))"
 "${CLI[@]}" run --provider direct-host --risk low --json -- echo agentbox-contract >"$TMPDIR/run-direct-host.json"
 validate_json "$TMPDIR/run-direct-host.json" \
   "data.get('schema_version') == 1 and data.get('session', {}).get('provider') == 'direct-host' and data.get('command_result', {}).get('stdout') == 'agentbox-contract\n' and data.get('destroyed') == True"

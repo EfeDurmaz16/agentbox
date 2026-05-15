@@ -86,6 +86,13 @@ agentbox native-plan --provider agentpod-linux -- /bin/true
 agentbox native-plan --provider agentpod-macos -- /bin/true
 ```
 
+Task manifests can also enable the prototype seccomp path directly from the CLI:
+
+```sh
+agentbox run --provider agentpod-linux --deny-syscall kill --plan -- /bin/true
+agentbox minipod-spec hermes --provider agentpod-linux --deny-syscall kill
+```
+
 The macOS plan compiler emits the VM cell, host bridge, Endpoint Security,
 Network Extension, entitlement, and evidence shape. It remains a plan compiler:
 provider execution is still unavailable until the Apple Virtualization runner,

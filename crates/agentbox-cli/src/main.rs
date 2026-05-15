@@ -231,6 +231,10 @@ enum Commands {
         #[arg(long = "timeout-seconds")]
         timeout_seconds: Option<u64>,
 
+        /// Deny a Linux syscall through the AgentPod seccomp profile; repeatable
+        #[arg(long = "deny-syscall")]
+        deny_syscalls: Vec<String>,
+
         /// Add a read-only host mount as host_path:guest_path
         #[arg(long = "mount-ro")]
         read_only_mounts: Vec<String>,
@@ -410,6 +414,10 @@ enum Commands {
         /// Network domain blocked for this minipod task
         #[arg(long = "deny-domain")]
         deny_domains: Vec<String>,
+
+        /// Deny a Linux syscall through the generated seccomp profile; repeatable
+        #[arg(long = "deny-syscall")]
+        deny_syscalls: Vec<String>,
 
         /// Disable localhost/loopback service access in the generated manifest
         #[arg(long = "deny-localhost")]
@@ -2615,6 +2623,7 @@ struct RunOptions {
     workspace_overlay_dir: Option<PathBuf>,
     memory: u64,
     timeout_seconds: Option<u64>,
+    deny_syscalls: Vec<String>,
     read_only_mounts: Vec<String>,
     credential_files: Vec<String>,
     credential_env: Vec<String>,
@@ -2688,7 +2697,9 @@ async fn cmd_run(options: RunOptions) {
     use agentbox_daemon::runtime::manager::RuntimeManager;
     use agentbox_daemon::runtime::registry::{ProviderSelectionRequest, RuntimeProviderRegistry};
     use agentbox_daemon::runtime::session::RuntimeSessionStore;
-    use agentbox_daemon::runtime::types::{ExecCommand, MinipodSpec, NetworkMode, ResourcePolicy};
+    use agentbox_daemon::runtime::types::{
+        ExecCommand, MinipodSpec, NetworkMode, ResourcePolicy, SeccompProfile,
+    };
     use agentbox_daemon::runtime::workspace::WorkspaceProjectionMaterializer;
 
     let risk = parse_agentpod_risk(&options.risk);
@@ -2763,6 +2774,15 @@ async fn cmd_run(options: RunOptions) {
         timeout_seconds: options.timeout_seconds,
         ..ResourcePolicy::default()
     };
+    if !options.deny_syscalls.is_empty() {
+        let syscalls = options
+            .deny_syscalls
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        spec.seccomp =
+            SeccompProfile::deny_syscalls(&syscalls, "explicit AgentPod task syscall denial");
+    }
     if let Some(runtime) = options.runtime.as_deref() {
         spec.labels
             .insert("agentbox.runtime".to_string(), runtime.to_string());
@@ -5249,6 +5269,7 @@ struct MinipodSpecOptions {
     policy_bundles: Vec<PathBuf>,
     network_mode: Option<String>,
     deny_domains: Vec<String>,
+    deny_syscalls: Vec<String>,
     deny_localhost: bool,
     workspace_mode: Option<String>,
     workspace_overlay_dir: Option<PathBuf>,
@@ -5257,7 +5278,7 @@ struct MinipodSpecOptions {
 fn cmd_minipod_spec(options: MinipodSpecOptions) {
     use agentbox_daemon::runtime::policy::validate_minipod_spec;
     use agentbox_daemon::runtime::registry::{ProviderSelectionRequest, RuntimeProviderRegistry};
-    use agentbox_daemon::runtime::types::{MinipodSpec, NetworkMode};
+    use agentbox_daemon::runtime::types::{MinipodSpec, NetworkMode, SeccompProfile};
 
     let workspace = options.workspace.unwrap_or_else(|| {
         std::env::current_dir().unwrap_or_else(|_| {
@@ -5334,6 +5355,15 @@ fn cmd_minipod_spec(options: MinipodSpecOptions) {
     }
     if !options.deny_domains.is_empty() {
         spec.network.denied_domains = options.deny_domains;
+    }
+    if !options.deny_syscalls.is_empty() {
+        let syscalls = options
+            .deny_syscalls
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        spec.seccomp =
+            SeccompProfile::deny_syscalls(&syscalls, "explicit AgentPod task syscall denial");
     }
     if options.deny_localhost {
         spec.network.allow_localhost = false;
@@ -7668,6 +7698,7 @@ async fn main() {
             workspace_overlay_dir,
             memory,
             timeout_seconds,
+            deny_syscalls,
             read_only_mounts,
             credential_files,
             credential_env,
@@ -7694,6 +7725,7 @@ async fn main() {
                 workspace_overlay_dir,
                 memory,
                 timeout_seconds,
+                deny_syscalls,
                 read_only_mounts,
                 credential_files,
                 credential_env,
@@ -7745,6 +7777,7 @@ async fn main() {
             allow_domains,
             network_mode,
             read_only_mounts,
+            deny_syscalls,
             credential_files,
             credential_env,
             credential_sockets,
@@ -7763,6 +7796,7 @@ async fn main() {
             provider,
             allow_domains,
             read_only_mounts,
+            deny_syscalls,
             credential_files,
             credential_env,
             credential_sockets,
