@@ -1,5 +1,5 @@
 use agentbox_daemon::runtime::providers::linux::{
-    LinuxAgentPodRunnerRequest, LinuxLandlockRuleset, LinuxMountNamespacePlan,
+    LinuxAgentPodRunnerRequest, LinuxLandlockRule, LinuxLandlockRuleset, LinuxMountNamespacePlan,
     LinuxSeccompProfileLoader,
 };
 use std::path::{Path, PathBuf};
@@ -20,7 +20,8 @@ fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     validate_request(&request)?;
 
     apply_mounts(&request.mount_namespace)?;
-    LinuxLandlockRuleset::apply(&request.landlock)?;
+    let landlock = landlock_with_guest_workspace_alias(&request);
+    LinuxLandlockRuleset::apply(&landlock)?;
     LinuxSeccompProfileLoader::apply(&request.seccomp)?;
     exec_request(request)
 }
@@ -72,6 +73,27 @@ fn validate_request(
         return Err("runner overlayfs workspace mounts are not wired yet".into());
     }
     Ok(())
+}
+
+fn landlock_with_guest_workspace_alias(
+    request: &LinuxAgentPodRunnerRequest,
+) -> agentbox_daemon::runtime::providers::linux::LinuxLandlockPlan {
+    let mut plan = request.landlock.clone();
+    if request.mount_namespace.workspace_host_path != request.mount_namespace.workspace_guest_path {
+        if let Some(workspace_rule) = plan
+            .rules
+            .iter()
+            .find(|rule| rule.path == request.mount_namespace.workspace_host_path)
+            .cloned()
+        {
+            plan.rules.push(LinuxLandlockRule {
+                path: request.mount_namespace.workspace_guest_path.clone(),
+                reason: "guest workspace bind-mount alias".into(),
+                ..workspace_rule
+            });
+        }
+    }
+    plan
 }
 
 #[cfg(target_os = "linux")]
@@ -162,4 +184,60 @@ fn exec_request(
     _request: LinuxAgentPodRunnerRequest,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     Err("agentbox-linux-runner exec is only available on Linux".into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use agentbox_daemon::runtime::providers::linux::{
+        LinuxLandlockAccess, LinuxMountNamespaceMount,
+    };
+
+    #[test]
+    fn landlock_alias_adds_guest_workspace_rule() {
+        let request = LinuxAgentPodRunnerRequest {
+            mount_namespace: LinuxMountNamespacePlan {
+                schema_version: 1,
+                workspace_host_path: "/tmp/agentbox-work".into(),
+                workspace_guest_path: "/workspace".into(),
+                workspace_bind_mount_wired: true,
+                workspace_mount_claim: "test".into(),
+                overlayfs: None,
+                read_only_mounts: Vec::<LinuxMountNamespaceMount>::new(),
+                propagation: "private".into(),
+                requires_linux: true,
+            },
+            seccomp: agentbox_daemon::runtime::providers::linux::LinuxSeccompPlan {
+                schema_version: 1,
+                enabled: false,
+                default_action: agentbox_daemon::runtime::types::SeccompAction::Allow,
+                syscall_rules: Vec::new(),
+                oci_profile: None,
+                requires_loader: false,
+                requires_linux: true,
+            },
+            landlock: agentbox_daemon::runtime::providers::linux::LinuxLandlockPlan {
+                schema_version: 1,
+                ruleset_name: "test".into(),
+                rules: vec![LinuxLandlockRule {
+                    path: "/tmp/agentbox-work".into(),
+                    access: vec![LinuxLandlockAccess::WriteFile],
+                    reason: "workspace".into(),
+                    access_mask: 1,
+                }],
+                handled_access_mask: 1,
+                default_deny: true,
+                requires_loader: true,
+                requires_linux: true,
+            },
+            command_argv: vec!["/bin/true".into()],
+            working_dir: Some("/workspace".into()),
+        };
+
+        let plan = landlock_with_guest_workspace_alias(&request);
+
+        assert!(plan.rules.iter().any(|rule| {
+            rule.path == "/workspace" && rule.reason == "guest workspace bind-mount alias"
+        }));
+    }
 }

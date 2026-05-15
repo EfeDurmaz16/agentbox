@@ -141,9 +141,9 @@ impl LinuxMountNamespacePlan {
             schema_version: 1,
             workspace_host_path: spec.filesystem.workspace_host_path.display().to_string(),
             workspace_guest_path: spec.filesystem.workspace_guest_path.clone(),
-            workspace_bind_mount_wired: false,
+            workspace_bind_mount_wired: true,
             workspace_mount_claim:
-                "prototype executor maps guest workspace cwd to the host workspace; bind-mount setup inside the mount namespace is not wired"
+                "agentbox-linux-runner bind-mounts the host workspace inside the mount namespace before applying Landlock/seccomp"
                     .to_string(),
             overlayfs,
             read_only_mounts,
@@ -1134,16 +1134,7 @@ impl LinuxAgentPodExecutionPlan {
         let nftables = LinuxNftablesPolicyDescriptor::plan(spec)?;
         let ebpf = LinuxEbpfObserverDescriptor::plan(spec)?;
 
-        let mut composed_argv = vec![
-            "unshare".to_string(),
-            "--user".to_string(),
-            "--map-root-user".to_string(),
-            "--setgroups=deny".to_string(),
-            "--mount".to_string(),
-            "--propagation".to_string(),
-            mount_namespace.propagation.clone(),
-        ];
-        composed_argv.extend(LinuxPidNamespaceLauncher::command_args(&pid_namespace));
+        let composed_argv = linux_agentpod_unshare_prefix(&mount_namespace, &pid_namespace);
 
         Ok(Self {
             schema_version: 1,
@@ -1165,7 +1156,7 @@ impl LinuxAgentPodExecutionPlan {
             live_execution_enabled: linux_native_execution_enabled(),
             requires_linux: true,
             security_claim:
-                "prototype namespace/resource execution with cgroup v2 process attach; workspace bind-mount setup is not wired; not a complete sandbox"
+                "prototype namespace/resource execution with runner-managed workspace bind mount and cgroup v2 process attach; not a complete sandbox"
                     .into(),
         })
     }
@@ -1173,6 +1164,23 @@ impl LinuxAgentPodExecutionPlan {
     pub fn runnable_on_current_host(&self) -> bool {
         cfg!(target_os = "linux") && self.live_execution_enabled
     }
+}
+
+fn linux_agentpod_unshare_prefix(
+    mount_namespace: &LinuxMountNamespacePlan,
+    pid_namespace: &LinuxPidNamespacePlan,
+) -> Vec<String> {
+    let mut argv = vec![
+        "unshare".to_string(),
+        "--user".to_string(),
+        "--map-root-user".to_string(),
+        "--setgroups=deny".to_string(),
+        "--mount".to_string(),
+        "--propagation".to_string(),
+        mount_namespace.propagation.clone(),
+    ];
+    argv.extend(LinuxPidNamespaceLauncher::command_args(pid_namespace));
+    argv
 }
 
 fn linux_agentpod_runner_phases(
@@ -1257,27 +1265,26 @@ impl LinuxAgentPodPrototypeExecutor {
             ));
         }
 
-        let (binary, args) = plan.composed_argv.split_first().ok_or_else(|| {
-            RuntimeError::ManifestRejected("Linux AgentPod execution argv cannot be empty".into())
+        let runner_binary = linux_agentpod_runner_binary()?;
+        let request_path = write_linux_agentpod_runner_request(plan, command)?;
+        let mut runner_argv = plan.composed_argv.clone();
+        runner_argv.extend([
+            runner_binary.display().to_string(),
+            "--request".to_string(),
+            request_path.display().to_string(),
+        ]);
+        let (binary, args) = runner_argv.split_first().ok_or_else(|| {
+            RuntimeError::ManifestRejected("Linux AgentPod runner argv cannot be empty".into())
         })?;
         let start = std::time::Instant::now();
         let mut process = std::process::Command::new(binary);
         process.args(args);
-        if let Some(working_dir) = linux_agentpod_host_working_dir(plan, command) {
-            process.current_dir(working_dir);
-        }
         process
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
         for (key, value) in &command.env {
             process.env(key, value);
         }
-        configure_linux_child_security(&mut process, Some(&plan.seccomp), Some(&plan.landlock))
-            .map_err(|err| {
-                RuntimeError::ExecFailed(format!(
-                    "Linux AgentPod child security setup failed: {err}"
-                ))
-            })?;
 
         let mut child = process.spawn().map_err(|err| {
             RuntimeError::ExecFailed(format!("Linux AgentPod prototype exec failed: {err}"))
@@ -1299,6 +1306,7 @@ impl LinuxAgentPodPrototypeExecutor {
                 cgroup_root.display()
             ))
         })?;
+        let _ = std::fs::remove_file(&request_path);
         let output = output_result?;
 
         Ok(CommandResult {
@@ -1318,6 +1326,62 @@ impl LinuxAgentPodPrototypeExecutor {
             "Linux AgentPod prototype execution is only available on Linux".into(),
         ))
     }
+}
+
+#[cfg(target_os = "linux")]
+fn linux_agentpod_runner_binary() -> Result<std::path::PathBuf, RuntimeError> {
+    if let Some(path) = std::env::var_os("AGENTBOX_LINUX_RUNNER") {
+        let path = std::path::PathBuf::from(path);
+        if path.exists() {
+            return Ok(path);
+        }
+        return Err(RuntimeError::Unavailable(format!(
+            "AGENTBOX_LINUX_RUNNER points to missing binary: {}",
+            path.display()
+        )));
+    }
+
+    let current = std::env::current_exe().map_err(|err| {
+        RuntimeError::ExecFailed(format!("failed to locate current executable: {err}"))
+    })?;
+    let sibling = current.with_file_name("agentbox-linux-runner");
+    if sibling.exists() {
+        return Ok(sibling);
+    }
+
+    Err(RuntimeError::Unavailable(format!(
+        "agentbox-linux-runner binary not found next to {}; set AGENTBOX_LINUX_RUNNER",
+        current.display()
+    )))
+}
+
+#[cfg(target_os = "linux")]
+fn write_linux_agentpod_runner_request(
+    plan: &LinuxAgentPodExecutionPlan,
+    command: &ExecCommand,
+) -> Result<std::path::PathBuf, RuntimeError> {
+    let request = LinuxAgentPodRunnerRequest::from_execution_plan(plan, command);
+    let dir = std::env::temp_dir().join("agentbox-linux-runner");
+    std::fs::create_dir_all(&dir).map_err(|err| {
+        RuntimeError::ExecFailed(format!(
+            "failed to create Linux runner request dir {}: {err}",
+            dir.display()
+        ))
+    })?;
+    let path = dir.join(format!("{}.json", plan.session_id.replace('/', "_")));
+    let file = std::fs::File::create(&path).map_err(|err| {
+        RuntimeError::ExecFailed(format!(
+            "failed to create Linux runner request {}: {err}",
+            path.display()
+        ))
+    })?;
+    serde_json::to_writer(file, &request).map_err(|err| {
+        RuntimeError::ExecFailed(format!(
+            "failed to serialize Linux runner request {}: {err}",
+            path.display()
+        ))
+    })?;
+    Ok(path)
 }
 
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
@@ -1972,8 +2036,8 @@ mod tests {
         assert_eq!(plan.schema_version, 1);
         assert_eq!(plan.workspace_host_path, "/tmp/agentbox-work");
         assert_eq!(plan.workspace_guest_path, "/workspace");
-        assert!(!plan.workspace_bind_mount_wired);
-        assert!(plan.workspace_mount_claim.contains("not wired"));
+        assert!(plan.workspace_bind_mount_wired);
+        assert!(plan.workspace_mount_claim.contains("agentbox-linux-runner"));
         assert_eq!(plan.propagation, "private");
         assert!(plan.requires_linux);
         assert_eq!(plan.read_only_mounts.len(), 1);
@@ -2557,7 +2621,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![
                 ("enter-user-mount-pid-namespaces", "prototype"),
-                ("bind-workspace", "planned"),
+                ("bind-workspace", "prototype"),
                 ("apply-landlock", "prototype"),
                 ("apply-seccomp", "inactive"),
                 ("exec-command", "prototype"),
@@ -2581,7 +2645,7 @@ mod tests {
         assert!(plan.security_claim.contains("cgroup v2 process attach"));
         assert!(plan
             .security_claim
-            .contains("bind-mount setup is not wired"));
+            .contains("runner-managed workspace bind mount"));
         assert_eq!(plan.cgroup.cgroup_name, format!("agentbox-{}", spec.id));
         assert!(plan.landlock.default_deny);
         assert!(!plan.seccomp.requires_loader);

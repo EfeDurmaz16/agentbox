@@ -31,10 +31,15 @@ fi
 workspace="${AGENTBOX_LINUX_NATIVE_WORKSPACE:-$(mktemp -d)}"
 command_string="${AGENTBOX_LINUX_NATIVE_COMMAND:-/bin/true}"
 timeout_seconds="${AGENTBOX_LINUX_NATIVE_TIMEOUT_SECONDS:-30}"
+runner_binary="${AGENTBOX_LINUX_RUNNER:-$(pwd)/target/debug/agentbox-linux-runner}"
+
+cargo build -q -p agentbox-daemon --bin agentbox-linux-runner
+export AGENTBOX_LINUX_RUNNER="$runner_binary"
 
 echo "workspace=$workspace"
 echo "command=$command_string"
 echo "timeout_seconds=$timeout_seconds"
+echo "runner=$AGENTBOX_LINUX_RUNNER"
 
 cargo run -q -p agentbox-cli -- native-plan \
   --provider agentpod-linux \
@@ -44,11 +49,11 @@ cargo run -q -p agentbox-cli -- native-plan \
     .provider == "agentpod-linux"
     and .live_env_var == "AGENTBOX_LINUX_NATIVE"
     and .landlock.handled_access_mask == 434
-    and .mount_namespace.workspace_bind_mount_wired == false
-    and (.mount_namespace.workspace_mount_claim | contains("not wired"))
-    and any(.runner_phases[]; .name == "bind-workspace" and .status == "planned")
+    and .mount_namespace.workspace_bind_mount_wired == true
+    and (.mount_namespace.workspace_mount_claim | contains("agentbox-linux-runner"))
+    and any(.runner_phases[]; .name == "bind-workspace" and .status == "prototype")
     and any(.runner_phases[]; .name == "apply-landlock" and .status == "prototype")
-    and (.security_claim | contains("bind-mount setup is not wired"))
+    and (.security_claim | contains("runner-managed workspace bind mount"))
   ' >/dev/null
 
 (
