@@ -368,7 +368,9 @@ approval_timeout_secs = 120
 
 **Workspace boundary:** `rm` inside your project = Allow. `rm` outside = Approve.
 
-**Domain allowlist:** `curl https://api.openai.com/...` = Allow (if in allowlist). Unknown domain = Approve.
+**Domain allowlist:** `curl https://api.openai.com/...` = Allow (if in allowlist). Unknown public domain = Approve in first-contact mode.
+
+**Network guardrails:** cloud metadata endpoints are blocked before allow overrides. Private/LAN IP destinations require approval in usable open-with-guardrails mode and are blocked in deny-by-default modes.
 
 **Git protection:** `git push --force main` = Block (not just approve).
 

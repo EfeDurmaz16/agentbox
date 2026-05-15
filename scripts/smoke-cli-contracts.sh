@@ -38,6 +38,18 @@ log "checking daemon cleanup command surface"
 "${CLI[@]}" clean --help >"$TMPDIR/clean-help.txt"
 grep -F "Remove stale daemon pid and socket files" "$TMPDIR/clean-help.txt" >/dev/null
 
+log "checking network explain guardrails"
+"${CLI[@]}" network-explain \
+  http://169.254.169.254/latest/meta-data/ \
+  --mode open-with-guardrails >"$TMPDIR/network-explain-metadata.txt"
+grep -F "bucket:   block" "$TMPDIR/network-explain-metadata.txt" >/dev/null
+grep -F "metadata endpoint" "$TMPDIR/network-explain-metadata.txt" >/dev/null
+"${CLI[@]}" network-explain \
+  http://192.168.1.20/admin \
+  --mode open-with-guardrails >"$TMPDIR/network-explain-private.txt"
+grep -F "bucket:   approve" "$TMPDIR/network-explain-private.txt" >/dev/null
+grep -F "private network destination" "$TMPDIR/network-explain-private.txt" >/dev/null
+
 log "checking doctor JSON truth"
 set +e
 "${CLI[@]}" doctor --json >"$TMPDIR/doctor.json"

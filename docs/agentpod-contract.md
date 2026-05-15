@@ -195,6 +195,7 @@ For general local use, `open-with-guardrails` is practical:
 
 - public internet is allowed unless policy says otherwise
 - cloud metadata endpoints are blocked
+- private/LAN IP destinations require explicit mediation
 - localhost access is controlled
 - unknown high-risk destinations can trigger approval
 - databases, cloud admin APIs, deploy endpoints, and payment endpoints can be
