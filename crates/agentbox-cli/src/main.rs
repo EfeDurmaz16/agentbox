@@ -1502,6 +1502,7 @@ struct RunPlanProvider {
     status: String,
     selection_reason: String,
     bridge_transports: Vec<String>,
+    boundary_primitives: Vec<String>,
     capabilities: Vec<String>,
     network_enforcement: Vec<String>,
     availability_check: String,
@@ -1714,6 +1715,11 @@ async fn cmd_run(options: RunOptions) {
                     .bridge_transport_kinds()
                     .iter()
                     .map(|transport| format!("{transport:?}"))
+                    .collect(),
+                boundary_primitives: selected_provider
+                    .boundary_primitives()
+                    .iter()
+                    .map(|primitive| (*primitive).to_string())
                     .collect(),
                 capabilities: selected_provider
                     .capabilities()
