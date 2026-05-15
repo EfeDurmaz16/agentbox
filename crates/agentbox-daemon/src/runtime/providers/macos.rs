@@ -324,6 +324,22 @@ impl MacOsEvidenceObserverPlan {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MacOsNativePrerequisiteCheck {
+    pub name: String,
+    pub status: String,
+    pub required: bool,
+    pub probe: String,
+    pub claim: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MacOsAgentPodRunnerPhase {
+    pub name: String,
+    pub status: String,
+    pub claim: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MacOsAgentPodExecutionPlan {
     pub schema_version: i64,
     pub provider: String,
@@ -333,6 +349,8 @@ pub struct MacOsAgentPodExecutionPlan {
     pub endpoint_security: MacOsEndpointSecurityPlan,
     pub network_extension: MacOsNetworkExtensionPlan,
     pub evidence_observer: MacOsEvidenceObserverPlan,
+    pub prerequisite_checks: Vec<MacOsNativePrerequisiteCheck>,
+    pub runner_phases: Vec<MacOsAgentPodRunnerPhase>,
     pub required_entitlements: Vec<String>,
     pub live_env_var: String,
     pub live_execution_enabled: bool,
@@ -360,6 +378,8 @@ impl MacOsAgentPodExecutionPlan {
             endpoint_security: MacOsEndpointSecurityPlan::from_minipod_spec(spec),
             network_extension: MacOsNetworkExtensionPlan::from_minipod_spec(spec),
             evidence_observer: MacOsEvidenceObserverPlan::from_minipod_spec(spec),
+            prerequisite_checks: macos_native_prerequisite_checks(),
+            runner_phases: macos_agentpod_runner_phases(),
             required_entitlements: vec![
                 "com.apple.security.virtualization".into(),
                 "com.apple.developer.endpoint-security.client".into(),
@@ -376,6 +396,82 @@ impl MacOsAgentPodExecutionPlan {
     pub fn runnable_on_current_host(&self) -> bool {
         cfg!(target_os = "macos") && self.live_execution_enabled
     }
+}
+
+fn macos_native_prerequisite_checks() -> Vec<MacOsNativePrerequisiteCheck> {
+    vec![
+        MacOsNativePrerequisiteCheck {
+            name: "apple-virtualization-framework".into(),
+            status: "host-probe-required".into(),
+            required: true,
+            probe: "test -d /System/Library/Frameworks/Virtualization.framework".into(),
+            claim: "host can load Apple Virtualization.framework for VM-cell lifecycle".into(),
+        },
+        MacOsNativePrerequisiteCheck {
+            name: "virtualization-entitlement".into(),
+            status: "signing-required".into(),
+            required: true,
+            probe: "codesign -d --entitlements :- <agentbox-macos-runner>".into(),
+            claim: "runner binary is signed with com.apple.security.virtualization".into(),
+        },
+        MacOsNativePrerequisiteCheck {
+            name: "vm-runner-binary".into(),
+            status: "planned".into(),
+            required: true,
+            probe: "agentbox-macos-vm-runner --version".into(),
+            claim: "dedicated VM runner exists and owns Apple Virtualization lifecycle".into(),
+        },
+        MacOsNativePrerequisiteCheck {
+            name: "endpoint-security-system-extension".into(),
+            status: "planned".into(),
+            required: true,
+            probe: "systemextensionsctl list | rg dev.agentbox.endpoint-security".into(),
+            claim: "signed Endpoint Security system extension is installed and user-approved"
+                .into(),
+        },
+        MacOsNativePrerequisiteCheck {
+            name: "network-extension".into(),
+            status: "planned".into(),
+            required: true,
+            probe: "systemextensionsctl list | rg dev.agentbox.network-extension".into(),
+            claim: "signed Network Extension is installed and can mediate outbound flows".into(),
+        },
+    ]
+}
+
+fn macos_agentpod_runner_phases() -> Vec<MacOsAgentPodRunnerPhase> {
+    vec![
+        MacOsAgentPodRunnerPhase {
+            name: "compile-vm-cell-config".into(),
+            status: "descriptor".into(),
+            claim: "emit secret-free VM cell, workspace mount, bridge socket, and evidence spool descriptors".into(),
+        },
+        MacOsAgentPodRunnerPhase {
+            name: "start-virtualization-vm".into(),
+            status: "planned".into(),
+            claim: "boot a short-lived Apple Virtualization VM cell for the AgentPod session".into(),
+        },
+        MacOsAgentPodRunnerPhase {
+            name: "attach-host-bridge".into(),
+            status: "planned".into(),
+            claim: "connect guest policy and evidence traffic to the Agentbox host bridge".into(),
+        },
+        MacOsAgentPodRunnerPhase {
+            name: "attach-endpoint-security".into(),
+            status: "planned".into(),
+            claim: "correlate host exec/file authorization events with the VM cell and policy bridge".into(),
+        },
+        MacOsAgentPodRunnerPhase {
+            name: "attach-network-extension".into(),
+            status: "planned".into(),
+            claim: "mediate outbound flow first contact through the host bridge before allow/deny".into(),
+        },
+        MacOsAgentPodRunnerPhase {
+            name: "exec-command".into(),
+            status: "planned".into(),
+            claim: "execute argv inside the VM cell only after bridge and evidence channels are ready".into(),
+        },
+    ]
 }
 
 pub fn macos_native_execution_enabled() -> bool {
@@ -800,6 +896,26 @@ mod tests {
         assert_eq!(plan.command_argv, vec!["/bin/true"]);
         assert_eq!(plan.live_env_var, "AGENTBOX_MACOS_NATIVE");
         assert!(plan.requires_macos);
+        assert!(plan.prerequisite_checks.iter().any(|check| {
+            check.name == "vm-runner-binary"
+                && check.required
+                && check.status == "planned"
+                && check.probe.contains("agentbox-macos-vm-runner")
+        }));
+        assert_eq!(
+            plan.runner_phases
+                .iter()
+                .map(|phase| (phase.name.as_str(), phase.status.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("compile-vm-cell-config", "descriptor"),
+                ("start-virtualization-vm", "planned"),
+                ("attach-host-bridge", "planned"),
+                ("attach-endpoint-security", "planned"),
+                ("attach-network-extension", "planned"),
+                ("exec-command", "planned"),
+            ]
+        );
         assert!(plan
             .required_entitlements
             .contains(&"com.apple.security.virtualization".into()));
