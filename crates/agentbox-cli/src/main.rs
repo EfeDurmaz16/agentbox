@@ -2582,8 +2582,10 @@ async fn cmd_run(options: RunOptions) {
         "agentbox.provider.selection_reason".to_string(),
         selection.reason.clone(),
     );
+    let workspace_mode_risk = spec.risk.clone();
     apply_workspace_mode(
         &mut spec,
+        &workspace_mode_risk,
         options.workspace_mode.as_deref(),
         options.workspace_overlay_dir,
     );
@@ -5133,8 +5135,10 @@ fn cmd_minipod_spec(options: MinipodSpecOptions) {
             .push(parse_simple_credential_grant(&grant, "token"));
     }
     apply_credential_ttl(&mut spec, options.credential_ttl_seconds);
+    let workspace_mode_risk = spec.risk.clone();
     apply_workspace_mode(
         &mut spec,
+        &workspace_mode_risk,
         options.workspace_mode.as_deref(),
         options.workspace_overlay_dir,
     );
@@ -5234,6 +5238,7 @@ fn parse_provider_hint(raw: &str) -> Option<String> {
 
 fn apply_workspace_mode(
     spec: &mut agentbox_daemon::runtime::types::MinipodSpec,
+    risk: &agentbox_daemon::runtime::types::AgentPodRiskLevel,
     raw_mode: Option<&str>,
     overlay_dir: Option<PathBuf>,
 ) {
@@ -5243,7 +5248,7 @@ fn apply_workspace_mode(
 
     let mut mode = raw_mode
         .map(parse_workspace_mode)
-        .unwrap_or(AgentPodWorkspaceMode::Direct);
+        .unwrap_or_else(|| default_workspace_mode_for_risk(risk));
     if overlay_dir.is_some() && mode == AgentPodWorkspaceMode::Direct {
         mode = AgentPodWorkspaceMode::OverlayReview;
     }
@@ -5271,6 +5276,19 @@ fn apply_workspace_mode(
         overlay.mode = WorkspaceOverlayMode::DiscardOnDestroy;
     }
     spec.filesystem.workspace_overlay = overlay;
+}
+
+fn default_workspace_mode_for_risk(
+    risk: &agentbox_daemon::runtime::types::AgentPodRiskLevel,
+) -> agentbox_daemon::runtime::types::AgentPodWorkspaceMode {
+    use agentbox_daemon::runtime::types::{AgentPodRiskLevel, AgentPodWorkspaceMode};
+
+    match risk {
+        AgentPodRiskLevel::Low => AgentPodWorkspaceMode::Direct,
+        AgentPodRiskLevel::Medium | AgentPodRiskLevel::High | AgentPodRiskLevel::VeryHigh => {
+            AgentPodWorkspaceMode::OverlayReview
+        }
+    }
 }
 
 fn parse_workspace_mode(raw: &str) -> agentbox_daemon::runtime::types::AgentPodWorkspaceMode {
@@ -7264,7 +7282,10 @@ mod tests {
         RemoteAgentPodLifecycleEvent, RemoteAgentPodWorkspaceBundle,
         RemoteAgentPodWorkspaceExportResponse, RemoteAgentPodWorkspaceFile,
     };
-    use agentbox_daemon::runtime::types::{MinipodSpec, RuntimeSession, SessionEvidenceBundle};
+    use agentbox_daemon::runtime::types::{
+        AgentPodRiskLevel, AgentPodWorkspaceMode, MinipodSpec, RuntimeSession,
+        SessionEvidenceBundle, WorkspaceWritePolicy,
+    };
 
     #[test]
     fn entitlement_parser_detects_xml_and_plain_keys() {
@@ -7418,6 +7439,54 @@ mod tests {
         .unwrap_err();
 
         assert!(err.contains("native plan command cannot be empty"));
+    }
+
+    #[test]
+    fn workspace_mode_defaults_to_overlay_review_for_autonomous_risk() {
+        for risk in [
+            AgentPodRiskLevel::Medium,
+            AgentPodRiskLevel::High,
+            AgentPodRiskLevel::VeryHigh,
+        ] {
+            let mut spec = MinipodSpec::for_agent_task("codex", "/tmp/agentbox-work");
+            spec.risk = risk.clone();
+
+            apply_workspace_mode(&mut spec, &risk, None, None);
+
+            assert_eq!(spec.workspace_mode, AgentPodWorkspaceMode::OverlayReview);
+            assert!(matches!(
+                spec.filesystem.workspace_write_policy,
+                WorkspaceWritePolicy::WritableOverlay
+            ));
+            assert!(spec.filesystem.workspace_overlay.is_enabled());
+            assert_eq!(
+                spec.labels.get("agentbox.workspace_mode"),
+                Some(&"overlay-review".to_string())
+            );
+        }
+    }
+
+    #[test]
+    fn workspace_mode_keeps_direct_for_low_risk_or_explicit_direct() {
+        let mut low = MinipodSpec::for_agent_task("codex", "/tmp/agentbox-work");
+        low.risk = AgentPodRiskLevel::Low;
+        apply_workspace_mode(&mut low, &AgentPodRiskLevel::Low, None, None);
+        assert_eq!(low.workspace_mode, AgentPodWorkspaceMode::Direct);
+        assert!(matches!(
+            low.filesystem.workspace_write_policy,
+            WorkspaceWritePolicy::Direct
+        ));
+        assert!(!low.filesystem.workspace_overlay.is_enabled());
+
+        let mut high = MinipodSpec::for_agent_task("codex", "/tmp/agentbox-work");
+        high.risk = AgentPodRiskLevel::High;
+        apply_workspace_mode(&mut high, &AgentPodRiskLevel::High, Some("direct"), None);
+        assert_eq!(high.workspace_mode, AgentPodWorkspaceMode::Direct);
+        assert!(matches!(
+            high.filesystem.workspace_write_policy,
+            WorkspaceWritePolicy::Direct
+        ));
+        assert!(!high.filesystem.workspace_overlay.is_enabled());
     }
 
     #[test]
