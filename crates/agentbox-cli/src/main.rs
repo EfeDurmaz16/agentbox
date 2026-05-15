@@ -1149,11 +1149,10 @@ fn build_doctor_report() -> DoctorReport {
         "run `agentbox start`",
     ));
 
-    checks.push(doctor_check(
-        "daemon socket",
+    checks.push(daemon_socket_doctor_check(
         socket_path().exists(),
+        daemon_running,
         format!("{}", socket_path().display()),
-        "run `agentbox start`; remove stale pid/socket files if the daemon crashed",
     ));
 
     checks.push(doctor_check(
@@ -1280,6 +1279,34 @@ fn doctor_check(name: &'static str, ok: bool, detail: String, fix: &'static str)
         release_blocker: !ok,
         detail,
         fix,
+    }
+}
+
+fn daemon_socket_doctor_check(
+    socket_exists: bool,
+    daemon_running: bool,
+    socket_path: String,
+) -> DoctorCheck {
+    match (socket_exists, daemon_running) {
+        (true, true) => doctor_check("daemon socket", true, socket_path, "none"),
+        (true, false) => doctor_check(
+            "daemon socket",
+            false,
+            format!("stale socket at {socket_path}; daemon process is not running"),
+            "run `agentbox clean` or remove the stale socket, then run `agentbox start`",
+        ),
+        (false, true) => doctor_check(
+            "daemon socket",
+            false,
+            format!("missing socket at {socket_path}; daemon process appears to be running"),
+            "run `agentbox restart` to recreate the daemon socket",
+        ),
+        (false, false) => doctor_check(
+            "daemon socket",
+            false,
+            format!("missing socket at {socket_path}"),
+            "run `agentbox start`",
+        ),
     }
 }
 
@@ -6850,6 +6877,25 @@ mod tests {
         assert_eq!(payload["checks"][1]["fix"], "install it");
         assert_eq!(payload["checks"][2]["severity"], "advisory");
         assert_eq!(payload["checks"][2]["release_blocker"], false);
+    }
+
+    #[test]
+    fn daemon_socket_doctor_check_distinguishes_stale_socket() {
+        let stale = daemon_socket_doctor_check(true, false, "/tmp/agentbox.sock".into());
+        assert!(!stale.ok);
+        assert!(stale.required);
+        assert_eq!(stale.name, "daemon socket");
+        assert!(stale.detail.contains("stale socket"));
+        assert!(stale.fix.contains("agentbox clean"));
+
+        let missing = daemon_socket_doctor_check(false, false, "/tmp/agentbox.sock".into());
+        assert!(!missing.ok);
+        assert!(missing.detail.contains("missing socket"));
+        assert_eq!(missing.fix, "run `agentbox start`");
+
+        let ready = daemon_socket_doctor_check(true, true, "/tmp/agentbox.sock".into());
+        assert!(ready.ok);
+        assert_eq!(ready.fix, "none");
     }
 
     #[test]
