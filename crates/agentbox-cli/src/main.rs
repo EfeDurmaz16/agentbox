@@ -2233,9 +2233,9 @@ fn linux_native_doctor_checks() -> Vec<DoctorCheck> {
         ),
         doctor_advisory_check(
             "Linux cgroups v2",
-            Path::new("/sys/fs/cgroup/cgroup.controllers").exists(),
-            "/sys/fs/cgroup/cgroup.controllers".to_string(),
-            "boot with cgroup v2 enabled",
+            linux_cgroup_v2_controllers_path().exists(),
+            linux_cgroup_v2_detail(),
+            "boot with cgroup v2 enabled and delegate a writable cgroup root for AgentPod process attach",
         ),
         doctor_advisory_check(
             "Linux seccomp",
@@ -2254,6 +2254,37 @@ fn linux_native_doctor_checks() -> Vec<DoctorCheck> {
             "use Linux 5.13+ with Landlock enabled",
         ),
     ]
+}
+
+fn linux_cgroup_v2_root() -> PathBuf {
+    std::env::var_os("AGENTBOX_LINUX_CGROUP_ROOT")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/sys/fs/cgroup"))
+}
+
+fn linux_cgroup_v2_controllers_path() -> PathBuf {
+    linux_cgroup_v2_root().join("cgroup.controllers")
+}
+
+fn linux_cgroup_v2_detail() -> String {
+    let root = linux_cgroup_v2_root();
+    let controllers = root.join("cgroup.controllers");
+    let controller_detail = fs::read_to_string(&controllers)
+        .map(|contents| {
+            let contents = contents.trim();
+            if contents.is_empty() {
+                "controllers listed: none".to_string()
+            } else {
+                format!("controllers listed: {contents}")
+            }
+        })
+        .unwrap_or_else(|_| "controllers file not readable".to_string());
+    format!(
+        "root: {}; {}; set AGENTBOX_LINUX_CGROUP_ROOT for delegated/test roots; live attach also requires write access to child cgroups",
+        root.display(),
+        controller_detail
+    )
 }
 
 fn linux_user_namespace_available() -> bool {
@@ -7969,6 +8000,12 @@ mod tests {
         assert!(checks[0].ok);
         assert!(checks[0].detail.contains("compiler available"));
         assert!(checks[0].detail.contains("AGENTBOX_LINUX_NATIVE=1"));
+        let cgroup_check = checks
+            .iter()
+            .find(|check| check.name == "Linux cgroups v2")
+            .unwrap();
+        assert!(cgroup_check.detail.contains("AGENTBOX_LINUX_CGROUP_ROOT"));
+        assert!(cgroup_check.detail.contains("live attach"));
         assert!(checks.iter().any(|check| check.name == "Linux seccomp"));
         assert!(checks
             .iter()
