@@ -52,6 +52,48 @@ agentbox evidence --session <session> --bundle ./agentbox-evidence
 Each arc is intentionally sized around 25 atomic commits. Some commits will
 split during implementation if a diff crosses a boundary. That is expected.
 
+## Current Sprint Checkpoint
+
+The sprint has moved past pure planning. The current working spine is:
+
+- Linux AgentPod has a gated prototype execution path through
+  `agentbox-linux-runner`, `unshare`, workspace bind mounting, cgroup v2 attach,
+  write-oriented Landlock, supported seccomp deny filters, timeout handling,
+  stdout/stderr collection, and request/cgroup cleanup. It is still not a
+  complete sandbox claim.
+- Linux runner request files are owned lifecycle artifacts: they are cleaned on
+  early returns and use path-safe, collision-resistant filenames for parallel
+  exec attempts.
+- macOS AgentPod remains descriptor/plan compiler only, but the native plan now
+  exposes prerequisite checks and ordered runner phases for the future Apple
+  Virtualization VM runner, Endpoint Security system extension, Network
+  Extension, host bridge, and evidence flow.
+- `agentbox doctor --json` and setup-plan filtering now surface macOS VM runner
+  and extension readiness gaps as advisory checks instead of hiding them in
+  prose.
+- Remote AgentPod has a broad experimental contract worker surface, but richer
+  worker-side approvals, socket/provider-token credentials, full event
+  streaming, and automatic remote supervision remain open.
+
+Immediate next implementation queue:
+
+1. Start the `agentbox-macos-vm-runner` binary as a contract-only runner that
+   validates request JSON and refuses execution without a VM backend.
+2. Add a macOS VM runner request schema mirroring the native plan fields that a
+   real Apple Virtualization process will need.
+3. Add `agentbox doctor` probes for a sibling `agentbox-macos-vm-runner` binary,
+   not only PATH lookup.
+4. Split macOS system-extension readiness into install status, entitlement
+   status, and approval status descriptors.
+5. Add Linux overlayfs apply as the next native execution primitive, still
+   gated behind `AGENTBOX_LINUX_NATIVE=1`.
+6. Add Linux live smoke coverage for request cleanup and parallel exec where the
+   host has delegated cgroups.
+7. Connect native runner phases to evidence events so plans and post-run
+   receipts share the same vocabulary.
+8. Convert the next 10 implementation slices into GitHub issues with explicit
+   verification commands.
+
 ### Arc 1: Product Contract In Code
 
 Outcome: code names and manifests express AgentPod, provider kind, risk, and
