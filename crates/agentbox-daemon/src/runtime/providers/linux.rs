@@ -362,11 +362,32 @@ impl LinuxCgroupV2Limiter {
         Ok(())
     }
 
+    #[cfg(target_os = "linux")]
+    pub fn cleanup(
+        root: &std::path::Path,
+        plan: &LinuxCgroupV2Plan,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let cgroup_dir = root.join(&plan.cgroup_name);
+        match std::fs::remove_dir(&cgroup_dir) {
+            Ok(()) => Ok(()),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(err) => Err(err.into()),
+        }
+    }
+
     #[cfg(not(target_os = "linux"))]
     pub fn apply(
         _root: &std::path::Path,
         _plan: &LinuxCgroupV2Plan,
         _pid: u32,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        Err("Linux cgroups v2 are only available on Linux".into())
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    pub fn cleanup(
+        _root: &std::path::Path,
+        _plan: &LinuxCgroupV2Plan,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         Err("Linux cgroups v2 are only available on Linux".into())
     }
@@ -966,6 +987,12 @@ impl LinuxAgentPodPrototypeExecutor {
         let output = child.wait_with_output().map_err(|err| {
             RuntimeError::ExecFailed(format!("Linux AgentPod prototype wait failed: {err}"))
         })?;
+        LinuxCgroupV2Limiter::cleanup(cgroup_root, &plan.cgroup).map_err(|err| {
+            RuntimeError::ExecFailed(format!(
+                "Linux AgentPod cgroup v2 cleanup failed at {}: {err}",
+                cgroup_root.display()
+            ))
+        })?;
 
         Ok(CommandResult {
             exit_code: output.status.code().unwrap_or(-1),
@@ -1349,6 +1376,11 @@ mod tests {
             .unwrap_err();
 
         assert!(err.to_string().contains("only available on Linux"));
+
+        let err = LinuxCgroupV2Limiter::cleanup(std::path::Path::new("/sys/fs/cgroup"), &plan)
+            .unwrap_err();
+
+        assert!(err.to_string().contains("only available on Linux"));
     }
 
     #[cfg(target_os = "linux")]
@@ -1381,7 +1413,27 @@ mod tests {
             "12345"
         );
 
+        LinuxCgroupV2Limiter::cleanup(&root, &plan).unwrap();
+
+        assert!(!cgroup_dir.exists());
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn cgroup_v2_cleanup_tolerates_missing_cgroups() {
+        let root = std::env::temp_dir().join(format!(
+            "agentbox-cgroup-missing-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let plan =
+            LinuxCgroupV2Limiter::plan("01agentboxsession", &ResourcePolicy::default()).unwrap();
+
+        LinuxCgroupV2Limiter::cleanup(&root, &plan).unwrap();
     }
 
     #[test]
