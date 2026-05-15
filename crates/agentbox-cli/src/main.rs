@@ -52,6 +52,10 @@ enum Commands {
         /// Emit JSON
         #[arg(long)]
         json: bool,
+
+        /// Limit setup actions to one provider: direct-host, podman, agentpod-macos, agentpod-linux, agentpod-windows, or remote-agentpod
+        #[arg(long)]
+        provider: Option<String>,
     },
     /// Query audit log
     Audit {
@@ -922,9 +926,9 @@ fn cmd_doctor(json: bool) {
     }
 }
 
-fn cmd_setup_plan(json: bool) {
+fn cmd_setup_plan(json: bool, provider: Option<String>) {
     let report = build_doctor_report();
-    let plan = setup_plan_from_doctor(&report);
+    let plan = setup_plan_from_doctor(&report, provider.as_deref());
 
     if json {
         println!(
@@ -936,6 +940,9 @@ fn cmd_setup_plan(json: bool) {
 
     println!("Agentbox setup plan");
     println!("{}", "-".repeat(64));
+    if let Some(provider) = &plan.provider {
+        println!("provider:  {provider}");
+    }
     println!(
         "readiness: {} ok, {} required failed, {} advisory failed",
         plan.ok, plan.required_failed, plan.advisory_failed
@@ -1111,7 +1118,7 @@ fn doctor_report(checks: Vec<DoctorCheck>) -> DoctorReport {
     }
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 struct DoctorCheck {
     name: &'static str,
     ok: bool,
@@ -1155,6 +1162,7 @@ fn doctor_advisory_check(
 struct SetupPlan {
     schema_version: i64,
     platform: String,
+    provider: Option<String>,
     ok: usize,
     failed: usize,
     required_failed: usize,
@@ -1176,8 +1184,19 @@ struct SetupPlanStep {
     command: Option<String>,
 }
 
-fn setup_plan_from_doctor(report: &DoctorReport) -> SetupPlan {
-    let mut steps = report
+fn setup_plan_from_doctor(report: &DoctorReport, provider: Option<&str>) -> SetupPlan {
+    let provider_filter = provider.map(normalize_setup_provider_filter);
+    let checks = if let Some(provider_filter) = provider_filter.as_deref() {
+        if provider_filter == "all" {
+            report.checks.clone()
+        } else {
+            filter_doctor_checks_for_provider(&report.checks, provider_filter)
+        }
+    } else {
+        report.checks.clone()
+    };
+    let filtered_report = doctor_report(checks);
+    let mut steps = filtered_report
         .checks
         .iter()
         .filter(|check| !check.ok)
@@ -1192,13 +1211,84 @@ fn setup_plan_from_doctor(report: &DoctorReport) -> SetupPlan {
     SetupPlan {
         schema_version: 1,
         platform: report.platform.clone(),
-        ok: report.ok,
-        failed: report.failed,
-        required_failed: report.required_failed,
-        advisory_failed: report.advisory_failed,
-        ready_for_required_setup: report.required_failed == 0,
+        provider: provider_filter,
+        ok: filtered_report.ok,
+        failed: filtered_report.failed,
+        required_failed: filtered_report.required_failed,
+        advisory_failed: filtered_report.advisory_failed,
+        ready_for_required_setup: filtered_report.required_failed == 0,
         next_command,
         steps,
+    }
+}
+
+fn normalize_setup_provider_filter(provider: &str) -> String {
+    let provider = provider.trim().to_ascii_lowercase();
+    match provider.as_str() {
+        "" | "auto" => "all".to_string(),
+        "direct" | "host" | "direct-host" => "direct-host".to_string(),
+        "podman" | "compat" => "podman".to_string(),
+        "remote" | "remote-agentpod" => "remote-agentpod".to_string(),
+        "macos" | "agentpod-macos" => "agentpod-macos".to_string(),
+        "linux" | "agentpod-linux" => "agentpod-linux".to_string(),
+        "windows" | "agentpod-windows" => "agentpod-windows".to_string(),
+        other => {
+            eprintln!("error: unsupported --provider value `{}`", other);
+            eprintln!(
+                "hint: expected direct-host, podman, agentpod-macos, agentpod-linux, agentpod-windows, or remote-agentpod"
+            );
+            std::process::exit(1);
+        }
+    }
+}
+
+fn filter_doctor_checks_for_provider(checks: &[DoctorCheck], provider: &str) -> Vec<DoctorCheck> {
+    let names = setup_provider_check_names(provider);
+    checks
+        .iter()
+        .filter(|check| names.contains(&check.name))
+        .cloned()
+        .collect()
+}
+
+fn setup_provider_check_names(provider: &str) -> &'static [&'static str] {
+    match provider {
+        "all" => &[],
+        "direct-host" => &[
+            "agentbox directory",
+            "config file",
+            "daemon process",
+            "daemon socket",
+            "agentbox-daemon binary",
+            "agentbox-shim binary",
+            "installed shims",
+            "shim PATH priority",
+            "audit database",
+        ],
+        "podman" => &["podman provider", "podman machine"],
+        "remote-agentpod" => &["remote-agentpod endpoint"],
+        "agentpod-macos" => &[
+            "macOS native plan",
+            "Apple Virtualization",
+            "Endpoint Security entitlement",
+            "Network Extension entitlement",
+        ],
+        "agentpod-linux" => &[
+            "Linux native plan",
+            "Linux user namespace",
+            "Linux cgroups v2",
+            "Linux seccomp",
+            "Linux Landlock ABI",
+        ],
+        "agentpod-windows" => &[
+            "Windows native plan",
+            "Windows Job Objects",
+            "Windows AppContainer",
+            "Windows WFP",
+            "Windows ETW",
+            "Windows VM boundary",
+        ],
+        _ => &[],
     }
 }
 
@@ -5951,7 +6041,7 @@ async fn main() {
         Commands::Stop => cmd_stop(),
         Commands::Status => cmd_status(),
         Commands::Doctor { json } => cmd_doctor(json),
-        Commands::SetupPlan { json } => cmd_setup_plan(json),
+        Commands::SetupPlan { json, provider } => cmd_setup_plan(json, provider),
         Commands::Audit {
             limit,
             bucket,
@@ -6337,7 +6427,7 @@ mod tests {
             ),
         ]);
 
-        let plan = setup_plan_from_doctor(&report);
+        let plan = setup_plan_from_doctor(&report, None);
 
         assert_eq!(plan.schema_version, 1);
         assert_eq!(plan.required_failed, 2);
@@ -6354,6 +6444,37 @@ mod tests {
         let payload = serde_json::to_value(&plan).unwrap();
         assert_eq!(payload["steps"][0]["release_blocker"], true);
         assert_eq!(payload["steps"][2]["release_blocker"], false);
+    }
+
+    #[test]
+    fn setup_plan_can_filter_by_provider() {
+        let report = doctor_report(vec![
+            doctor_check(
+                "daemon socket",
+                false,
+                "missing".into(),
+                "run `agentbox start`",
+            ),
+            doctor_check("podman provider", false, "missing".into(), "install Podman"),
+            doctor_advisory_check(
+                "remote-agentpod endpoint",
+                false,
+                "missing".into(),
+                "set endpoint",
+            ),
+        ]);
+
+        let remote = setup_plan_from_doctor(&report, Some("remote-agentpod"));
+        assert_eq!(remote.provider.as_deref(), Some("remote-agentpod"));
+        assert_eq!(remote.required_failed, 0);
+        assert_eq!(remote.advisory_failed, 1);
+        assert_eq!(remote.steps.len(), 1);
+        assert_eq!(remote.steps[0].check, "remote-agentpod endpoint");
+
+        let podman = setup_plan_from_doctor(&report, Some("podman"));
+        assert_eq!(podman.provider.as_deref(), Some("podman"));
+        assert_eq!(podman.required_failed, 1);
+        assert_eq!(podman.steps[0].check, "podman provider");
     }
 
     #[test]

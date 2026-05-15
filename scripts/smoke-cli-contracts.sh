@@ -49,6 +49,9 @@ log "checking setup plan JSON truth"
 "${CLI[@]}" setup-plan --json >"$TMPDIR/setup-plan.json"
 validate_json "$TMPDIR/setup-plan.json" \
   "data.get('schema_version') == 1 and data.get('required_failed', 0) + data.get('advisory_failed', 0) == data.get('failed', 0) and data.get('steps') is not None and all(step.get('severity') in ['required', 'advisory'] for step in data.get('steps', []))"
+"${CLI[@]}" setup-plan --provider remote-agentpod --json >"$TMPDIR/setup-plan-remote.json"
+validate_json "$TMPDIR/setup-plan-remote.json" \
+  "data.get('schema_version') == 1 and data.get('provider') == 'remote-agentpod' and all(step.get('check') == 'remote-agentpod endpoint' for step in data.get('steps', []))"
 
 log "checking AgentPod run plan JSON"
 "${CLI[@]}" run --plan --json -- echo agentbox-contract >"$TMPDIR/run-plan.json"
