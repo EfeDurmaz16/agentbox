@@ -20,9 +20,11 @@ fi
 
 workspace="${AGENTBOX_LINUX_NATIVE_WORKSPACE:-$(mktemp -d)}"
 command_string="${AGENTBOX_LINUX_NATIVE_COMMAND:-/bin/true}"
+timeout_seconds="${AGENTBOX_LINUX_NATIVE_TIMEOUT_SECONDS:-30}"
 
 echo "workspace=$workspace"
 echo "command=$command_string"
+echo "timeout_seconds=$timeout_seconds"
 
 cargo run -q -p agentbox-cli -- native-plan \
   --provider agentpod-linux \
@@ -39,6 +41,7 @@ cargo run -q -p agentbox-cli -- native-plan \
   printf 'y\n' | AGENTBOX_LINUX_NATIVE=1 cargo run -q -p agentbox-cli -- run \
     --provider agentpod-linux \
     --workspace-mode direct \
+    --timeout-seconds "$timeout_seconds" \
     -- $command_string
 )
 
