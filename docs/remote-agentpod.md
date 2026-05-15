@@ -133,6 +133,8 @@ When `agentbox run --provider remote-agentpod` is destroyed through the daemon,
 the runtime also seals the final stopped-session evidence bundle after the local
 `runtime.destroy` audit event is written, then sends the same receipt and
 verified bundle envelope through the remote transport.
+`agentbox minipod-inspect <session>` prints the session-scoped remote operator
+commands when the persisted session contains remote worker metadata.
 After a worker accepts evidence, the CLI can query its evidence status route:
 
 ```sh

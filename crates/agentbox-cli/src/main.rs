@@ -6376,6 +6376,43 @@ fn print_minipod_session(session: &agentbox_daemon::runtime::types::RuntimeSessi
     if let Some(stopped_at) = session.stopped_at {
         println!("stopped:   {}", stopped_at.to_rfc3339());
     }
+    let operator_commands = remote_session_operator_commands(session);
+    if !operator_commands.is_empty() {
+        println!("remote:");
+        for command in operator_commands {
+            println!("  {}", command);
+        }
+    }
+}
+
+fn remote_session_operator_commands(
+    session: &agentbox_daemon::runtime::types::RuntimeSession,
+) -> Vec<String> {
+    if session.provider != "remote-agentpod" {
+        return Vec::new();
+    }
+    if !session
+        .spec
+        .labels
+        .contains_key("agentbox.remote.worker_session")
+    {
+        return Vec::new();
+    }
+    vec![
+        format!("agentbox remote-evidence-status --session {}", session.id),
+        format!(
+            "agentbox remote-workspace-export --session {} --output-dir ./agentbox-workspace-review",
+            session.id
+        ),
+        format!(
+            "agentbox remote-evidence-upload --session {} --bundle-dir ./agentbox-evidence",
+            session.id
+        ),
+        format!(
+            "agentbox remote-evidence-stream --session {} --file ./stdout.txt",
+            session.id
+        ),
+    ]
 }
 
 fn cmd_minipod_logs(session_id: String, follow: bool, tail: Option<usize>) {
@@ -7024,6 +7061,41 @@ mod tests {
 
         assert_eq!(endpoint, "https://override.example.com/agentpod");
         assert_eq!(worker_session_id, "override-worker");
+    }
+
+    #[test]
+    fn remote_session_operator_commands_use_local_session_metadata() {
+        let mut session = RuntimeSession::new(
+            "remote".into(),
+            "remote-agentpod".into(),
+            "remote".into(),
+            MinipodSpec::for_agent_task("hermes", "/tmp/agentbox-remote"),
+        );
+        session.spec.labels.insert(
+            "agentbox.remote.endpoint".into(),
+            "https://worker.example.com/agentpod".into(),
+        );
+        session.spec.labels.insert(
+            "agentbox.remote.worker_session".into(),
+            "worker-session-1".into(),
+        );
+
+        let commands = remote_session_operator_commands(&session);
+        let session_id = session.id.clone();
+
+        assert_eq!(
+            commands,
+            vec![
+                format!("agentbox remote-evidence-status --session {session_id}"),
+                format!(
+                    "agentbox remote-workspace-export --session {session_id} --output-dir ./agentbox-workspace-review"
+                ),
+                format!(
+                    "agentbox remote-evidence-upload --session {session_id} --bundle-dir ./agentbox-evidence"
+                ),
+                format!("agentbox remote-evidence-stream --session {session_id} --file ./stdout.txt"),
+            ]
+        );
     }
 
     #[test]
