@@ -1436,7 +1436,7 @@ mod tests {
         let audit = manager.audit.recent(2).unwrap();
         assert_eq!(audit[0].bucket, "network");
         assert!(audit[0].decision.contains("blocked:"));
-        assert!(audit[0].decision.contains("denylist"));
+        assert!(audit[0].decision.contains("metadata endpoint"));
     }
 
     #[tokio::test]

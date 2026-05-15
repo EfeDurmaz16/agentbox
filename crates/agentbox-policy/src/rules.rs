@@ -41,6 +41,18 @@ fn is_loopback_domain(domain: &str) -> bool {
         || domain == "0.0.0.0"
 }
 
+fn is_metadata_endpoint_domain(domain: &str) -> bool {
+    matches!(
+        domain,
+        "169.254.169.254"
+            | "169.254.170.2"
+            | "100.100.100.200"
+            | "metadata.google.internal"
+            | "metadata"
+            | "fd00:ec2::254"
+    )
+}
+
 /// Check if a command matches a pattern from always_allow / always_block.
 /// Patterns: "ls" (exact binary), "git push" (binary + subcommand), "npm *" (any npm invocation).
 fn command_matches_pattern(ctx: &CommandContext, pattern: &str) -> bool {
@@ -84,6 +96,17 @@ pub fn check_config_overrides(
     if matches!(ctx.binary.as_str(), "curl" | "wget") {
         if let Some(url) = ctx.args.iter().find(|a| a.starts_with("http")) {
             if let Some(domain) = extract_domain(url) {
+                if is_metadata_endpoint_domain(&domain) {
+                    return Some(Classification {
+                        bucket: Bucket::Block,
+                        reason: format!(
+                            "{} to {} — cloud metadata endpoint blocked by default guardrail",
+                            ctx.binary, domain
+                        ),
+                        notification_summary: None,
+                    });
+                }
+
                 if config.denied_domains.iter().any(|d| {
                     let d_lower = d.to_lowercase();
                     domain == d_lower || domain.ends_with(&format!(".{}", d_lower))
@@ -853,10 +876,7 @@ mod tests {
         };
 
         let c = classify(
-            &ctx(
-                "curl",
-                &["https://metadata.google.internal/computeMetadata/v1"],
-            ),
+            &ctx("curl", &["https://blocked.example.com/resource"]),
             &config,
         );
         assert_eq!(c.bucket, Bucket::Block);
@@ -864,6 +884,28 @@ mod tests {
 
         let c = classify(&ctx("curl", &["https://api.blocked.example.com"]), &config);
         assert_eq!(c.bucket, Bucket::Block);
+    }
+
+    #[test]
+    fn test_cloud_metadata_endpoints_are_blocked_by_default_guardrail() {
+        let config = PolicyConfig {
+            allowed_domains: vec!["169.254.169.254".into(), "metadata.google.internal".into()],
+            always_allow: vec!["curl *".into()],
+            network_mode: PolicyNetworkMode::OpenWithGuardrails,
+            ..Default::default()
+        };
+
+        for url in [
+            "http://169.254.169.254/latest/meta-data/",
+            "http://169.254.170.2/v2/credentials",
+            "http://100.100.100.200/latest/meta-data/",
+            "http://metadata.google.internal/computeMetadata/v1",
+            "http://[fd00:ec2::254]/latest/meta-data/",
+        ] {
+            let c = classify(&ctx("curl", &[url]), &config);
+            assert_eq!(c.bucket, Bucket::Block, "{url} should be blocked");
+            assert!(c.reason.contains("metadata endpoint"));
+        }
     }
 
     #[test]
