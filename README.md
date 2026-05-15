@@ -199,6 +199,9 @@ agentbox run "openclaw start"
 # Run a low-risk command through the shipped direct-host runtime path
 agentbox run --provider direct-host --risk low --json -- echo ok
 
+# Bound command runtime in the AgentPod manifest and exec request
+agentbox run --provider direct-host --timeout-seconds 30 --json -- npm test
+
 # Run with review-required workspace output instead of writing into the repo
 agentbox run --provider direct-host --risk medium --workspace-mode overlay-review --json -- sh -c 'printf ok > result.txt'
 
