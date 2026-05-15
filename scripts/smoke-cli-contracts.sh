@@ -32,7 +32,7 @@ PY
 log "checking provider truth JSON"
 "${CLI[@]}" providers --json >"$TMPDIR/providers.json"
 validate_json "$TMPDIR/providers.json" \
-  "any(p.get('provider') == 'podman' for p in data) and any(p.get('provider') == 'remote-agentpod' and p.get('status') == 'experimental' for p in data) and any(p.get('provider') == 'agentpod-windows' and 'job-objects' in p.get('boundary_primitives', []) and 'wfp' in p.get('boundary_primitives', []) and 'windows-sandbox' in p.get('boundary_primitives', []) and 'hyper-v' in p.get('boundary_primitives', []) for p in data) and any(p.get('provider') == 'agentpod-linux' and 'user-namespaces' in p.get('boundary_primitives', []) and 'seccomp' in p.get('boundary_primitives', []) for p in data)"
+  "any(p.get('provider') == 'podman' and p.get('setup_command') and p.get('verification_command') for p in data) and any(p.get('provider') == 'remote-agentpod' and p.get('status') == 'experimental' and p.get('setup_command') for p in data) and any(p.get('provider') == 'agentpod-windows' and 'job-objects' in p.get('boundary_primitives', []) and 'wfp' in p.get('boundary_primitives', []) and 'windows-sandbox' in p.get('boundary_primitives', []) and 'hyper-v' in p.get('boundary_primitives', []) for p in data) and any(p.get('provider') == 'agentpod-linux' and 'user-namespaces' in p.get('boundary_primitives', []) and 'seccomp' in p.get('boundary_primitives', []) and p.get('verification_command') for p in data)"
 
 log "checking doctor JSON truth"
 set +e

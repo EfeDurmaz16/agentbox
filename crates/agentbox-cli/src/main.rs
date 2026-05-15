@@ -4578,6 +4578,9 @@ fn cmd_providers(json: bool) {
         "network": "command-mediation",
         "boundary_primitives": ["path-shim", "unix-socket", "sqlite-audit"],
         "capabilities": ["shim", "policy", "approval", "audit"],
+        "doctor_check": "daemon socket",
+        "setup_command": "agentbox setup-plan",
+        "verification_command": "agentbox doctor",
     })];
 
     let registry = RuntimeProviderRegistry::with_local_providers(
@@ -4601,6 +4604,9 @@ fn cmd_providers(json: bool) {
             "bridge": format_bridge_transports(provider.bridge_transport_kinds()),
             "network": format_network_enforcement(provider.network_enforcement_capabilities()),
             "boundary_primitives": provider.boundary_primitives(),
+            "doctor_check": provider_doctor_check(provider.name()),
+            "setup_command": provider_setup_command(provider.name()),
+            "verification_command": provider_verification_command(provider.name()),
             "capabilities": provider
                 .capabilities()
                 .iter()
@@ -4628,6 +4634,9 @@ fn cmd_providers(json: bool) {
         "network": "none",
         "boundary_primitives": ["podman-container", "guest-shim"],
         "capabilities": ["container isolation", "shim bridge"],
+        "doctor_check": "podman provider",
+        "setup_command": "install Podman; on macOS run `podman machine init && podman machine start`",
+        "verification_command": "agentbox run --provider podman -- <cmd>",
     }));
 
     if json {
@@ -4681,6 +4690,48 @@ fn cmd_providers(json: bool) {
         "{:<18} {:<14} {:<10} {:<18} {:<18} {:<24} container isolation, shim bridge",
         "podman", "compat", "linux-vm", podman_status, "unix-socket", "none"
     );
+}
+
+fn provider_doctor_check(provider: &str) -> Option<&'static str> {
+    match provider {
+        "direct-host" => Some("daemon socket"),
+        "agentpod-macos" => Some("macOS native plan"),
+        "agentpod-linux" => Some("Linux native plan"),
+        "agentpod-windows" => Some("Windows native plan"),
+        "remote-agentpod" => None,
+        "podman" => Some("podman provider"),
+        _ => None,
+    }
+}
+
+fn provider_setup_command(provider: &str) -> Option<&'static str> {
+    match provider {
+        "direct-host" => Some("agentbox setup-plan"),
+        "agentpod-macos" => Some("agentbox native-plan --provider agentpod-macos -- <cmd>"),
+        "agentpod-linux" => Some("agentbox native-plan --provider agentpod-linux -- <cmd>"),
+        "agentpod-windows" => Some("agentbox native-plan --provider agentpod-windows -- <cmd>"),
+        "remote-agentpod" => {
+            Some("export AGENTBOX_REMOTE_AGENTPOD_ENDPOINT=https://worker.example.com/agentpod")
+        }
+        "podman" => {
+            Some("install Podman; on macOS run `podman machine init && podman machine start`")
+        }
+        _ => None,
+    }
+}
+
+fn provider_verification_command(provider: &str) -> Option<&'static str> {
+    match provider {
+        "direct-host" => Some("agentbox doctor"),
+        "agentpod-macos" => Some("agentbox native-plan --provider agentpod-macos -- <cmd>"),
+        "agentpod-linux" => Some("agentbox native-plan --provider agentpod-linux -- <cmd>"),
+        "agentpod-windows" => Some("agentbox native-plan --provider agentpod-windows -- <cmd>"),
+        "remote-agentpod" => {
+            Some("agentbox remote-handshake --endpoint https://worker.example.com/agentpod")
+        }
+        "podman" => Some("agentbox run --provider podman -- <cmd>"),
+        _ => None,
+    }
 }
 
 fn cmd_remote_descriptor(endpoint: String, auth: String, evidence: String) {
