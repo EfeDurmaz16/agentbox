@@ -1525,6 +1525,11 @@ pub trait RemoteAgentPodTransport: Send + Sync {
         request: RemoteAgentPodDestroySessionRequest,
     ) -> Result<RemoteAgentPodDestroySessionResponse, RuntimeError>;
 
+    async fn restart_session(
+        &self,
+        request: RemoteAgentPodRestartSessionRequest,
+    ) -> Result<RemoteAgentPodRestartSessionResponse, RuntimeError>;
+
     async fn upload_evidence(
         &self,
         request: RemoteAgentPodEvidenceUploadRequest,
@@ -1686,6 +1691,31 @@ impl RemoteAgentPodTransport for HttpRemoteAgentPodTransport {
             .map_err(|err| {
                 RuntimeError::ManifestRejected(format!(
                     "remote destroy response was invalid JSON: {err}"
+                ))
+            })?;
+        response.validate_for(&request)?;
+        Ok(response)
+    }
+
+    async fn restart_session(
+        &self,
+        request: RemoteAgentPodRestartSessionRequest,
+    ) -> Result<RemoteAgentPodRestartSessionResponse, RuntimeError> {
+        request.validate()?;
+        let response = self
+            .client
+            .post(self.route(format!("sessions/{}/restart", request.worker_session_id)))
+            .json(&request)
+            .send()
+            .await
+            .map_err(|err| RuntimeError::Unavailable(format!("remote restart failed: {err}")))?
+            .error_for_status()
+            .map_err(|err| RuntimeError::Unavailable(format!("remote restart rejected: {err}")))?
+            .json::<RemoteAgentPodRestartSessionResponse>()
+            .await
+            .map_err(|err| {
+                RuntimeError::ManifestRejected(format!(
+                    "remote restart response was invalid JSON: {err}"
                 ))
             })?;
         response.validate_for(&request)?;
@@ -2795,6 +2825,25 @@ mod tests {
                 lifecycle_events: vec![
                     RemoteAgentPodLifecycleEvent::KillSwitchAck,
                     RemoteAgentPodLifecycleEvent::WorkerDestroyed,
+                ],
+            };
+            response.validate_for(&request)?;
+            Ok(response)
+        }
+
+        async fn restart_session(
+            &self,
+            request: RemoteAgentPodRestartSessionRequest,
+        ) -> Result<RemoteAgentPodRestartSessionResponse, RuntimeError> {
+            let response = RemoteAgentPodRestartSessionResponse {
+                session_id: request.session_id.clone(),
+                worker_session_id: request.worker_session_id.clone(),
+                status: RuntimeStatus::Running,
+                restart_attempt: 1,
+                lifecycle_events: vec![
+                    RemoteAgentPodLifecycleEvent::WorkerRestarted,
+                    RemoteAgentPodLifecycleEvent::SessionResumed,
+                    RemoteAgentPodLifecycleEvent::EvidenceSealed,
                 ],
             };
             response.validate_for(&request)?;

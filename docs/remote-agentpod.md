@@ -159,6 +159,20 @@ restart policy metadata, heartbeat timestamp, kill-switch state, evidence-sealed
 state, evidence metadata receipts, pending approvals, stream state, and stored
 bundle payload references.
 
+If the worker reports a stopped or failed session, the operator can explicitly
+resume the same worker session without replaying the prior command:
+
+```sh
+agentbox remote-restart \
+  --session agentbox-session-id \
+  --reason "operator reviewed stopped worker state"
+```
+
+Like evidence status, the command derives the worker endpoint and worker-side
+session id from the persisted local session when possible. It prints the
+validated restart response, including running status, restart attempt, and
+required lifecycle events.
+
 For append-only stream evidence, the CLI can upload a UTF-8 file as ordered
 chunks:
 
@@ -295,7 +309,8 @@ acknowledgements using the Ed25519 format described above and exposes the same
 `/handshake`, `/sessions`, `/sessions/{worker_session_id}/exec`,
 `/sessions/{worker_session_id}/evidence`,
 `/sessions/{worker_session_id}/evidence/bundle`,
-`/sessions/{worker_session_id}/evidence/stream`, and
+`/sessions/{worker_session_id}/evidence/stream`,
+`/sessions/{worker_session_id}/restart`, and
 `/sessions/{worker_session_id}/destroy` routes expected by the HTTPS adapter.
 When `--state-dir` is set, created sessions, stopped status, and evidence
 receipt metadata are written to `worker-sessions.json` and loaded again when the
@@ -311,7 +326,9 @@ restart without treating arbitrary command replay as safe.
 Stopped or failed sessions can be explicitly resumed with
 `POST /sessions/{worker_session_id}/restart`. This re-arms the worker kill
 channel and marks the session running again, but it does not replay the previous
-command. Operators must issue a new exec request after restart.
+command. Operators can invoke the same route through
+`agentbox remote-restart --session <id>` when local session metadata is
+available, then issue a new exec request after restart.
 Worker contract violations such as unknown worker sessions, mismatched session
 ids, unsupported credential grant kinds, unpreparable workspace paths,
 stopped-session exec, or invalid evidence metadata return HTTP error statuses

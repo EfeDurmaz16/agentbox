@@ -908,9 +908,12 @@ assert "KillSwitchAck" in destroyed["lifecycle_events"]
 assert "WorkerDestroyed" in destroyed["lifecycle_events"]
 PY
 
-curl -fsS "http://127.0.0.1:${PORT}/sessions/${LONG_WORKER_SESSION_ID}/restart" \
-  -H 'content-type: application/json' \
-  --data "{\"session_id\":\"${LONG_SESSION_ID}\",\"worker_session_id\":\"${LONG_WORKER_SESSION_ID}\",\"reason\":\"smoke explicit restart\"}" \
+AGENTBOX_REMOTE_AGENTPOD_ALLOW_HTTP_LOOPBACK=1 \
+"$ROOT/target/debug/agentbox-cli" remote-restart \
+  --endpoint "http://127.0.0.1:${PORT}" \
+  --session "$LONG_SESSION_ID" \
+  --worker-session "$LONG_WORKER_SESSION_ID" \
+  --reason "smoke explicit restart" \
   >"$TMPDIR/restart-response.json"
 
 curl -fsS "http://127.0.0.1:${PORT}/sessions/${LONG_WORKER_SESSION_ID}/exec" \

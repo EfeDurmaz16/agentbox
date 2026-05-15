@@ -531,6 +531,24 @@ enum Commands {
         #[arg(long = "worker-session")]
         worker_session_id: Option<String>,
     },
+    /// Restart a stopped or failed remote AgentPod worker session
+    RemoteRestart {
+        /// Remote worker endpoint, e.g. https://worker.example.com/agentpod; omitted values are read from the local session when possible
+        #[arg(long)]
+        endpoint: Option<String>,
+
+        /// Agentbox session id
+        #[arg(long = "session")]
+        session_id: String,
+
+        /// Worker-side session id; omitted values are read from the local session when possible
+        #[arg(long = "worker-session")]
+        worker_session_id: Option<String>,
+
+        /// Operator-visible restart reason
+        #[arg(long, default_value = "operator requested remote AgentPod restart")]
+        reason: String,
+    },
     /// Upload a verified evidence bundle directory to a remote AgentPod worker
     RemoteEvidenceUpload {
         /// Remote worker endpoint, e.g. https://worker.example.com/agentpod; omitted values are read from the local session when possible
@@ -6102,6 +6120,52 @@ async fn cmd_remote_evidence_status(
     );
 }
 
+async fn cmd_remote_restart(
+    endpoint: Option<String>,
+    session_id: String,
+    worker_session_id: Option<String>,
+    reason: String,
+) {
+    use agentbox_daemon::runtime::providers::remote::{
+        HttpRemoteAgentPodTransport, RemoteAgentPodRestartSessionRequest, RemoteAgentPodTransport,
+    };
+
+    let (endpoint, worker_session_id) =
+        resolve_remote_session_metadata(&session_id, endpoint, worker_session_id);
+    let transport = HttpRemoteAgentPodTransport::new(endpoint).unwrap_or_else(|e| {
+        eprintln!(
+            "error: failed to build remote AgentPod restart transport: {}",
+            e
+        );
+        std::process::exit(1);
+    });
+    let request = RemoteAgentPodRestartSessionRequest {
+        session_id,
+        worker_session_id,
+        reason,
+    };
+    request.validate().unwrap_or_else(|e| {
+        eprintln!(
+            "error: failed to build remote AgentPod restart request: {}",
+            e
+        );
+        std::process::exit(1);
+    });
+    let response = transport
+        .restart_session(request)
+        .await
+        .unwrap_or_else(|e| {
+            eprintln!("error: failed to restart remote AgentPod session: {}", e);
+            std::process::exit(1);
+        });
+
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&response)
+            .expect("failed to serialize remote AgentPod restart response")
+    );
+}
+
 fn resolve_remote_session_metadata(
     session_id: &str,
     endpoint: Option<String>,
@@ -7245,6 +7309,7 @@ fn remote_session_operator_commands(
     }
     vec![
         format!("agentbox remote-evidence-status --session {}", session.id),
+        format!("agentbox remote-restart --session {}", session.id),
         format!(
             "agentbox remote-workspace-export --session {} --output-dir ./agentbox-workspace-review",
             session.id
@@ -7500,6 +7565,12 @@ async fn main() {
             session_id,
             worker_session_id,
         } => cmd_remote_evidence_status(endpoint, session_id, worker_session_id).await,
+        Commands::RemoteRestart {
+            endpoint,
+            session_id,
+            worker_session_id,
+            reason,
+        } => cmd_remote_restart(endpoint, session_id, worker_session_id, reason).await,
         Commands::RemoteEvidenceUpload {
             endpoint,
             session_id,
@@ -8297,6 +8368,7 @@ mod tests {
             commands,
             vec![
                 format!("agentbox remote-evidence-status --session {session_id}"),
+                format!("agentbox remote-restart --session {session_id}"),
                 format!(
                     "agentbox remote-workspace-export --session {session_id} --output-dir ./agentbox-workspace-review"
                 ),
