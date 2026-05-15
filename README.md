@@ -199,6 +199,9 @@ agentbox run "openclaw start"
 # Run a low-risk command through the shipped direct-host runtime path
 agentbox run --provider direct-host --risk low --json -- echo ok
 
+# Run with review-required workspace output instead of writing into the repo
+agentbox run --provider direct-host --risk medium --workspace-mode overlay-review --json -- sh -c 'printf ok > result.txt'
+
 # Preview the AgentPod run plan without requiring a runnable backend
 agentbox run --plan --risk high --workspace-mode overlay-review "codex"
 # The preview includes provider selection, candidates, backend actions,

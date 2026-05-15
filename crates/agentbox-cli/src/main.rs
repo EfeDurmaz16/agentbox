@@ -2571,6 +2571,7 @@ struct RunJsonOutput {
     destroyed: bool,
     cleanup_error: Option<String>,
     cleanup_command: Option<String>,
+    review_commands: Vec<String>,
 }
 
 async fn cmd_run(options: RunOptions) {
@@ -3024,6 +3025,7 @@ async fn cmd_run(options: RunOptions) {
                             destroyed: cleanup_error.is_none(),
                             cleanup_error,
                             cleanup_command: Some(format!("agentbox stop-pod {}", session.id)),
+                            review_commands: review_commands_for_session(&session),
                         })
                         .expect("failed to serialize run JSON output")
                     );
@@ -3074,6 +3076,7 @@ async fn cmd_run(options: RunOptions) {
                     destroyed: false,
                     cleanup_error: None,
                     cleanup_command: Some(format!("agentbox stop-pod {}", session.id)),
+                    review_commands: review_commands_for_session(&session),
                 })
                 .expect("failed to serialize run JSON output")
             );
@@ -7037,6 +7040,24 @@ fn review_action_plan(session_id: &str) -> ReviewActionPlan {
     }
 }
 
+fn review_commands_for_session(
+    session: &agentbox_daemon::runtime::types::RuntimeSession,
+) -> Vec<String> {
+    if !session
+        .spec
+        .labels
+        .contains_key("agentbox.workspace.projected")
+    {
+        return Vec::new();
+    }
+    review_action_plan(&session.id)
+        .actions
+        .into_iter()
+        .filter(|action| action.id != "quit")
+        .map(|action| action.command)
+        .collect()
+}
+
 fn cmd_review_discard(session_id: String) {
     let (manager, _session) = runtime_manager_for_session(&session_id, "discard");
     let discard = manager
@@ -7830,6 +7851,32 @@ mod tests {
         assert!(!normalize_cli_path(&overlay_base)
             .starts_with(normalize_cli_path(&spec.filesystem.workspace_host_path)));
         assert!(overlay_base.starts_with(std::env::temp_dir()));
+    }
+
+    #[test]
+    fn review_commands_are_reported_for_projected_workspace_sessions() {
+        let mut session = RuntimeSession::new(
+            "codex".into(),
+            "direct-host".into(),
+            std::env::consts::OS.to_string(),
+            MinipodSpec::for_agent_task("codex", "/tmp/agentbox-work"),
+        );
+        assert!(review_commands_for_session(&session).is_empty());
+
+        session.spec.labels.insert(
+            "agentbox.workspace.projected".into(),
+            "/tmp/projected".into(),
+        );
+
+        let commands = review_commands_for_session(&session);
+
+        assert!(commands
+            .iter()
+            .any(|command| command == &format!("agentbox review {} --patch", session.id)));
+        assert!(commands
+            .iter()
+            .any(|command| command == &format!("agentbox review-discard {}", session.id)));
+        assert!(!commands.iter().any(|command| command == "no mutation"));
     }
 
     #[test]

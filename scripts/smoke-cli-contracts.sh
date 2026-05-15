@@ -125,6 +125,26 @@ validate_json "$TMPDIR/run-plan-low.json" \
 "${CLI[@]}" run --provider direct-host --risk low --json -- echo agentbox-contract >"$TMPDIR/run-direct-host.json"
 validate_json "$TMPDIR/run-direct-host.json" \
   "data.get('schema_version') == 1 and data.get('session', {}).get('provider') == 'direct-host' and data.get('command_result', {}).get('stdout') == 'agentbox-contract\n' and data.get('destroyed') == True"
+DIRECT_OVERLAY_WORKSPACE="$TMPDIR/direct-host-overlay-workspace"
+mkdir -p "$DIRECT_OVERLAY_WORKSPACE"
+printf 'lower\n' >"$DIRECT_OVERLAY_WORKSPACE/README.md"
+(
+  cd "$DIRECT_OVERLAY_WORKSPACE"
+  cargo run --locked --manifest-path "$ROOT/Cargo.toml" -q -p agentbox-cli -- run --provider direct-host --risk medium --workspace-mode overlay-review --json -- sh -c 'printf overlay > created.txt' >"$TMPDIR/run-direct-host-overlay.json"
+)
+validate_json "$TMPDIR/run-direct-host-overlay.json" \
+  "data.get('schema_version') == 1 and data.get('session', {}).get('provider') == 'direct-host' and data.get('session', {}).get('spec', {}).get('workspace_mode') == 'OverlayReview' and data.get('command_result', {}).get('exit_code') == 0 and data.get('destroyed') == True and any('review-discard' in command for command in data.get('review_commands', []))"
+test ! -e "$DIRECT_OVERLAY_WORKSPACE/created.txt"
+DIRECT_OVERLAY_SESSION="$(python3 - "$TMPDIR/run-direct-host-overlay.json" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], "r", encoding="utf-8") as fh:
+    print(json.load(fh)["session"]["id"])
+PY
+)"
+"${CLI[@]}" review-discard "$DIRECT_OVERLAY_SESSION" >"$TMPDIR/direct-host-overlay-discard.txt"
+grep -F "Discarded projected workspace output." "$TMPDIR/direct-host-overlay-discard.txt" >/dev/null
 
 log "checking workspace review mode manifests"
 "${CLI[@]}" minipod-spec codex \
