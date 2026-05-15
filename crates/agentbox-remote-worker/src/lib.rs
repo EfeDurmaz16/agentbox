@@ -13,8 +13,9 @@ use agentbox_daemon::runtime::providers::remote::{
     RemoteAgentPodEvidenceStreamStatus, RemoteAgentPodEvidenceUploadRequest,
     RemoteAgentPodEvidenceUploadResponse, RemoteAgentPodExecRequest, RemoteAgentPodExecResponse,
     RemoteAgentPodHandshakeAck, RemoteAgentPodHandshakeDescriptor, RemoteAgentPodLifecycleEvent,
-    RemoteAgentPodPendingApprovalStatus, RemoteAgentPodWorkspaceBundle,
-    RemoteAgentPodWorkspaceExportResponse, RemoteAgentPodWorkspaceFile,
+    RemoteAgentPodPendingApprovalStatus, RemoteAgentPodRestartPolicy,
+    RemoteAgentPodWorkspaceBundle, RemoteAgentPodWorkspaceExportResponse,
+    RemoteAgentPodWorkspaceFile,
 };
 use agentbox_daemon::runtime::types::{
     ApprovalGrant, ApprovalScope, CommandResult, CredentialGrant, CredentialGrantKind,
@@ -85,10 +86,37 @@ struct WorkerSession {
     active_command_count: u64,
     last_command_exit_code: Option<i32>,
     last_command_finished_at: Option<DateTime<Utc>>,
+    restart_policy: RemoteAgentPodRestartPolicy,
+    heartbeat_interval_seconds: u64,
+    last_heartbeat_at: DateTime<Utc>,
     evidence_receipts: Vec<WorkerEvidenceReceipt>,
     stored_evidence_bundles: Vec<WorkerStoredEvidenceBundle>,
     evidence_streams: HashMap<String, WorkerEvidenceStream>,
     pending_approvals: Vec<WorkerPendingApproval>,
+}
+
+#[derive(Clone)]
+struct WorkerLifecycleConfig {
+    restart_policy: RemoteAgentPodRestartPolicy,
+    heartbeat_interval_seconds: u64,
+}
+
+impl WorkerLifecycleConfig {
+    fn from_request(request: &RemoteAgentPodCreateSessionRequest) -> Self {
+        Self {
+            restart_policy: request.transport.lifecycle.restart_policy.clone(),
+            heartbeat_interval_seconds: request.transport.lifecycle.heartbeat_interval_seconds,
+        }
+    }
+}
+
+impl Default for WorkerLifecycleConfig {
+    fn default() -> Self {
+        Self {
+            restart_policy: RemoteAgentPodRestartPolicy::default(),
+            heartbeat_interval_seconds: default_worker_heartbeat_interval_seconds(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -189,6 +217,12 @@ struct WorkerSessionSnapshot {
     last_command_exit_code: Option<i32>,
     #[serde(default)]
     last_command_finished_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    restart_policy: RemoteAgentPodRestartPolicy,
+    #[serde(default = "default_worker_heartbeat_interval_seconds")]
+    heartbeat_interval_seconds: u64,
+    #[serde(default)]
+    last_heartbeat_at: Option<DateTime<Utc>>,
     evidence_receipts: Vec<WorkerEvidenceReceiptSnapshot>,
     #[serde(default)]
     stored_evidence_bundles: Vec<WorkerStoredEvidenceBundleSnapshot>,
@@ -318,6 +352,11 @@ struct WorkerEvidenceStatusResponse {
     active_command_count: u64,
     last_command_exit_code: Option<i32>,
     last_command_finished_at: Option<DateTime<Utc>>,
+    restart_policy: RemoteAgentPodRestartPolicy,
+    heartbeat_interval_seconds: u64,
+    last_heartbeat_at: Option<DateTime<Utc>>,
+    kill_switch_armed: bool,
+    evidence_sealed: bool,
     evidence_receipts: Vec<WorkerEvidenceReceiptSnapshot>,
     stored_evidence_bundles: Vec<WorkerStoredEvidenceBundleSnapshot>,
     evidence_streams: Vec<RemoteAgentPodEvidenceStreamStatus>,
@@ -423,6 +462,7 @@ impl WorkerSession {
             env_credentials,
             Vec::new(),
             approval_grants,
+            WorkerLifecycleConfig::default(),
         )
     }
 
@@ -433,6 +473,7 @@ impl WorkerSession {
         env_credentials: Vec<WorkerEnvCredentialGrant>,
         file_credentials: Vec<WorkerFileCredentialGrant>,
         approval_grants: Vec<ApprovalGrant>,
+        lifecycle: WorkerLifecycleConfig,
     ) -> Self {
         let (kill_tx, _kill_rx) = watch::channel(false);
         Self {
@@ -449,6 +490,9 @@ impl WorkerSession {
             active_command_count: 0,
             last_command_exit_code: None,
             last_command_finished_at: None,
+            restart_policy: lifecycle.restart_policy,
+            heartbeat_interval_seconds: lifecycle.heartbeat_interval_seconds,
+            last_heartbeat_at: Utc::now(),
             evidence_receipts: Vec::new(),
             stored_evidence_bundles: Vec::new(),
             evidence_streams: HashMap::new(),
@@ -492,6 +536,9 @@ impl WorkerSession {
             active_command_count: 0,
             last_command_exit_code: snapshot.last_command_exit_code,
             last_command_finished_at: snapshot.last_command_finished_at,
+            restart_policy: snapshot.restart_policy,
+            heartbeat_interval_seconds: snapshot.heartbeat_interval_seconds,
+            last_heartbeat_at: snapshot.last_heartbeat_at.unwrap_or_else(Utc::now),
             evidence_receipts: snapshot
                 .evidence_receipts
                 .into_iter()
@@ -572,6 +619,9 @@ impl WorkerSession {
             active_command_count: self.active_command_count,
             last_command_exit_code: self.last_command_exit_code,
             last_command_finished_at: self.last_command_finished_at,
+            restart_policy: self.restart_policy.clone(),
+            heartbeat_interval_seconds: self.heartbeat_interval_seconds,
+            last_heartbeat_at: Some(self.last_heartbeat_at),
             evidence_receipts: self
                 .evidence_receipts
                 .iter()
@@ -624,6 +674,10 @@ impl WorkerSession {
 
 fn default_worker_workspace() -> PathBuf {
     PathBuf::from(".")
+}
+
+fn default_worker_heartbeat_interval_seconds() -> u64 {
+    30
 }
 
 pub fn router(config: RemoteWorkerConfig) -> Router {
@@ -723,6 +777,7 @@ async fn create_session(
         worker_env_credentials(&request.spec.credentials.grants),
         file_credentials,
         worker_approval_grants(&request.spec.id, &request.spec.approvals),
+        WorkerLifecycleConfig::from_request(&request),
     );
     state
         .sessions
@@ -1676,6 +1731,16 @@ async fn evidence_status(
         active_command_count: session.active_command_count,
         last_command_exit_code: session.last_command_exit_code,
         last_command_finished_at: session.last_command_finished_at,
+        restart_policy: session.restart_policy.clone(),
+        heartbeat_interval_seconds: session.heartbeat_interval_seconds,
+        last_heartbeat_at: Some(session.last_heartbeat_at),
+        kill_switch_armed: matches!(session.status, RuntimeStatus::Running),
+        evidence_sealed: session
+            .evidence_streams
+            .values()
+            .any(|stream| stream.sealed)
+            || !session.evidence_receipts.is_empty()
+            || !session.stored_evidence_bundles.is_empty(),
         evidence_receipts: session
             .evidence_receipts
             .iter()
@@ -3098,6 +3163,7 @@ mod tests {
                     one_time: true,
                 }],
                 Vec::new(),
+                WorkerLifecycleConfig::default(),
             ),
         );
         let request = RemoteAgentPodExecRequest {
@@ -4139,6 +4205,14 @@ mod tests {
         assert_eq!(response.active_command_count, 1);
         assert_eq!(response.last_command_exit_code, Some(0));
         assert_eq!(response.last_command_finished_at, Some(sealed_at));
+        assert_eq!(
+            response.restart_policy,
+            RemoteAgentPodRestartPolicy::default()
+        );
+        assert_eq!(response.heartbeat_interval_seconds, 30);
+        assert!(response.last_heartbeat_at.is_some());
+        assert!(response.kill_switch_armed);
+        assert!(response.evidence_sealed);
         assert_eq!(response.evidence_receipts.len(), 1);
         assert_eq!(response.evidence_receipts[0].event_count, 3);
         assert_eq!(

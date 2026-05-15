@@ -168,6 +168,12 @@ json.dump({
             "command_timeout_seconds": 3600,
             "idle_timeout_seconds": 300,
             "destroy_timeout_seconds": 60,
+            "heartbeat_interval_seconds": 30,
+            "restart_policy": {
+                "strategy": "OnFailure",
+                "max_attempts": 2,
+                "backoff_ms": 1000,
+            },
             "required_events": [
                 "WorkerAllocated",
                 "SessionCreated",
@@ -274,6 +280,12 @@ json.dump({
             "command_timeout_seconds": 3600,
             "idle_timeout_seconds": 300,
             "destroy_timeout_seconds": 60,
+            "heartbeat_interval_seconds": 30,
+            "restart_policy": {
+                "strategy": "OnFailure",
+                "max_attempts": 2,
+                "backoff_ms": 1000,
+            },
             "required_events": [
                 "WorkerAllocated",
                 "SessionCreated",
@@ -349,6 +361,12 @@ json.dump({
             "command_timeout_seconds": 3600,
             "idle_timeout_seconds": 300,
             "destroy_timeout_seconds": 60,
+            "heartbeat_interval_seconds": 30,
+            "restart_policy": {
+                "strategy": "OnFailure",
+                "max_attempts": 2,
+                "backoff_ms": 1000,
+            },
             "required_events": [
                 "WorkerAllocated",
                 "SessionCreated",
@@ -678,6 +696,12 @@ assert data["commands_finished"] >= 1
 assert data["active_command_count"] == 0
 assert data["last_command_exit_code"] == 0
 assert data["last_command_finished_at"]
+assert data["restart_policy"]["strategy"] == "OnFailure"
+assert data["restart_policy"]["max_attempts"] == 2
+assert data["heartbeat_interval_seconds"] == 30
+assert data["last_heartbeat_at"]
+assert data["kill_switch_armed"] is True
+assert data["evidence_sealed"] is True
 assert data["evidence_receipts"][0]["bundle_sha256"] == "f" * 64
 assert data["evidence_receipts"][0]["event_count"] == 2
 assert data["stored_evidence_bundles"][0]["bundle_sha256"] == expected_bundle_hash
@@ -791,6 +815,12 @@ json.dump({
             "command_timeout_seconds": 3600,
             "idle_timeout_seconds": 300,
             "destroy_timeout_seconds": 60,
+            "heartbeat_interval_seconds": 30,
+            "restart_policy": {
+                "strategy": "OnFailure",
+                "max_attempts": 2,
+                "backoff_ms": 1000,
+            },
             "required_events": [
                 "WorkerAllocated",
                 "SessionCreated",

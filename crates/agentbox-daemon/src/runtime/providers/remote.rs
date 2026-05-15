@@ -388,12 +388,59 @@ pub enum RemoteAgentPodLifecycleEvent {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RemoteAgentPodRestartStrategy {
+    Never,
+    OnFailure,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteAgentPodRestartPolicy {
+    pub strategy: RemoteAgentPodRestartStrategy,
+    pub max_attempts: u32,
+    pub backoff_ms: u64,
+}
+
+impl Default for RemoteAgentPodRestartPolicy {
+    fn default() -> Self {
+        Self {
+            strategy: RemoteAgentPodRestartStrategy::OnFailure,
+            max_attempts: 2,
+            backoff_ms: 1_000,
+        }
+    }
+}
+
+impl RemoteAgentPodRestartPolicy {
+    pub fn validate(&self) -> Result<(), RuntimeError> {
+        match self.strategy {
+            RemoteAgentPodRestartStrategy::Never => {
+                if self.max_attempts != 0 {
+                    return Err(RuntimeError::ManifestRejected(
+                        "remote restart policy cannot set attempts when strategy is never".into(),
+                    ));
+                }
+            }
+            RemoteAgentPodRestartStrategy::OnFailure => {
+                if self.max_attempts == 0 || self.backoff_ms == 0 {
+                    return Err(RuntimeError::ManifestRejected(
+                        "remote restart policy on-failure requires attempts and backoff".into(),
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RemoteAgentPodLifecycleDescriptor {
     pub schema_version: i64,
     pub create_timeout_seconds: u64,
     pub command_timeout_seconds: u64,
     pub idle_timeout_seconds: u64,
     pub destroy_timeout_seconds: u64,
+    pub heartbeat_interval_seconds: u64,
+    pub restart_policy: RemoteAgentPodRestartPolicy,
     pub required_events: Vec<RemoteAgentPodLifecycleEvent>,
     pub kill_switch_required: bool,
 }
@@ -406,6 +453,8 @@ impl Default for RemoteAgentPodLifecycleDescriptor {
             command_timeout_seconds: 3600,
             idle_timeout_seconds: 300,
             destroy_timeout_seconds: 60,
+            heartbeat_interval_seconds: 30,
+            restart_policy: RemoteAgentPodRestartPolicy::default(),
             required_events: vec![
                 RemoteAgentPodLifecycleEvent::WorkerAllocated,
                 RemoteAgentPodLifecycleEvent::SessionCreated,
@@ -431,11 +480,13 @@ impl RemoteAgentPodLifecycleDescriptor {
             || self.command_timeout_seconds == 0
             || self.idle_timeout_seconds == 0
             || self.destroy_timeout_seconds == 0
+            || self.heartbeat_interval_seconds == 0
         {
             return Err(RuntimeError::ManifestRejected(
                 "remote lifecycle timeouts must be greater than zero".into(),
             ));
         }
+        self.restart_policy.validate()?;
         if !self
             .required_events
             .contains(&RemoteAgentPodLifecycleEvent::EvidenceSealed)
@@ -945,6 +996,16 @@ pub struct RemoteAgentPodEvidenceStatusResponse {
     pub last_command_exit_code: Option<i32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_command_finished_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub restart_policy: RemoteAgentPodRestartPolicy,
+    #[serde(default)]
+    pub heartbeat_interval_seconds: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_heartbeat_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub kill_switch_armed: bool,
+    #[serde(default)]
+    pub evidence_sealed: bool,
     pub evidence_receipts: Vec<RemoteAgentPodEvidenceReceiptStatus>,
     pub stored_evidence_bundles: Vec<RemoteAgentPodStoredEvidenceBundleStatus>,
     #[serde(default)]
@@ -979,6 +1040,12 @@ impl RemoteAgentPodEvidenceStatusResponse {
                 "remote evidence status active command count exceeds unfinished commands".into(),
             ));
         }
+        if self.heartbeat_interval_seconds == 0 {
+            return Err(RuntimeError::ManifestRejected(
+                "remote evidence status heartbeat interval must be greater than zero".into(),
+            ));
+        }
+        self.restart_policy.validate()?;
         for receipt in &self.evidence_receipts {
             validate_sha256_hex(
                 &receipt.bundle_sha256,
@@ -2714,6 +2781,11 @@ mod tests {
                 active_command_count: 0,
                 last_command_exit_code: Some(0),
                 last_command_finished_at: Some(Utc::now()),
+                restart_policy: RemoteAgentPodRestartPolicy::default(),
+                heartbeat_interval_seconds: 30,
+                last_heartbeat_at: Some(Utc::now()),
+                kill_switch_armed: true,
+                evidence_sealed: true,
                 evidence_receipts: vec![RemoteAgentPodEvidenceReceiptStatus {
                     bundle_sha256: "e".repeat(64),
                     derived_from_bundle: false,
@@ -3704,6 +3776,11 @@ mod tests {
             active_command_count: 0,
             last_command_exit_code: Some(0),
             last_command_finished_at: Some(Utc::now()),
+            restart_policy: RemoteAgentPodRestartPolicy::default(),
+            heartbeat_interval_seconds: 30,
+            last_heartbeat_at: Some(Utc::now()),
+            kill_switch_armed: true,
+            evidence_sealed: true,
             evidence_receipts: vec![RemoteAgentPodEvidenceReceiptStatus {
                 bundle_sha256: "a".repeat(64),
                 derived_from_bundle: true,
@@ -3744,6 +3821,13 @@ mod tests {
         };
 
         response.validate_for(&request).unwrap();
+        assert_eq!(
+            response.restart_policy.strategy,
+            RemoteAgentPodRestartStrategy::OnFailure
+        );
+        assert_eq!(response.heartbeat_interval_seconds, 30);
+        assert!(response.kill_switch_armed);
+        assert!(response.evidence_sealed);
     }
 
     #[test]
@@ -3761,6 +3845,11 @@ mod tests {
             active_command_count: 0,
             last_command_exit_code: None,
             last_command_finished_at: None,
+            restart_policy: RemoteAgentPodRestartPolicy::default(),
+            heartbeat_interval_seconds: 30,
+            last_heartbeat_at: Some(Utc::now()),
+            kill_switch_armed: true,
+            evidence_sealed: false,
             evidence_receipts: Vec::new(),
             stored_evidence_bundles: vec![RemoteAgentPodStoredEvidenceBundleStatus {
                 bundle_sha256: "a".repeat(64),
@@ -3904,6 +3993,30 @@ mod tests {
         let err = descriptor.validate().unwrap_err();
 
         assert!(err.to_string().contains("kill-switch acknowledgement"));
+    }
+
+    #[test]
+    fn remote_lifecycle_descriptor_carries_restart_and_heartbeat_contract() {
+        let descriptor = RemoteAgentPodLifecycleDescriptor::default();
+
+        descriptor.validate().unwrap();
+        assert_eq!(descriptor.heartbeat_interval_seconds, 30);
+        assert_eq!(
+            descriptor.restart_policy.strategy,
+            RemoteAgentPodRestartStrategy::OnFailure
+        );
+        assert_eq!(descriptor.restart_policy.max_attempts, 2);
+        assert_eq!(descriptor.restart_policy.backoff_ms, 1_000);
+
+        let invalid = RemoteAgentPodLifecycleDescriptor {
+            heartbeat_interval_seconds: 0,
+            ..RemoteAgentPodLifecycleDescriptor::default()
+        };
+        assert!(invalid
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("timeouts"));
     }
 
     #[test]

@@ -34,6 +34,7 @@ The descriptor records:
 - the evidence delivery mode
 - whether a kill switch is required
 - lifecycle timeouts and required worker/session events
+- heartbeat interval and restart policy metadata
 - whether secret material is embedded
 
 Agentbox rejects remote endpoints that are empty, use insecure `http://`, or
@@ -154,8 +155,9 @@ agentbox remote-evidence-status \
 ```
 
 The command prints the validated worker response, including session status,
-evidence metadata receipts, pending approvals, stream state, and stored bundle
-payload references.
+restart policy metadata, heartbeat timestamp, kill-switch state, evidence-sealed
+state, evidence metadata receipts, pending approvals, stream state, and stored
+bundle payload references.
 
 For append-only stream evidence, the CLI can upload a UTF-8 file as ordered
 chunks:
@@ -236,6 +238,8 @@ HTTPS adapter for the gated worker path. A conforming worker must:
   material
 - accept ordered evidence stream chunks only when chunk hashes, offsets, and
   session ids match
+- expose heartbeat, restart policy, kill-switch, and evidence-sealed state in
+  the evidence status response
 - emit `KillSwitchAck` and `WorkerDestroyed` for session destruction when the
   kill switch is required
 
