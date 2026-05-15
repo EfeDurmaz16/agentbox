@@ -58,3 +58,4 @@ jobs:
           bash -n scripts/smoke-cli-contracts.sh
           bash -n scripts/smoke-remote-worker.sh
           bash -n scripts/smoke-macos-minipod.sh
+          bash -n scripts/release-readiness.sh

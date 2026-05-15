@@ -25,13 +25,27 @@ Run these before every release candidate:
 cargo fmt --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
-cargo run -p agentbox-cli -- doctor
-cargo run -p agentbox-cli -- providers
+cargo build --release
+cargo run -p agentbox-cli -- doctor --json
+cargo run -p agentbox-cli -- providers --json
 cargo run -p agentbox-cli -- evidence --verify
 ```
 
 `doctor` and `evidence --verify` may require local state. If they cannot run in
 CI, run them manually and record the reason.
+
+The consolidated release gate is:
+
+```sh
+scripts/release-readiness.sh
+```
+
+It writes `doctor.json`, `providers.json`, logs, and `manifest.json` under
+`target/agentbox-release-readiness` by default. If local doctor checks are
+expected to fail on a candidate host, set
+`AGENTBOX_RELEASE_ALLOW_DOCTOR_FAILURE=1` and treat the generated `doctor.json`
+as an explicit release blocker rather than a pass. Optional platform/live smoke
+scripts run only with `AGENTBOX_RELEASE_LIVE_SMOKE=1`.
 
 ## Install And CLI
 

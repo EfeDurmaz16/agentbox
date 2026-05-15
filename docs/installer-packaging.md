@@ -135,18 +135,16 @@ platform components. They are not required for local source builds.
 At minimum, run this on the packaging host:
 
 ```sh
-cargo fmt --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
-cargo build --release
-cargo run -p agentbox-cli -- doctor
-cargo run -p agentbox-cli -- providers
-scripts/demo-autonomous-agent.sh
+scripts/release-readiness.sh
 ```
 
 If `doctor` fails because local state is missing, fix the installer or record
 the failure as a release blocker. Do not convert missing daemon, PATH, shim,
 Podman, audit, or native-provider readiness into a fake pass.
+
+The script emits machine-readable `doctor.json` and `providers.json` artifacts
+under `target/agentbox-release-readiness` by default. Packaging jobs may set
+`AGENTBOX_RELEASE_ARTIFACT_DIR` to persist those files with installer logs.
 
 ## Do Not Ship Rule
 
