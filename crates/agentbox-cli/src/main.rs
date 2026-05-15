@@ -6639,10 +6639,12 @@ fn build_native_plan_json(
     spec.risk = parse_agentpod_risk(&risk);
     spec.labels
         .insert("agentbox.provider".into(), provider.to_string());
+    let workspace_mode_risk = spec.risk.clone();
+    apply_workspace_mode(&mut spec, &workspace_mode_risk, None, None);
 
     let exec = ExecCommand {
         argv: command,
-        working_dir: Some(workspace.display().to_string()),
+        working_dir: Some(spec.filesystem.workspace_guest_path.clone()),
         env: HashMap::new(),
         timeout_seconds: None,
     };
@@ -7732,6 +7734,7 @@ mod tests {
             assert_eq!(plan["schema_version"], 1);
             assert_eq!(plan["provider"], provider);
             assert_eq!(plan["command_argv"][0], "echo");
+            assert_eq!(plan["command_argv"], serde_json::json!(["echo", "demo"]));
             assert!(plan[required_field].is_object());
             assert!(plan["live_execution_enabled"].is_boolean());
             assert!(
@@ -7742,6 +7745,18 @@ mod tests {
                 "{}",
                 plan["security_claim"]
             );
+            if provider == "agentpod-linux" {
+                assert_eq!(
+                    plan["mount_namespace"]["overlayfs"]["requires_overlayfs"],
+                    true
+                );
+            }
+            if provider == "agentpod-macos" {
+                assert_eq!(
+                    plan["virtualization"]["cell_config"]["workspace_mount"]["review_required"],
+                    true
+                );
+            }
         }
     }
 

@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use crate::runtime::provider::RuntimeError;
 use crate::runtime::types::{
     CommandResult, ExecCommand, MinipodSpec, MountMode, NetworkMode, ResourcePolicy, SeccompAction,
-    SeccompProfile,
+    SeccompProfile, WorkspaceOverlayMode,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -80,9 +80,21 @@ pub struct LinuxMountNamespacePlan {
     pub schema_version: i64,
     pub workspace_host_path: String,
     pub workspace_guest_path: String,
+    pub overlayfs: Option<LinuxOverlayFsWorkspacePlan>,
     pub read_only_mounts: Vec<LinuxMountNamespaceMount>,
     pub propagation: String,
     pub requires_linux: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LinuxOverlayFsWorkspacePlan {
+    pub lower_host_path: String,
+    pub upper_host_path: String,
+    pub work_host_path: String,
+    pub merged_guest_path: String,
+    pub mode: WorkspaceOverlayMode,
+    pub review_required: bool,
+    pub requires_overlayfs: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -105,10 +117,29 @@ impl LinuxMountNamespacePlan {
             })
             .collect();
 
+        let overlayfs = spec
+            .filesystem
+            .workspace_overlay
+            .is_enabled()
+            .then(|| {
+                let overlay = &spec.filesystem.workspace_overlay;
+                Some(LinuxOverlayFsWorkspacePlan {
+                    lower_host_path: spec.filesystem.workspace_host_path.display().to_string(),
+                    upper_host_path: overlay.upper_host_path.as_ref()?.display().to_string(),
+                    work_host_path: overlay.work_host_path.as_ref()?.display().to_string(),
+                    merged_guest_path: overlay.guest_path.clone(),
+                    mode: overlay.mode.clone(),
+                    review_required: matches!(overlay.mode, WorkspaceOverlayMode::ReviewRequired),
+                    requires_overlayfs: true,
+                })
+            })
+            .flatten();
+
         Self {
             schema_version: 1,
             workspace_host_path: spec.filesystem.workspace_host_path.display().to_string(),
             workspace_guest_path: spec.filesystem.workspace_guest_path.clone(),
+            overlayfs,
             read_only_mounts,
             propagation: "private".to_string(),
             requires_linux: true,
@@ -1159,6 +1190,26 @@ mod tests {
         assert_eq!(plan.read_only_mounts.len(), 1);
         assert_eq!(plan.read_only_mounts[0].guest_path, "/fixtures");
         assert!(plan.read_only_mounts[0].read_only);
+    }
+
+    #[test]
+    fn mount_namespace_plan_carries_overlayfs_workspace_metadata() {
+        let mut spec = MinipodSpec::for_agent_task("hermes", "/tmp/agentbox-work");
+        spec.filesystem.workspace_overlay =
+            crate::runtime::types::WorkspaceOverlayPolicy::review_required(Some(PathBuf::from(
+                "/tmp/agentbox-overlay",
+            )));
+
+        let plan = LinuxMountNamespaceLauncher::plan(&spec).unwrap();
+        let overlayfs = plan.overlayfs.expect("overlayfs plan should be present");
+
+        assert_eq!(overlayfs.lower_host_path, "/tmp/agentbox-work");
+        assert_eq!(overlayfs.upper_host_path, "/tmp/agentbox-overlay/upper");
+        assert_eq!(overlayfs.work_host_path, "/tmp/agentbox-overlay/work");
+        assert_eq!(overlayfs.merged_guest_path, "/workspace");
+        assert_eq!(overlayfs.mode, WorkspaceOverlayMode::ReviewRequired);
+        assert!(overlayfs.review_required);
+        assert!(overlayfs.requires_overlayfs);
     }
 
     #[test]
