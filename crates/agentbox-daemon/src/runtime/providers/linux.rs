@@ -528,6 +528,7 @@ pub struct LinuxLandlockPlan {
     pub schema_version: i64,
     pub ruleset_name: String,
     pub rules: Vec<LinuxLandlockRule>,
+    pub handled_access_mask: u64,
     pub default_deny: bool,
     pub requires_loader: bool,
     pub requires_linux: bool,
@@ -538,6 +539,7 @@ pub struct LinuxLandlockRule {
     pub path: String,
     pub access: Vec<LinuxLandlockAccess>,
     pub reason: String,
+    pub access_mask: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -549,6 +551,38 @@ pub enum LinuxLandlockAccess {
     RemoveFile,
     RemoveDir,
     Execute,
+}
+
+const LANDLOCK_ACCESS_FS_EXECUTE: u64 = 1 << 0;
+const LANDLOCK_ACCESS_FS_WRITE_FILE: u64 = 1 << 1;
+const LANDLOCK_ACCESS_FS_READ_FILE: u64 = 1 << 2;
+const LANDLOCK_ACCESS_FS_READ_DIR: u64 = 1 << 3;
+const LANDLOCK_ACCESS_FS_REMOVE_DIR: u64 = 1 << 4;
+const LANDLOCK_ACCESS_FS_REMOVE_FILE: u64 = 1 << 5;
+const LANDLOCK_ACCESS_FS_MAKE_DIR: u64 = 1 << 7;
+const LANDLOCK_ACCESS_FS_MAKE_REG: u64 = 1 << 8;
+
+const LANDLOCK_ABI_V1_FS_ACCESS_MASK: u64 = LANDLOCK_ACCESS_FS_EXECUTE
+    | LANDLOCK_ACCESS_FS_WRITE_FILE
+    | LANDLOCK_ACCESS_FS_READ_FILE
+    | LANDLOCK_ACCESS_FS_READ_DIR
+    | LANDLOCK_ACCESS_FS_REMOVE_DIR
+    | LANDLOCK_ACCESS_FS_REMOVE_FILE
+    | LANDLOCK_ACCESS_FS_MAKE_DIR
+    | LANDLOCK_ACCESS_FS_MAKE_REG;
+
+impl LinuxLandlockAccess {
+    fn access_mask(&self) -> u64 {
+        match self {
+            Self::Execute => LANDLOCK_ACCESS_FS_EXECUTE,
+            Self::WriteFile => LANDLOCK_ACCESS_FS_WRITE_FILE | LANDLOCK_ACCESS_FS_MAKE_REG,
+            Self::ReadFile => LANDLOCK_ACCESS_FS_READ_FILE,
+            Self::ReadDir => LANDLOCK_ACCESS_FS_READ_DIR,
+            Self::RemoveDir => LANDLOCK_ACCESS_FS_REMOVE_DIR,
+            Self::RemoveFile => LANDLOCK_ACCESS_FS_REMOVE_FILE,
+            Self::MakeDir => LANDLOCK_ACCESS_FS_MAKE_DIR,
+        }
+    }
 }
 
 pub struct LinuxLandlockRuleset;
@@ -573,7 +607,11 @@ impl LinuxLandlockRuleset {
                 LinuxLandlockAccess::Execute,
             ],
             reason: "task workspace is the writable execution boundary".into(),
+            access_mask: 0,
         }];
+        if let Some(rule) = rules.first_mut() {
+            rule.access_mask = landlock_access_mask(&rule.access);
+        }
 
         for mount in &spec.filesystem.mounts {
             let mut access = vec![
@@ -591,6 +629,7 @@ impl LinuxLandlockRuleset {
             }
             rules.push(LinuxLandlockRule {
                 path: mount.host_path.display().to_string(),
+                access_mask: landlock_access_mask(&access),
                 access,
                 reason: format!("explicit {:?} mount", mount.kind),
             });
@@ -599,6 +638,7 @@ impl LinuxLandlockRuleset {
         Ok(LinuxLandlockPlan {
             schema_version: 1,
             ruleset_name: format!("agentbox-{}", spec.id),
+            handled_access_mask: landlock_handled_access_mask(&rules),
             rules,
             default_deny: true,
             requires_loader: true,
@@ -619,6 +659,17 @@ impl LinuxLandlockRuleset {
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         Err("Linux Landlock is only available on Linux".into())
     }
+}
+
+fn landlock_access_mask(access: &[LinuxLandlockAccess]) -> u64 {
+    access
+        .iter()
+        .fold(0, |mask, access| mask | access.access_mask())
+        & LANDLOCK_ABI_V1_FS_ACCESS_MASK
+}
+
+fn landlock_handled_access_mask(rules: &[LinuxLandlockRule]) -> u64 {
+    rules.iter().fold(0, |mask, rule| mask | rule.access_mask) & LANDLOCK_ABI_V1_FS_ACCESS_MASK
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1887,6 +1938,14 @@ mod tests {
         assert!(plan.rules[0]
             .access
             .contains(&LinuxLandlockAccess::WriteFile));
+        assert_eq!(
+            plan.rules[0].access_mask & LANDLOCK_ACCESS_FS_WRITE_FILE,
+            LANDLOCK_ACCESS_FS_WRITE_FILE
+        );
+        assert_eq!(
+            plan.rules[0].access_mask & LANDLOCK_ACCESS_FS_MAKE_REG,
+            LANDLOCK_ACCESS_FS_MAKE_REG
+        );
         assert_eq!(plan.rules[1].path, "/tmp/agentbox-fixtures");
         assert!(plan.rules[1]
             .access
@@ -1894,6 +1953,7 @@ mod tests {
         assert!(!plan.rules[1]
             .access
             .contains(&LinuxLandlockAccess::WriteFile));
+        assert_eq!(plan.handled_access_mask, LANDLOCK_ABI_V1_FS_ACCESS_MASK);
     }
 
     #[test]
