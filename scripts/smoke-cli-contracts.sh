@@ -101,6 +101,11 @@ log "checking pods JSON truth"
 "${CLI[@]}" pods --json >"$TMPDIR/pods.json"
 validate_json "$TMPDIR/pods.json" \
   "data == [] or all(item.get('id') and item.get('provider') for item in data)"
+"${CLI[@]}" sessions --json >"$TMPDIR/sessions.json"
+validate_json "$TMPDIR/sessions.json" \
+  "data == [] or all(item.get('id') and item.get('provider') for item in data)"
+"${CLI[@]}" sessions --help >"$TMPDIR/sessions-help.txt"
+grep -F "List persisted AgentPod sessions" "$TMPDIR/sessions-help.txt" >/dev/null
 
 log "checking AgentPod run plan JSON"
 "${CLI[@]}" run --plan --json -- echo agentbox-contract >"$TMPDIR/run-plan.json"

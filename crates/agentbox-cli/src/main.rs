@@ -273,6 +273,28 @@ enum Commands {
         #[arg(long)]
         status: Option<String>,
     },
+    /// List persisted AgentPod sessions
+    Sessions {
+        /// Emit JSON
+        #[arg(long)]
+        json: bool,
+
+        /// Refresh the session list until interrupted
+        #[arg(long)]
+        watch: bool,
+
+        /// Watch refresh interval in seconds
+        #[arg(long = "interval-seconds", default_value_t = 2)]
+        interval_seconds: u64,
+
+        /// Filter by provider
+        #[arg(long)]
+        provider: Option<String>,
+
+        /// Filter by status substring, e.g. running, stopped, failed
+        #[arg(long)]
+        status: Option<String>,
+    },
     /// Explain the last blocked or denied action
     Why,
     /// Show current policy posture (allow/approve/block rules)
@@ -6933,6 +6955,13 @@ async fn main() {
         }
         Commands::StopPod { pod_id } => cmd_stop_pod(pod_id).await,
         Commands::Pods {
+            json,
+            watch,
+            interval_seconds,
+            provider,
+            status,
+        } => cmd_pods(json, watch, interval_seconds, provider, status).await,
+        Commands::Sessions {
             json,
             watch,
             interval_seconds,
