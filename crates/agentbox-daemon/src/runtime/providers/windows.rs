@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::runtime::provider::RuntimeError;
-use crate::runtime::types::{ExecCommand, MinipodSpec, NetworkMode};
+use crate::runtime::types::{CredentialGrantKind, ExecCommand, MinipodSpec, NetworkMode};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WindowsJobObjectPlan {
@@ -224,11 +224,65 @@ pub struct WindowsVmBoundaryPlan {
     pub schema_version: i64,
     pub candidate_backends: Vec<String>,
     pub required_for_risk: Vec<String>,
+    pub cell_config: WindowsVmCellConfigPlan,
     pub execution_claim: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WindowsVmCellConfigPlan {
+    pub workspace_mount: WindowsVmWorkspaceMountPlan,
+    pub credential_channels: Vec<WindowsVmCredentialChannelPlan>,
+    pub host_bridge: WindowsVmHostBridgePlan,
+    pub evidence_spool_guest_path: String,
+    pub shutdown_policy: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WindowsVmWorkspaceMountPlan {
+    pub host_path: String,
+    pub guest_path: String,
+    pub writable: bool,
+    pub review_required: bool,
+    pub transport: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WindowsVmCredentialChannelPlan {
+    pub name: String,
+    pub kind: CredentialGrantKind,
+    pub target: String,
+    pub delivery: String,
+    pub guest_path: Option<String>,
+    pub requires_approval: bool,
+    pub one_time: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WindowsVmHostBridgePlan {
+    pub transport: String,
+    pub host_pipe_name: String,
+    pub guest_endpoint: String,
+    pub policy_endpoint: String,
+    pub evidence_endpoint: String,
 }
 
 impl WindowsVmBoundaryPlan {
     pub fn from_minipod_spec(spec: &MinipodSpec) -> Self {
+        let credential_channels = spec
+            .credentials
+            .grants
+            .iter()
+            .map(|grant| WindowsVmCredentialChannelPlan {
+                name: grant.name.clone(),
+                kind: grant.kind.clone(),
+                target: grant.target.clone(),
+                delivery: windows_vm_credential_delivery(&grant.kind).to_string(),
+                guest_path: windows_vm_credential_guest_path(&grant.kind, &grant.name),
+                requires_approval: grant.requires_approval,
+                one_time: grant.one_time,
+            })
+            .collect();
+
         Self {
             schema_version: 1,
             candidate_backends: vec!["windows-sandbox".into(), "hyper-v".into()],
@@ -241,8 +295,49 @@ impl WindowsVmBoundaryPlan {
             } else {
                 vec![]
             },
+            cell_config: WindowsVmCellConfigPlan {
+                workspace_mount: WindowsVmWorkspaceMountPlan {
+                    host_path: spec.filesystem.workspace_host_path.display().to_string(),
+                    guest_path: spec.filesystem.workspace_guest_path.clone(),
+                    writable: true,
+                    review_required: !matches!(
+                        spec.workspace_mode,
+                        crate::runtime::types::AgentPodWorkspaceMode::Direct
+                    ),
+                    transport: "sandbox-mapped-folder-or-hyper-v-plan9".into(),
+                },
+                credential_channels,
+                host_bridge: WindowsVmHostBridgePlan {
+                    transport: "hyper-v-socket-or-named-pipe".into(),
+                    host_pipe_name: format!(r"\\.\pipe\agentbox-agentpod-{}", spec.id),
+                    guest_endpoint: r"\\.\pipe\agentbox-bridge".into(),
+                    policy_endpoint: "agentbox.policy.v1.Decide".into(),
+                    evidence_endpoint: "agentbox.evidence.v1.Append".into(),
+                },
+                evidence_spool_guest_path: r"C:\ProgramData\Agentbox\Evidence".into(),
+                shutdown_policy: "terminate-vm-cell-and-seal-evidence".into(),
+            },
             execution_claim: "planned higher-strength boundary; lifecycle is not wired".into(),
         }
+    }
+}
+
+fn windows_vm_credential_delivery(kind: &CredentialGrantKind) -> &'static str {
+    match kind {
+        CredentialGrantKind::EnvVar => "host-bridge-env-injection",
+        CredentialGrantKind::FileMount => "read-only-mapped-file",
+        CredentialGrantKind::Socket => "host-bridge-named-pipe-proxy",
+        CredentialGrantKind::ProviderToken => "broker-mediated-provider-token",
+    }
+}
+
+fn windows_vm_credential_guest_path(kind: &CredentialGrantKind, name: &str) -> Option<String> {
+    match kind {
+        CredentialGrantKind::FileMount => {
+            Some(format!(r"C:\ProgramData\Agentbox\Credentials\{name}"))
+        }
+        CredentialGrantKind::Socket => Some(format!(r"\\.\pipe\agentbox-credential-{name}")),
+        CredentialGrantKind::EnvVar | CredentialGrantKind::ProviderToken => None,
     }
 }
 
@@ -336,7 +431,7 @@ fn cpu_shares_to_job_weight(cpu_shares: u32) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runtime::types::ResourcePolicy;
+    use crate::runtime::types::{CredentialGrant, ResourcePolicy};
 
     #[test]
     fn job_object_plan_maps_minipod_resources() {
@@ -386,7 +481,24 @@ mod tests {
 
     #[test]
     fn agentpod_execution_plan_composes_windows_native_boundaries() {
-        let spec = MinipodSpec::for_agent_task("codex", "C:\\agentbox\\work");
+        let mut spec = MinipodSpec::for_agent_task("codex", "C:\\agentbox\\work");
+        spec.workspace_mode = crate::runtime::types::AgentPodWorkspaceMode::OverlayReview;
+        spec.credentials.grants.push(CredentialGrant {
+            name: "OPENAI_API_KEY".into(),
+            kind: CredentialGrantKind::EnvVar,
+            target: "OPENAI_API_KEY".into(),
+            one_time: true,
+            requires_approval: true,
+            expires_at: None,
+        });
+        spec.credentials.grants.push(CredentialGrant {
+            name: "deploy_token".into(),
+            kind: CredentialGrantKind::FileMount,
+            target: "C:\\agentbox\\secrets\\deploy-token".into(),
+            one_time: true,
+            requires_approval: true,
+            expires_at: None,
+        });
         let command = ExecCommand {
             argv: vec!["codex".into(), "exec".into()],
             working_dir: Some("C:\\agentbox\\work".into()),
@@ -432,6 +544,50 @@ mod tests {
             plan.vm_boundary.candidate_backends,
             vec!["windows-sandbox".to_string(), "hyper-v".to_string()]
         );
+        assert_eq!(
+            plan.vm_boundary.cell_config.workspace_mount.host_path,
+            "C:\\agentbox\\work"
+        );
+        assert_eq!(
+            plan.vm_boundary.cell_config.workspace_mount.guest_path,
+            "/workspace"
+        );
+        assert!(plan.vm_boundary.cell_config.workspace_mount.writable);
+        assert!(plan.vm_boundary.cell_config.workspace_mount.review_required);
+        assert_eq!(
+            plan.vm_boundary.cell_config.host_bridge.policy_endpoint,
+            "agentbox.policy.v1.Decide"
+        );
+        assert!(plan
+            .vm_boundary
+            .cell_config
+            .host_bridge
+            .host_pipe_name
+            .contains(&spec.id));
+        assert_eq!(
+            plan.vm_boundary.cell_config.evidence_spool_guest_path,
+            r"C:\ProgramData\Agentbox\Evidence"
+        );
+        assert_eq!(plan.vm_boundary.cell_config.credential_channels.len(), 2);
+        assert!(plan
+            .vm_boundary
+            .cell_config
+            .credential_channels
+            .iter()
+            .any(|channel| channel.name == "OPENAI_API_KEY"
+                && channel.delivery == "host-bridge-env-injection"
+                && channel.guest_path.is_none()
+                && channel.requires_approval
+                && channel.one_time));
+        assert!(plan
+            .vm_boundary
+            .cell_config
+            .credential_channels
+            .iter()
+            .any(|channel| channel.name == "deploy_token"
+                && channel.delivery == "read-only-mapped-file"
+                && channel.guest_path.as_deref()
+                    == Some(r"C:\ProgramData\Agentbox\Credentials\deploy_token")));
         assert!(!plan.runnable_on_current_host());
     }
 

@@ -7757,6 +7757,20 @@ mod tests {
                     true
                 );
             }
+            if provider == "agentpod-windows" {
+                assert_eq!(
+                    plan["vm_boundary"]["cell_config"]["workspace_mount"]["review_required"],
+                    true
+                );
+                assert_eq!(
+                    plan["vm_boundary"]["cell_config"]["host_bridge"]["policy_endpoint"],
+                    "agentbox.policy.v1.Decide"
+                );
+                assert_eq!(
+                    plan["vm_boundary"]["cell_config"]["evidence_spool_guest_path"],
+                    r"C:\ProgramData\Agentbox\Evidence"
+                );
+            }
         }
     }
 

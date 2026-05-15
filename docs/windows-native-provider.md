@@ -46,6 +46,11 @@ keeps the live Win32 apply path unavailable until Windows-only tests prove
 behavior. `agentbox native-plan --provider agentpod-windows -- <cmd>` now emits
 the full intended execution-cell contract across Job Objects, AppContainer, WFP,
 ETW, and Windows Sandbox/Hyper-V fallback metadata without running anything.
+The VM boundary descriptor includes the planned workspace mount, named-pipe or
+Hyper-V socket host bridge, policy/evidence endpoints, credential delivery
+channels, guest evidence spool path, and teardown policy. These fields are a
+contract for the future runner, not proof that Windows Sandbox or Hyper-V
+lifecycle is currently wired.
 
 Target behavior:
 
@@ -133,6 +138,20 @@ Use them when:
 
 Do not make them the only Windows architecture. Agentbox should still pursue a
 fast native same-kernel path for common agent work.
+
+The current VM cell config is intentionally explicit:
+
+- workspace mount from the host workspace to the AgentPod guest workspace
+- review-required metadata for overlay-review, ephemeral, and commit-gated work
+- host bridge endpoint names for policy and evidence mediation
+- credential channels for env vars, read-only files, named-pipe socket proxies,
+  and broker-mediated provider tokens
+- guest evidence spool path under `C:\ProgramData\Agentbox\Evidence`
+- shutdown policy to terminate the VM cell and seal evidence
+
+None of these fields claim live VM execution yet. They make the Windows runner
+contract comparable to the macOS VM-cell descriptor before any Win32 or Hyper-V
+integration is shipped.
 
 ## Rust Integration Direction
 
