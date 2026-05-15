@@ -118,12 +118,12 @@ doctor report without mutating host state.
 
 ## Evidence
 
-- [ ] SQLite audit rows are hash-chained.
-- [ ] `agentbox evidence --verify` passes on a local audit DB.
-- [ ] Credential-like values are redacted from audit and transcript output.
-- [ ] Session evidence bundles include approvals, boundary events, transcripts,
+- [x] SQLite audit rows are hash-chained.
+- [x] `agentbox evidence --verify` passes on a local audit DB.
+- [x] Credential-like values are redacted from audit and transcript output.
+- [x] Session evidence bundles include approvals, boundary events, transcripts,
       replay metadata, and workspace diff references where available.
-- [ ] FIDES and agit integrations are labeled skeletons unless external
+- [x] FIDES and agit integrations are labeled skeletons unless external
       authority/adapters are configured.
 
 ## Docs

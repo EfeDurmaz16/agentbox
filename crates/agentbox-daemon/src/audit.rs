@@ -38,6 +38,7 @@ pub struct AuditEvent {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuditVerification {
     pub checked_events: usize,
+    pub skipped_legacy_events: usize,
     pub valid: bool,
     pub violations: Vec<AuditViolation>,
 }
@@ -244,8 +245,17 @@ impl AuditStore {
 
         let mut violations = Vec::new();
         let mut previous_hash: Option<String> = None;
+        let mut checked_events = 0;
+        let mut skipped_legacy_events = 0;
 
         for event in &events {
+            if is_legacy_unchained_event(event) {
+                skipped_legacy_events += 1;
+                continue;
+            }
+
+            checked_events += 1;
+
             if event.prev_hash != previous_hash {
                 violations.push(AuditViolation {
                     event_id: event.id.clone(),
@@ -254,7 +264,12 @@ impl AuditStore {
             }
 
             let expected_hash = compute_event_hash(event);
-            if event.event_hash.as_deref() != Some(expected_hash.as_str()) {
+            if event.event_hash.is_none() {
+                violations.push(AuditViolation {
+                    event_id: event.id.clone(),
+                    reason: "event_hash is missing".to_string(),
+                });
+            } else if event.event_hash.as_deref() != Some(expected_hash.as_str()) {
                 violations.push(AuditViolation {
                     event_id: event.id.clone(),
                     reason: "event_hash does not match event contents".to_string(),
@@ -265,11 +280,16 @@ impl AuditStore {
         }
 
         Ok(AuditVerification {
-            checked_events: events.len(),
+            checked_events,
+            skipped_legacy_events,
             valid: violations.is_empty(),
             violations,
         })
     }
+}
+
+fn is_legacy_unchained_event(event: &AuditEvent) -> bool {
+    event.schema_version < 2 && event.prev_hash.is_none() && event.event_hash.is_none()
 }
 
 pub fn redact_sensitive_text(input: &str) -> String {
@@ -919,7 +939,96 @@ mod tests {
 
         assert!(verification.valid);
         assert_eq!(verification.checked_events, 2);
+        assert_eq!(verification.skipped_legacy_events, 0);
         assert!(verification.violations.is_empty());
+    }
+
+    #[test]
+    fn verify_hash_chain_skips_legacy_unchained_rows() {
+        let path = std::env::temp_dir().join(format!(
+            "agentbox-legacy-audit-verify-{}.sqlite",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE audit_log (
+                    id                TEXT PRIMARY KEY,
+                    timestamp         TEXT NOT NULL,
+                    agent_pid         INTEGER NOT NULL,
+                    agent_name        TEXT,
+                    command           TEXT NOT NULL,
+                    cwd               TEXT NOT NULL,
+                    bucket            TEXT NOT NULL,
+                    decision          TEXT NOT NULL,
+                    user_response_ms  INTEGER,
+                    parent_process    TEXT
+                );",
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO audit_log
+                    (id, timestamp, agent_pid, agent_name, command, cwd, bucket, decision, user_response_ms, parent_process)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                params![
+                    "legacy-event",
+                    "2026-05-14T00:00:00Z",
+                    1234,
+                    "codex",
+                    "git status",
+                    "/tmp/project",
+                    "allow",
+                    "allowed",
+                    0,
+                    "agentbox-shim",
+                ],
+            )
+            .unwrap();
+        }
+
+        let store = AuditStore::new(&path.to_string_lossy()).unwrap();
+        store
+            .log_event(&make_event(
+                "runtime",
+                "created",
+                "runtime.create session-1",
+            ))
+            .unwrap();
+
+        let verification = store.verify_hash_chain().unwrap();
+
+        assert!(verification.valid);
+        assert_eq!(verification.checked_events, 1);
+        assert_eq!(verification.skipped_legacy_events, 1);
+        assert!(verification.violations.is_empty());
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn verify_hash_chain_rejects_v2_rows_without_event_hash() {
+        let store = AuditStore::in_memory().unwrap();
+        store
+            .log_event(&make_event("allow", "allowed", "ls"))
+            .unwrap();
+
+        {
+            let conn = store.pool.get().unwrap();
+            conn.execute("UPDATE audit_log SET event_hash = NULL", [])
+                .unwrap();
+        }
+
+        let verification = store.verify_hash_chain().unwrap();
+
+        assert!(!verification.valid);
+        assert_eq!(verification.checked_events, 1);
+        assert_eq!(verification.skipped_legacy_events, 0);
+        assert!(verification
+            .violations
+            .iter()
+            .any(|violation| violation.reason == "event_hash is missing"));
     }
 
     #[test]
@@ -942,6 +1051,7 @@ mod tests {
 
         assert!(!verification.valid);
         assert_eq!(verification.checked_events, 1);
+        assert_eq!(verification.skipped_legacy_events, 0);
         assert_eq!(verification.violations.len(), 1);
         assert_eq!(
             verification.violations[0].reason,

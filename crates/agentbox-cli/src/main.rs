@@ -4086,6 +4086,14 @@ fn cmd_history(show_all: bool, bucket_filter: Option<String>, json_output: bool)
     }
 }
 
+fn evidence_legacy_skip_suffix(skipped_legacy_events: usize) -> String {
+    if skipped_legacy_events == 0 {
+        String::new()
+    } else {
+        format!(", {skipped_legacy_events} legacy events skipped")
+    }
+}
+
 fn cmd_evidence(
     limit: usize,
     verify: bool,
@@ -4134,15 +4142,17 @@ fn cmd_evidence(
 
         if verification.valid {
             println!(
-                "evidence hash chain: valid ({} events checked)",
-                verification.checked_events
+                "evidence hash chain: valid ({} events checked{})",
+                verification.checked_events,
+                evidence_legacy_skip_suffix(verification.skipped_legacy_events)
             );
             return;
         }
 
         eprintln!(
-            "evidence hash chain: invalid ({} events checked, {} violations)",
+            "evidence hash chain: invalid ({} events checked{}, {} violations)",
             verification.checked_events,
+            evidence_legacy_skip_suffix(verification.skipped_legacy_events),
             verification.violations.len()
         );
         for violation in verification.violations {
