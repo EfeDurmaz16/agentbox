@@ -755,6 +755,14 @@ enum Commands {
         #[arg(long = "risk", default_value = "medium")]
         risk: String,
 
+        /// Deny a Linux syscall through the AgentPod seccomp profile; repeatable
+        #[arg(long = "deny-syscall")]
+        deny_syscalls: Vec<String>,
+
+        /// Optional Linux cgroup pids.max process limit
+        #[arg(long = "max-processes")]
+        max_processes: Option<u32>,
+
         /// Command to plan; use `--` before command flags
         command: Vec<String>,
     },
@@ -6941,6 +6949,8 @@ fn cmd_native_plan(
     workspace: Option<PathBuf>,
     agent_profile: String,
     risk: String,
+    deny_syscalls: Vec<String>,
+    max_processes: Option<u32>,
     command: Vec<String>,
 ) {
     let provider = resolve_native_plan_provider(&provider);
@@ -6967,11 +6977,19 @@ fn cmd_native_plan(
             std::process::exit(1);
         })
     });
-    let plan = build_native_plan_json(&provider, workspace, agent_profile, risk, command)
-        .unwrap_or_else(|e| {
-            eprintln!("error: failed to build native AgentPod plan: {}", e);
-            std::process::exit(1);
-        });
+    let plan = build_native_plan_json(
+        &provider,
+        workspace,
+        agent_profile,
+        risk,
+        deny_syscalls,
+        max_processes,
+        command,
+    )
+    .unwrap_or_else(|e| {
+        eprintln!("error: failed to build native AgentPod plan: {}", e);
+        std::process::exit(1);
+    });
 
     println!(
         "{}",
@@ -6984,12 +7002,14 @@ fn build_native_plan_json(
     workspace: PathBuf,
     agent_profile: String,
     risk: String,
+    deny_syscalls: Vec<String>,
+    max_processes: Option<u32>,
     command: Vec<String>,
 ) -> Result<serde_json::Value, String> {
     use agentbox_daemon::runtime::providers::linux::LinuxAgentPodExecutionPlan;
     use agentbox_daemon::runtime::providers::macos::MacOsAgentPodExecutionPlan;
     use agentbox_daemon::runtime::providers::windows::WindowsAgentPodExecutionPlan;
-    use agentbox_daemon::runtime::types::{ExecCommand, MinipodSpec};
+    use agentbox_daemon::runtime::types::{ExecCommand, MinipodSpec, SeccompProfile};
 
     if command.is_empty() {
         return Err("native plan command cannot be empty".into());
@@ -7000,6 +7020,20 @@ fn build_native_plan_json(
     spec.risk = parse_agentpod_risk(&risk);
     spec.labels
         .insert("agentbox.provider".into(), provider.to_string());
+    if let Some(max_processes) = max_processes {
+        if max_processes == 0 {
+            return Err("--max-processes must be greater than zero".into());
+        }
+        spec.labels.insert(
+            "agentbox.resources.pids_max".into(),
+            max_processes.to_string(),
+        );
+    }
+    if !deny_syscalls.is_empty() {
+        let syscalls = deny_syscalls.iter().map(String::as_str).collect::<Vec<_>>();
+        spec.seccomp =
+            SeccompProfile::deny_syscalls(&syscalls, "explicit AgentPod task syscall denial");
+    }
     let workspace_mode_risk = spec.risk.clone();
     apply_workspace_mode(&mut spec, &workspace_mode_risk, None, None);
 
@@ -7980,8 +8014,18 @@ async fn main() {
             workspace,
             agent_profile,
             risk,
+            deny_syscalls,
+            max_processes,
             command,
-        } => cmd_native_plan(provider, workspace, agent_profile, risk, command),
+        } => cmd_native_plan(
+            provider,
+            workspace,
+            agent_profile,
+            risk,
+            deny_syscalls,
+            max_processes,
+            command,
+        ),
         Commands::MinipodInspect { session_id, json } => cmd_minipod_inspect(session_id, json),
         Commands::Review {
             session_id,
@@ -8141,6 +8185,8 @@ mod tests {
                 workspace.clone(),
                 "general".into(),
                 "high".into(),
+                Vec::new(),
+                None,
                 vec!["echo".into(), "demo".into()],
             )
             .unwrap();
@@ -8234,6 +8280,8 @@ mod tests {
             PathBuf::from("/tmp/agentbox-native-plan-test"),
             "general".into(),
             "medium".into(),
+            Vec::new(),
+            None,
             vec![],
         )
         .unwrap_err();

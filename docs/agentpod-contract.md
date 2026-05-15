@@ -91,6 +91,7 @@ Task manifests can also enable the prototype seccomp path directly from the CLI:
 ```sh
 agentbox run --provider agentpod-linux --deny-syscall kill --max-processes 64 --plan -- /bin/true
 agentbox minipod-spec hermes --provider agentpod-linux --deny-syscall kill --max-processes 64
+agentbox native-plan --provider agentpod-linux --deny-syscall kill --max-processes 64 -- /bin/true
 ```
 
 The macOS plan compiler emits the VM cell, host bridge, Endpoint Security,

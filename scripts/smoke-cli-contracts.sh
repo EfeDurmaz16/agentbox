@@ -172,6 +172,14 @@ log "checking native plan auto provider truth"
   -- /bin/true >"$TMPDIR/native-plan-auto.json"
 validate_json "$TMPDIR/native-plan-auto.json" \
   "data.get('schema_version') == 1 and data.get('provider') in ['agentpod-linux', 'agentpod-macos', 'agentpod-windows'] and data.get('live_execution_enabled') == False and data.get('security_claim')"
+"${CLI[@]}" native-plan \
+  --provider agentpod-linux \
+  --workspace "$TMPDIR" \
+  --deny-syscall kill \
+  --max-processes 64 \
+  -- /bin/true >"$TMPDIR/native-plan-linux-seccomp.json"
+validate_json "$TMPDIR/native-plan-linux-seccomp.json" \
+  "data.get('provider') == 'agentpod-linux' and data.get('seccomp', {}).get('enabled') == True and data.get('seccomp', {}).get('syscall_rules', [])[0].get('syscall') == 'kill' and data.get('cgroup', {}).get('pids_max') == 64"
 
 log "checking high-risk provider recommendation truth"
 "${CLI[@]}" run --plan --risk high --json -- echo agentbox-contract >"$TMPDIR/run-plan-high.json"
