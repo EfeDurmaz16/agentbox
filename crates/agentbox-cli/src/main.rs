@@ -36,7 +36,19 @@ enum Commands {
     /// Start the daemon in background
     Start,
     /// Initialize local config, directories, and command shims
-    Setup,
+    Setup {
+        /// Emit JSON
+        #[arg(long)]
+        json: bool,
+
+        /// Show what setup would do without changing host state
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Limit setup actions to one provider: direct-host, podman, agentpod-macos, agentpod-linux, agentpod-windows, or remote-agentpod
+        #[arg(long)]
+        provider: Option<String>,
+    },
     /// Stop the daemon
     Stop,
     /// Show daemon status
@@ -767,27 +779,116 @@ fn cmd_start() {
     println!("daemon started (PID: {})", pid);
 }
 
-fn cmd_setup() {
+fn cmd_setup(json: bool, dry_run: bool, provider: Option<String>) {
     use agentbox_daemon::config;
 
-    ensure_dir(&agentbox_dir());
-    let config = config::load().unwrap_or_else(|e| {
-        eprintln!("error: failed to initialize Agentbox config: {}", e);
-        std::process::exit(1);
-    });
+    let provider_filter = provider.as_deref().map(normalize_setup_provider_filter);
+    let mut actions = Vec::new();
+    let mut config_summary = None;
+    let mut shim_summary = None;
+
+    if dry_run {
+        actions.push(SetupAction {
+            name: "initialize config".to_string(),
+            status: "planned".to_string(),
+            detail: format!("create or validate {}", config_path().display()),
+        });
+        if setup_should_install_shims(provider_filter.as_deref()) {
+            actions.push(SetupAction {
+                name: "install shims".to_string(),
+                status: "planned".to_string(),
+                detail: format!("link guarded commands into {}", shims_dir().display()),
+            });
+        }
+    } else {
+        ensure_dir(&agentbox_dir());
+        let config = config::load().unwrap_or_else(|e| {
+            eprintln!("error: failed to initialize Agentbox config: {}", e);
+            std::process::exit(1);
+        });
+        config_summary = Some(SetupConfigSummary {
+            config_path: config_path().display().to_string(),
+            db_path: config.db_path.clone(),
+            socket_path: config.socket_path.clone(),
+        });
+        actions.push(SetupAction {
+            name: "initialize config".to_string(),
+            status: "completed".to_string(),
+            detail: format!("created or validated {}", config_path().display()),
+        });
+
+        if setup_should_install_shims(provider_filter.as_deref()) {
+            let install = install_shims().unwrap_or_else(|e| {
+                eprintln!("{e}");
+                std::process::exit(1);
+            });
+            actions.push(SetupAction {
+                name: "install shims".to_string(),
+                status: "completed".to_string(),
+                detail: format!(
+                    "installed {} guarded command shims into {}",
+                    install.created,
+                    install.shims_dir.display()
+                ),
+            });
+            shim_summary = Some(install.into_summary());
+        } else {
+            actions.push(SetupAction {
+                name: "install shims".to_string(),
+                status: "skipped".to_string(),
+                detail: "provider setup does not require direct-host command shims".to_string(),
+            });
+        }
+    }
+
+    let report = build_doctor_report();
+    let plan = setup_plan_from_doctor(&report, provider_filter.as_deref());
+    let setup_report = SetupReport {
+        schema_version: 1,
+        platform: std::env::consts::OS.to_string(),
+        provider: provider_filter.clone(),
+        dry_run,
+        actions,
+        config: config_summary,
+        shims: shim_summary,
+        setup_plan: plan,
+    };
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&setup_report).expect("failed to serialize setup report")
+        );
+        return;
+    }
 
     println!("Agentbox setup");
     println!("{}", "-".repeat(64));
-    println!("config:  {}", config_path().display());
-    println!("audit:   {}", config.db_path);
-    println!("socket:  {}", config.socket_path);
+    if let Some(provider) = &setup_report.provider {
+        println!("provider: {}", provider);
+    }
+    if setup_report.dry_run {
+        println!("mode:     dry-run");
+    }
+    if let Some(config) = &setup_report.config {
+        println!("config:   {}", config.config_path);
+        println!("audit:    {}", config.db_path);
+        println!("socket:   {}", config.socket_path);
+    } else {
+        println!("config:   {}", config_path().display());
+    }
     println!();
-    cmd_install();
+    for action in &setup_report.actions {
+        println!("{}: {}", action.status, action.detail);
+    }
     println!();
     println!("Next:");
     println!("  export PATH=\"{}:$PATH\"", shims_dir().display());
     println!("  agentbox start");
     println!("  agentbox doctor");
+    if setup_report.setup_plan.failed > 0 {
+        println!("  agentbox setup-plan");
+    }
 }
 
 fn cmd_stop() {
@@ -1184,6 +1285,40 @@ struct SetupPlanStep {
     command: Option<String>,
 }
 
+#[derive(Serialize)]
+struct SetupReport {
+    schema_version: i64,
+    platform: String,
+    provider: Option<String>,
+    dry_run: bool,
+    actions: Vec<SetupAction>,
+    config: Option<SetupConfigSummary>,
+    shims: Option<SetupShimSummary>,
+    setup_plan: SetupPlan,
+}
+
+#[derive(Serialize)]
+struct SetupAction {
+    name: String,
+    status: String,
+    detail: String,
+}
+
+#[derive(Serialize)]
+struct SetupConfigSummary {
+    config_path: String,
+    db_path: String,
+    socket_path: String,
+}
+
+#[derive(Serialize)]
+struct SetupShimSummary {
+    shims_dir: String,
+    shim_binary: String,
+    created: usize,
+    skipped: usize,
+}
+
 fn setup_plan_from_doctor(report: &DoctorReport, provider: Option<&str>) -> SetupPlan {
     let provider_filter = provider.map(normalize_setup_provider_filter);
     let checks = if let Some(provider_filter) = provider_filter.as_deref() {
@@ -1220,6 +1355,10 @@ fn setup_plan_from_doctor(report: &DoctorReport, provider: Option<&str>) -> Setu
         next_command,
         steps,
     }
+}
+
+fn setup_should_install_shims(provider: Option<&str>) -> bool {
+    matches!(provider, None | Some("all") | Some("direct-host"))
 }
 
 fn normalize_setup_provider_filter(provider: &str) -> String {
@@ -1793,15 +1932,32 @@ fn print_audit_events(
     max_id
 }
 
-fn cmd_install() {
+struct ShimInstallReport {
+    shims_dir: PathBuf,
+    shim_binary: PathBuf,
+    created: usize,
+    skipped: usize,
+}
+
+impl ShimInstallReport {
+    fn into_summary(self) -> SetupShimSummary {
+        SetupShimSummary {
+            shims_dir: self.shims_dir.display().to_string(),
+            shim_binary: self.shim_binary.display().to_string(),
+            created: self.created,
+            skipped: self.skipped,
+        }
+    }
+}
+
+fn install_shims() -> Result<ShimInstallReport, String> {
     let shims = shims_dir();
     ensure_dir(&shims);
 
-    let shim_binary = find_shim_binary().unwrap_or_else(|| {
-        eprintln!("error: agentbox-shim binary not found");
-        eprintln!("hint: run `cargo build -p agentbox-shim` first");
-        std::process::exit(1);
-    });
+    let shim_binary = find_shim_binary().ok_or_else(|| {
+        "error: agentbox-shim binary not found\nhint: run `cargo build -p agentbox-shim` first"
+            .to_string()
+    })?;
 
     let commands = [
         "rm",
@@ -1852,11 +2008,28 @@ fn cmd_install() {
         }
     }
 
-    println!("installed {} shims ({} skipped)", created, skipped);
+    Ok(ShimInstallReport {
+        shims_dir: shims,
+        shim_binary,
+        created,
+        skipped,
+    })
+}
+
+fn cmd_install() {
+    let report = install_shims().unwrap_or_else(|e| {
+        eprintln!("{e}");
+        std::process::exit(1);
+    });
+
+    println!(
+        "installed {} shims ({} skipped)",
+        report.created, report.skipped
+    );
     println!();
     println!("Add this to your shell profile (~/.zshrc or ~/.bashrc):");
     println!();
-    println!("  export PATH=\"{}:$PATH\"", shims.display());
+    println!("  export PATH=\"{}:$PATH\"", report.shims_dir.display());
     println!();
     println!("Then restart your shell or run:");
     println!();
@@ -6037,7 +6210,11 @@ async fn main() {
 
     match cli.command {
         Commands::Start => cmd_start(),
-        Commands::Setup => cmd_setup(),
+        Commands::Setup {
+            json,
+            dry_run,
+            provider,
+        } => cmd_setup(json, dry_run, provider),
         Commands::Stop => cmd_stop(),
         Commands::Status => cmd_status(),
         Commands::Doctor { json } => cmd_doctor(json),
@@ -6475,6 +6652,16 @@ mod tests {
         assert_eq!(podman.provider.as_deref(), Some("podman"));
         assert_eq!(podman.required_failed, 1);
         assert_eq!(podman.steps[0].check, "podman provider");
+    }
+
+    #[test]
+    fn setup_shim_install_scope_matches_provider() {
+        assert!(setup_should_install_shims(None));
+        assert!(setup_should_install_shims(Some("all")));
+        assert!(setup_should_install_shims(Some("direct-host")));
+        assert!(!setup_should_install_shims(Some("podman")));
+        assert!(!setup_should_install_shims(Some("remote-agentpod")));
+        assert!(!setup_should_install_shims(Some("agentpod-macos")));
     }
 
     #[test]
