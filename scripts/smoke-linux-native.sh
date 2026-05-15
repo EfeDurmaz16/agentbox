@@ -31,7 +31,7 @@ cargo run -q -p agentbox-cli -- native-plan \
   jq -e '
     .provider == "agentpod-linux"
     and .live_env_var == "AGENTBOX_LINUX_NATIVE"
-    and .security_claim == "prototype namespace/resource execution plan; not a complete sandbox"
+    and .security_claim == "prototype namespace/resource execution with cgroup v2 process attach; not a complete sandbox"
   ' >/dev/null
 
 (

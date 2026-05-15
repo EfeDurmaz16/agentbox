@@ -842,6 +842,7 @@ pub struct LinuxAgentPodExecutionPlan {
     pub landlock: LinuxLandlockPlan,
     pub nftables: LinuxNftablesPlan,
     pub ebpf: LinuxEbpfObservabilityPlan,
+    pub cgroup_root: String,
     pub live_env_var: String,
     pub live_execution_enabled: bool,
     pub requires_linux: bool,
@@ -893,11 +894,13 @@ impl LinuxAgentPodExecutionPlan {
             landlock,
             nftables,
             ebpf,
+            cgroup_root: linux_cgroup_v2_root().display().to_string(),
             live_env_var: "AGENTBOX_LINUX_NATIVE".into(),
             live_execution_enabled: linux_native_execution_enabled(),
             requires_linux: true,
-            security_claim: "prototype namespace/resource execution plan; not a complete sandbox"
-                .into(),
+            security_claim:
+                "prototype namespace/resource execution with cgroup v2 process attach; not a complete sandbox"
+                    .into(),
         })
     }
 
@@ -947,8 +950,21 @@ impl LinuxAgentPodPrototypeExecutor {
             process.env(key, value);
         }
 
-        let output = process.output().map_err(|err| {
+        let mut child = process.spawn().map_err(|err| {
             RuntimeError::ExecFailed(format!("Linux AgentPod prototype exec failed: {err}"))
+        })?;
+        let pid = child.id();
+        let cgroup_root = std::path::Path::new(&plan.cgroup_root);
+        if let Err(err) = LinuxCgroupV2Limiter::apply(cgroup_root, &plan.cgroup, pid) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(RuntimeError::ExecFailed(format!(
+                "Linux AgentPod cgroup v2 attach failed at {}: {err}",
+                cgroup_root.display()
+            )));
+        }
+        let output = child.wait_with_output().map_err(|err| {
+            RuntimeError::ExecFailed(format!("Linux AgentPod prototype wait failed: {err}"))
         })?;
 
         Ok(CommandResult {
@@ -1116,6 +1132,13 @@ pub fn linux_native_execution_enabled() -> bool {
         std::env::var("AGENTBOX_LINUX_NATIVE").as_deref(),
         Ok("1") | Ok("true") | Ok("yes")
     )
+}
+
+pub fn linux_cgroup_v2_root() -> std::path::PathBuf {
+    std::env::var_os("AGENTBOX_LINUX_CGROUP_ROOT")
+        .filter(|value| !value.is_empty())
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from("/sys/fs/cgroup"))
 }
 
 fn cpu_shares_to_cgroup_weight(cpu_shares: u32) -> u32 {
@@ -1326,6 +1349,39 @@ mod tests {
             .unwrap_err();
 
         assert!(err.to_string().contains("only available on Linux"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn cgroup_v2_apply_writes_limits_and_process_membership() {
+        let root = std::env::temp_dir().join(format!(
+            "agentbox-cgroup-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let plan =
+            LinuxCgroupV2Limiter::plan("01agentboxsession", &ResourcePolicy::default()).unwrap();
+
+        LinuxCgroupV2Limiter::apply(&root, &plan, 12345).unwrap();
+
+        let cgroup_dir = root.join(&plan.cgroup_name);
+        assert_eq!(
+            std::fs::read_to_string(cgroup_dir.join("memory.max")).unwrap(),
+            plan.memory_max
+        );
+        assert_eq!(
+            std::fs::read_to_string(cgroup_dir.join("cpu.weight")).unwrap(),
+            plan.cpu_weight.to_string()
+        );
+        assert_eq!(
+            std::fs::read_to_string(cgroup_dir.join("cgroup.procs")).unwrap(),
+            "12345"
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -1658,6 +1714,7 @@ mod tests {
         assert_eq!(plan.session_id, spec.id);
         assert_eq!(plan.command_argv, vec!["/bin/true"]);
         assert_eq!(plan.live_env_var, "AGENTBOX_LINUX_NATIVE");
+        assert!(!plan.cgroup_root.is_empty());
         assert!(plan.requires_linux);
         assert!(plan.composed_argv.starts_with(&[
             "unshare".into(),
@@ -1671,6 +1728,7 @@ mod tests {
             .windows(2)
             .any(|window| window == ["--pid", "--fork"]));
         assert!(plan.security_claim.contains("prototype"));
+        assert!(plan.security_claim.contains("cgroup v2 process attach"));
         assert_eq!(plan.cgroup.cgroup_name, format!("agentbox-{}", spec.id));
         assert!(plan.landlock.default_deny);
         assert!(!plan.seccomp.requires_loader);
