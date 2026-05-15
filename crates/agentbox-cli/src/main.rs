@@ -537,17 +537,17 @@ enum Commands {
     },
     /// Export a remote AgentPod worker workspace into a local review directory
     RemoteWorkspaceExport {
-        /// Remote worker endpoint, e.g. https://worker.example.com/agentpod
+        /// Remote worker endpoint, e.g. https://worker.example.com/agentpod; omitted values are read from the local session when possible
         #[arg(long)]
-        endpoint: String,
+        endpoint: Option<String>,
 
         /// Agentbox session id
         #[arg(long = "session")]
         session_id: String,
 
-        /// Worker-side session id
+        /// Worker-side session id; omitted values are read from the local session when possible
         #[arg(long = "worker-session")]
-        worker_session_id: String,
+        worker_session_id: Option<String>,
 
         /// Local directory where exported workspace files should be written
         #[arg(long = "output-dir")]
@@ -5726,9 +5726,9 @@ async fn cmd_remote_approval_grant(
 }
 
 async fn cmd_remote_workspace_export(
-    endpoint: String,
+    endpoint: Option<String>,
     session_id: String,
-    worker_session_id: String,
+    worker_session_id: Option<String>,
     output_dir: PathBuf,
     force: bool,
     json: bool,
@@ -5737,6 +5737,8 @@ async fn cmd_remote_workspace_export(
         HttpRemoteAgentPodTransport, RemoteAgentPodTransport, RemoteAgentPodWorkspaceExportRequest,
     };
 
+    let (endpoint, worker_session_id) =
+        resolve_remote_session_metadata(&session_id, endpoint, worker_session_id);
     let transport = HttpRemoteAgentPodTransport::new(endpoint).unwrap_or_else(|e| {
         eprintln!(
             "error: failed to build remote AgentPod workspace export transport: {}",

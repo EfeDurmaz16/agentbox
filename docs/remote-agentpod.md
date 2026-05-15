@@ -198,11 +198,14 @@ session ids, file index, byte counts, and root hash:
 
 ```sh
 agentbox remote-workspace-export \
-  --endpoint https://worker.example.com/agentpod \
   --session agentbox-session-id \
-  --worker-session worker-session-id \
   --output-dir ./agentbox-workspace-review
 ```
+
+For remote-provider sessions, the CLI reads the worker endpoint and worker-side
+session id from local runtime session metadata. `--endpoint` and
+`--worker-session` remain available for exports from manually managed worker
+sessions.
 
 To apply a pulled export into a local workspace, use the separate apply command.
 It verifies the manifest and file hashes before writing, supports `--dry-run`,
