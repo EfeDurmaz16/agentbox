@@ -509,8 +509,12 @@ impl LinuxSeccompProfileLoader {
     }
 
     #[cfg(target_os = "linux")]
-    pub fn apply(_plan: &LinuxSeccompPlan) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        Err("seccomp profile loading is modeled but not wired to a Linux loader yet".into())
+    pub fn apply(plan: &LinuxSeccompPlan) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let Some(filter) = compile_linux_seccomp_filter(plan)? else {
+            return Ok(());
+        };
+        install_linux_seccomp_filter(&filter)?;
+        Ok(())
     }
 
     #[cfg(not(target_os = "linux"))]
@@ -977,7 +981,9 @@ impl LinuxAgentPodPrototypeExecutor {
         for (key, value) in &command.env {
             process.env(key, value);
         }
-        configure_linux_child_security(&mut process);
+        configure_linux_child_security(&mut process, Some(&plan.seccomp)).map_err(|err| {
+            RuntimeError::ExecFailed(format!("Linux AgentPod child security setup failed: {err}"))
+        })?;
 
         let mut child = process.spawn().map_err(|err| {
             RuntimeError::ExecFailed(format!("Linux AgentPod prototype exec failed: {err}"))
@@ -1021,21 +1027,145 @@ impl LinuxAgentPodPrototypeExecutor {
 }
 
 #[cfg(target_os = "linux")]
-fn configure_linux_child_security(command: &mut std::process::Command) {
+fn configure_linux_child_security(
+    command: &mut std::process::Command,
+    seccomp: Option<&LinuxSeccompPlan>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     use std::os::unix::process::CommandExt;
 
+    let seccomp_filter = seccomp
+        .map(compile_linux_seccomp_filter)
+        .transpose()
+        .map(Option::flatten)?;
+
     // SAFETY: pre_exec runs after fork and before exec in the child. The closure only
-    // calls the async-signal-safe prctl syscall and constructs an io::Error from errno
-    // on failure, then returns to std::process for exec/error handling.
+    // calls prctl syscalls and constructs an io::Error from errno on failure, then
+    // returns to std::process for exec/error handling.
     unsafe {
-        command.pre_exec(|| {
+        command.pre_exec(move || {
             let result = libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
-            if result == 0 {
-                Ok(())
-            } else {
-                Err(std::io::Error::last_os_error())
+            if result != 0 {
+                return Err(std::io::Error::last_os_error());
             }
+            if let Some(filter) = &seccomp_filter {
+                install_linux_seccomp_filter(filter)
+                    .map_err(|_| std::io::Error::last_os_error())?;
+            }
+            Ok(())
         });
+    }
+
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn compile_linux_seccomp_filter(
+    plan: &LinuxSeccompPlan,
+) -> Result<Option<Vec<libc::sock_filter>>, Box<dyn std::error::Error + Send + Sync>> {
+    if !plan.enabled {
+        return Ok(None);
+    }
+
+    let audit_arch = linux_seccomp_audit_arch()
+        .ok_or("seccomp BPF loader does not support this CPU architecture")?;
+    let mut filter = vec![
+        libc::BPF_STMT((libc::BPF_LD | libc::BPF_W | libc::BPF_ABS) as u16, 4),
+        libc::BPF_JUMP(
+            (libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K) as u16,
+            audit_arch,
+            1,
+            0,
+        ),
+        libc::BPF_STMT(
+            (libc::BPF_RET | libc::BPF_K) as u16,
+            libc::SECCOMP_RET_KILL_PROCESS,
+        ),
+        libc::BPF_STMT((libc::BPF_LD | libc::BPF_W | libc::BPF_ABS) as u16, 0),
+    ];
+    for rule in &plan.syscall_rules {
+        let syscall = linux_syscall_number(&rule.syscall).ok_or_else(|| {
+            format!(
+                "seccomp syscall '{}' is not supported by the prototype BPF loader",
+                rule.syscall
+            )
+        })?;
+        filter.push(libc::BPF_JUMP(
+            (libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K) as u16,
+            syscall,
+            0,
+            1,
+        ));
+        filter.push(libc::BPF_STMT(
+            (libc::BPF_RET | libc::BPF_K) as u16,
+            seccomp_action_to_bpf(&rule.action)?,
+        ));
+    }
+    filter.push(libc::BPF_STMT(
+        (libc::BPF_RET | libc::BPF_K) as u16,
+        seccomp_action_to_bpf(&plan.default_action)?,
+    ));
+
+    Ok(Some(filter))
+}
+
+#[cfg(target_os = "linux")]
+fn install_linux_seccomp_filter(
+    filter: &[libc::sock_filter],
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let mut program = libc::sock_fprog {
+        len: filter
+            .len()
+            .try_into()
+            .map_err(|_| "seccomp filter is too large")?,
+        filter: filter.as_ptr() as *mut libc::sock_filter,
+    };
+    let result = unsafe {
+        libc::prctl(
+            libc::PR_SET_SECCOMP,
+            libc::SECCOMP_MODE_FILTER,
+            &mut program as *mut libc::sock_fprog,
+        )
+    };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error().into())
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn seccomp_action_to_bpf(
+    action: &SeccompAction,
+) -> Result<u32, Box<dyn std::error::Error + Send + Sync>> {
+    match action {
+        SeccompAction::Allow => Ok(libc::SECCOMP_RET_ALLOW),
+        SeccompAction::Errno(errno) => Ok(libc::SECCOMP_RET_ERRNO | (*errno as u32 & 0x0000ffff)),
+        SeccompAction::KillProcess => Ok(libc::SECCOMP_RET_KILL_PROCESS),
+        SeccompAction::Log => Ok(libc::SECCOMP_RET_LOG),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn linux_syscall_number(syscall: &str) -> Option<u32> {
+    match syscall {
+        "bpf" => Some(libc::SYS_bpf as u32),
+        "clone" => Some(libc::SYS_clone as u32),
+        "clone3" => Some(libc::SYS_clone3 as u32),
+        "kill" => Some(libc::SYS_kill as u32),
+        "ptrace" => Some(libc::SYS_ptrace as u32),
+        "unshare" => Some(libc::SYS_unshare as u32),
+        _ => None,
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn linux_seccomp_audit_arch() -> Option<u32> {
+    if cfg!(target_arch = "x86_64") {
+        Some(0xc000003e)
+    } else if cfg!(target_arch = "aarch64") {
+        Some(0xc00000b7)
+    } else {
+        None
     }
 }
 
@@ -1320,13 +1450,46 @@ mod tests {
             .arg("awk '/NoNewPrivs/ { print $2 }' /proc/self/status")
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
-        configure_linux_child_security(&mut command);
+        configure_linux_child_security(&mut command, None).unwrap();
 
         let child = command.spawn().unwrap();
         let output = wait_for_child_output(child, Some(5)).unwrap();
 
         assert!(output.status.success());
         assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "1");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_seccomp_filter_blocks_supported_syscall_in_child() {
+        let profile = SeccompProfile::deny_syscalls(&["kill"], "test syscall denial");
+        let plan = LinuxSeccompProfileLoader::plan(&profile).unwrap();
+        let mut command = std::process::Command::new("sh");
+        command
+            .arg("-c")
+            .arg("kill -0 $$; printf 'kill_status:%s\\n' \"$?\"")
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        configure_linux_child_security(&mut command, Some(&plan)).unwrap();
+
+        let child = command.spawn().unwrap();
+        let output = wait_for_child_output(child, Some(5)).unwrap();
+
+        assert!(output.status.success());
+        assert!(String::from_utf8_lossy(&output.stdout).contains("kill_status:1"));
+        assert!(String::from_utf8_lossy(&output.stderr).contains("Operation not permitted"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn seccomp_filter_rejects_unsupported_syscall_names_before_spawn() {
+        let profile = SeccompProfile::deny_syscalls(&["definitely_not_a_syscall"], "test");
+        let plan = LinuxSeccompProfileLoader::plan(&profile).unwrap();
+        let mut command = std::process::Command::new("true");
+
+        let err = configure_linux_child_security(&mut command, Some(&plan)).unwrap_err();
+
+        assert!(err.to_string().contains("not supported"));
     }
 
     #[test]

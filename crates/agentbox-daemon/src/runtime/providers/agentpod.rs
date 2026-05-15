@@ -276,7 +276,7 @@ impl RuntimeProvider for AgentPodProvider {
                             "Landlock ruleset descriptor only; ruleset loader is not wired"
                         }
                         AgentPodPrimitive::Seccomp => {
-                            "seccomp OCI profile rendering only; libseccomp loader is not wired"
+                            "gated prototype BPF seccomp loader for supported syscall deny rules; not a complete libseccomp profile loader"
                         }
                         AgentPodPrimitive::EBpf => {
                             "eBPF observability descriptor only; probe loading is not wired"
@@ -675,7 +675,10 @@ mod tests {
             .iter()
             .find(|status| status.primitive == "seccomp")
             .unwrap();
-        assert!(seccomp.enforcement_scope.contains("loader is not wired"));
+        assert!(seccomp.enforcement_scope.contains("BPF seccomp loader"));
+        assert!(seccomp
+            .enforcement_scope
+            .contains("not a complete libseccomp"));
 
         let nftables = primitive_statuses
             .iter()
