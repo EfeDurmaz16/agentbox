@@ -1386,7 +1386,7 @@ fn write_linux_agentpod_runner_request(
             dir.display()
         ))
     })?;
-    let path = dir.join(format!("{}.json", plan.session_id.replace('/', "_")));
+    let path = dir.join(linux_agentpod_runner_request_filename(&plan.session_id));
     let file = std::fs::File::create(&path).map_err(|err| {
         RuntimeError::ExecFailed(format!(
             "failed to create Linux runner request {}: {err}",
@@ -1401,6 +1401,41 @@ fn write_linux_agentpod_runner_request(
         ))
     })?;
     Ok(LinuxAgentPodRunnerRequestFile { path })
+}
+
+#[cfg(any(test, target_os = "linux"))]
+fn linux_agentpod_runner_request_filename(session_id: &str) -> String {
+    static REQUEST_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+    let safe_session_id: String = session_id
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let safe_session_id = safe_session_id.trim_matches('_');
+    let safe_session_id = if safe_session_id.is_empty() {
+        "session"
+    } else {
+        safe_session_id
+    };
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    let counter = REQUEST_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+    format!(
+        "{}-{}-{}-{}.json",
+        safe_session_id,
+        std::process::id(),
+        nonce,
+        counter
+    )
 }
 
 #[cfg(test)]
@@ -2707,6 +2742,18 @@ mod tests {
         assert_eq!(request.mount_namespace, plan.mount_namespace);
         assert_eq!(request.seccomp, plan.seccomp);
         assert_eq!(request.landlock, plan.landlock);
+    }
+
+    #[test]
+    fn agentpod_runner_request_filename_is_path_safe_and_unique() {
+        let first = linux_agentpod_runner_request_filename("../session/with spaces");
+        let second = linux_agentpod_runner_request_filename("../session/with spaces");
+
+        assert!(first.ends_with(".json"));
+        assert!(first.starts_with("session_with_spaces-"));
+        assert!(!first.contains('/'));
+        assert!(!first.contains(' '));
+        assert_ne!(first, second);
     }
 
     #[cfg(target_os = "linux")]
