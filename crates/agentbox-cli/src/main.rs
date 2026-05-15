@@ -531,6 +531,20 @@ enum Commands {
         #[arg(long = "worker-session")]
         worker_session_id: Option<String>,
     },
+    /// Query remote AgentPod lifecycle event journal
+    RemoteEvents {
+        /// Remote worker endpoint, e.g. https://worker.example.com/agentpod; omitted values are read from the local session when possible
+        #[arg(long)]
+        endpoint: Option<String>,
+
+        /// Agentbox session id
+        #[arg(long = "session")]
+        session_id: String,
+
+        /// Worker-side session id; omitted values are read from the local session when possible
+        #[arg(long = "worker-session")]
+        worker_session_id: Option<String>,
+    },
     /// Restart a stopped or failed remote AgentPod worker session
     RemoteRestart {
         /// Remote worker endpoint, e.g. https://worker.example.com/agentpod; omitted values are read from the local session when possible
@@ -6156,6 +6170,53 @@ async fn cmd_remote_evidence_status(
     );
 }
 
+async fn cmd_remote_events(
+    endpoint: Option<String>,
+    session_id: String,
+    worker_session_id: Option<String>,
+) {
+    use agentbox_daemon::runtime::providers::remote::{
+        HttpRemoteAgentPodTransport, RemoteAgentPodLifecycleEventsRequest, RemoteAgentPodTransport,
+    };
+
+    let (endpoint, worker_session_id) =
+        resolve_remote_session_metadata(&session_id, endpoint, worker_session_id);
+    let transport = HttpRemoteAgentPodTransport::new(endpoint).unwrap_or_else(|e| {
+        eprintln!(
+            "error: failed to build remote AgentPod events transport: {}",
+            e
+        );
+        std::process::exit(1);
+    });
+    let request = RemoteAgentPodLifecycleEventsRequest {
+        session_id,
+        worker_session_id,
+    };
+    request.validate().unwrap_or_else(|e| {
+        eprintln!(
+            "error: failed to build remote AgentPod events request: {}",
+            e
+        );
+        std::process::exit(1);
+    });
+    let response = transport
+        .lifecycle_events(request)
+        .await
+        .unwrap_or_else(|e| {
+            eprintln!(
+                "error: failed to query remote AgentPod lifecycle events: {}",
+                e
+            );
+            std::process::exit(1);
+        });
+
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&response)
+            .expect("failed to serialize remote AgentPod lifecycle events")
+    );
+}
+
 async fn cmd_remote_restart(
     endpoint: Option<String>,
     session_id: String,
@@ -7445,6 +7506,7 @@ fn remote_session_operator_commands(
     }
     vec![
         format!("agentbox remote-evidence-status --session {}", session.id),
+        format!("agentbox remote-events --session {}", session.id),
         format!("agentbox remote-restart --session {}", session.id),
         format!("agentbox remote-worker-status --session {}", session.id),
         format!("agentbox remote-exec --session {} -- <cmd>", session.id),
@@ -7703,6 +7765,11 @@ async fn main() {
             session_id,
             worker_session_id,
         } => cmd_remote_evidence_status(endpoint, session_id, worker_session_id).await,
+        Commands::RemoteEvents {
+            endpoint,
+            session_id,
+            worker_session_id,
+        } => cmd_remote_events(endpoint, session_id, worker_session_id).await,
         Commands::RemoteRestart {
             endpoint,
             session_id,
@@ -8528,6 +8595,7 @@ mod tests {
             commands,
             vec![
                 format!("agentbox remote-evidence-status --session {session_id}"),
+                format!("agentbox remote-events --session {session_id}"),
                 format!("agentbox remote-restart --session {session_id}"),
                 format!("agentbox remote-worker-status --session {session_id}"),
                 format!("agentbox remote-exec --session {session_id} -- <cmd>"),

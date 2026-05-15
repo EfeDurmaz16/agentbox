@@ -223,6 +223,11 @@ grep -F "Query a remote AgentPod worker for accepted evidence state" \
   "$TMPDIR/remote-evidence-status-help.txt" >/dev/null
 grep -F "omitted values are read from the local session when possible" \
   "$TMPDIR/remote-evidence-status-help.txt" >/dev/null
+"${CLI[@]}" remote-events --help >"$TMPDIR/remote-events-help.txt"
+grep -F "Query remote AgentPod lifecycle event journal" \
+  "$TMPDIR/remote-events-help.txt" >/dev/null
+grep -F "omitted values are read from the local session when possible" \
+  "$TMPDIR/remote-events-help.txt" >/dev/null
 "${CLI[@]}" remote-restart --help >"$TMPDIR/remote-restart-help.txt"
 grep -F "Restart a stopped or failed remote AgentPod worker session" \
   "$TMPDIR/remote-restart-help.txt" >/dev/null

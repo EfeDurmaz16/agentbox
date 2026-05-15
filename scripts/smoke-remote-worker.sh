@@ -687,8 +687,14 @@ AGENTBOX_REMOTE_AGENTPOD_ALLOW_HTTP_LOOPBACK=1 \
   --session "$SESSION_ID" \
   --worker-session "$WORKER_SESSION_ID" \
   >"$TMPDIR/evidence-status-cli.json"
+AGENTBOX_REMOTE_AGENTPOD_ALLOW_HTTP_LOOPBACK=1 \
+"$ROOT/target/debug/agentbox-cli" remote-events \
+  --endpoint "http://127.0.0.1:${PORT}" \
+  --session "$SESSION_ID" \
+  --worker-session "$WORKER_SESSION_ID" \
+  >"$TMPDIR/lifecycle-events.json"
 
-python3 - "$TMPDIR/evidence-status.json" "$TMPDIR/evidence-status-cli.json" "$TMPDIR/evidence-bundle-upload.expected" <<'PY'
+python3 - "$TMPDIR/evidence-status.json" "$TMPDIR/evidence-status-cli.json" "$TMPDIR/lifecycle-events.json" "$TMPDIR/evidence-bundle-upload.expected" <<'PY'
 import json
 import sys
 
@@ -697,11 +703,19 @@ with open(sys.argv[1], "r", encoding="utf-8") as fh:
 with open(sys.argv[2], "r", encoding="utf-8") as fh:
     cli = json.load(fh)
 with open(sys.argv[3], "r", encoding="utf-8") as fh:
+    events = json.load(fh)
+with open(sys.argv[4], "r", encoding="utf-8") as fh:
     expected_bundle_hash = fh.read().strip()
 
 for key in ["boot_id", "boot_count", "recovered_sessions", "persistence"]:
     assert cli["supervision"][key] == data["supervision"][key]
 assert cli["supervision"].get("previous_boot_id") == data["supervision"].get("previous_boot_id")
+event_names = [event["event"] for event in events["events"]]
+assert event_names[:2] == ["WorkerAllocated", "SessionCreated"]
+assert "CommandStarted" in event_names
+assert "CommandFinished" in event_names
+assert "EvidenceSealed" in event_names
+assert [event["sequence"] for event in events["events"]] == sorted(event["sequence"] for event in events["events"])
 assert data["status"] == "Running"
 assert data["commands_started"] >= 1
 assert data["commands_finished"] >= 1

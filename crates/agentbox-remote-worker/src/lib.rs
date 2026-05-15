@@ -13,6 +13,7 @@ use agentbox_daemon::runtime::providers::remote::{
     RemoteAgentPodEvidenceStreamStatus, RemoteAgentPodEvidenceUploadRequest,
     RemoteAgentPodEvidenceUploadResponse, RemoteAgentPodExecRequest, RemoteAgentPodExecResponse,
     RemoteAgentPodHandshakeAck, RemoteAgentPodHandshakeDescriptor, RemoteAgentPodLifecycleEvent,
+    RemoteAgentPodLifecycleEventRecord, RemoteAgentPodLifecycleEventsResponse,
     RemoteAgentPodPendingApprovalStatus, RemoteAgentPodRestartPolicy,
     RemoteAgentPodRestartSessionRequest, RemoteAgentPodRestartSessionResponse,
     RemoteAgentPodWorkspaceBundle, RemoteAgentPodWorkspaceExportResponse,
@@ -122,6 +123,7 @@ struct WorkerSession {
     stored_evidence_bundles: Vec<WorkerStoredEvidenceBundle>,
     evidence_streams: HashMap<String, WorkerEvidenceStream>,
     pending_approvals: Vec<WorkerPendingApproval>,
+    lifecycle_events: Vec<RemoteAgentPodLifecycleEventRecord>,
 }
 
 #[derive(Clone)]
@@ -261,6 +263,8 @@ struct WorkerSessionSnapshot {
     evidence_streams: Vec<WorkerEvidenceStreamSnapshot>,
     #[serde(default)]
     pending_approvals: Vec<WorkerPendingApprovalSnapshot>,
+    #[serde(default)]
+    lifecycle_events: Vec<RemoteAgentPodLifecycleEventRecord>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -540,6 +544,7 @@ impl WorkerSession {
             stored_evidence_bundles: Vec::new(),
             evidence_streams: HashMap::new(),
             pending_approvals: Vec::new(),
+            lifecycle_events: Vec::new(),
         }
     }
 
@@ -643,7 +648,27 @@ impl WorkerSession {
                     created_at: approval.created_at,
                 })
                 .collect(),
+            lifecycle_events: snapshot.lifecycle_events,
         }
+    }
+
+    fn record_lifecycle_event(
+        &mut self,
+        event: RemoteAgentPodLifecycleEvent,
+        reason: Option<String>,
+    ) {
+        let sequence = self
+            .lifecycle_events
+            .last()
+            .map(|event| event.sequence.saturating_add(1))
+            .unwrap_or(1);
+        self.lifecycle_events
+            .push(RemoteAgentPodLifecycleEventRecord {
+                sequence,
+                event,
+                occurred_at: Utc::now(),
+                reason,
+            });
     }
 
     fn to_snapshot(&self, worker_session_id: String) -> WorkerSessionSnapshot {
@@ -722,6 +747,7 @@ impl WorkerSession {
                     created_at: approval.created_at,
                 })
                 .collect(),
+            lifecycle_events: self.lifecycle_events.clone(),
         }
     }
 }
@@ -836,6 +862,10 @@ pub fn router(config: RemoteWorkerConfig) -> Router {
             get(evidence_status),
         )
         .route(
+            "/sessions/{worker_session_id}/events",
+            get(lifecycle_events),
+        )
+        .route(
             "/sessions/{worker_session_id}/evidence/bundle",
             post(upload_evidence_bundle),
         )
@@ -922,7 +952,7 @@ async fn create_session(
     }
     let file_credentials =
         materialize_worker_credential_files(&workspace_host_path, &request).await?;
-    let session = WorkerSession::new_with_credentials(
+    let mut session = WorkerSession::new_with_credentials(
         request.spec.id.clone(),
         workspace_host_path,
         WorkerPolicy::from_spec(&request.spec),
@@ -930,6 +960,14 @@ async fn create_session(
         file_credentials,
         worker_approval_grants(&request.spec.id, &request.spec.approvals),
         WorkerLifecycleConfig::from_request(&request),
+    );
+    session.record_lifecycle_event(
+        RemoteAgentPodLifecycleEvent::WorkerAllocated,
+        Some("remote worker allocated session".into()),
+    );
+    session.record_lifecycle_event(
+        RemoteAgentPodLifecycleEvent::SessionCreated,
+        Some("remote worker created session".into()),
     );
     state
         .sessions
@@ -1327,6 +1365,10 @@ async fn record_command_started(
         let session = get_matching_session_mut(&mut sessions, worker_session_id, session_id)?;
         session.commands_started = session.commands_started.saturating_add(1);
         session.active_command_count = session.active_command_count.saturating_add(1);
+        session.record_lifecycle_event(
+            RemoteAgentPodLifecycleEvent::CommandStarted,
+            Some("remote worker started command".into()),
+        );
     }
     persist_sessions(state).await.map_err(worker_state_error)
 }
@@ -1345,6 +1387,14 @@ async fn record_command_finished(
         session.active_command_count = session.active_command_count.saturating_sub(1);
         session.last_command_exit_code = Some(result.exit_code);
         session.last_command_finished_at = Some(Utc::now());
+        session.record_lifecycle_event(
+            RemoteAgentPodLifecycleEvent::CommandFinished,
+            Some(format!("remote worker command exited {}", result.exit_code)),
+        );
+        session.record_lifecycle_event(
+            RemoteAgentPodLifecycleEvent::EvidenceSealed,
+            Some("remote worker sealed command evidence".into()),
+        );
         let mut retained = Vec::with_capacity(session.file_credentials.len());
         for credential in session.file_credentials.drain(..) {
             if credential.one_time {
@@ -1399,6 +1449,10 @@ async fn record_pending_approval(
                 reason: reason.to_string(),
                 created_at: Utc::now(),
             });
+            session.record_lifecycle_event(
+                RemoteAgentPodLifecycleEvent::EvidenceSealed,
+                Some("remote worker recorded pending approval evidence".into()),
+            );
         }
     }
     persist_sessions(state).await.map_err(worker_state_error)
@@ -1929,6 +1983,31 @@ async fn evidence_status(
     }))
 }
 
+async fn lifecycle_events(
+    State(state): State<Arc<RemoteWorkerState>>,
+    AxumPath(worker_session_id): AxumPath<String>,
+    Query(query): Query<WorkerEvidenceStatusQuery>,
+) -> WorkerRouteResult<RemoteAgentPodLifecycleEventsResponse> {
+    let sessions = state.sessions.lock().await;
+    let Some(session) = sessions.get(&worker_session_id) else {
+        return Err(worker_error(
+            StatusCode::NOT_FOUND,
+            format!("agentbox remote worker session {worker_session_id} has not been created"),
+        ));
+    };
+    if session.session_id != query.session_id {
+        return Err(worker_error(
+            StatusCode::CONFLICT,
+            "agentbox remote worker session id does not match worker session",
+        ));
+    }
+    Ok(Json(RemoteAgentPodLifecycleEventsResponse {
+        session_id: session.session_id.clone(),
+        worker_session_id,
+        events: session.lifecycle_events.clone(),
+    }))
+}
+
 async fn export_workspace(
     State(state): State<Arc<RemoteWorkerState>>,
     AxumPath(worker_session_id): AxumPath<String>,
@@ -1989,7 +2068,20 @@ async fn restart_session(
                 "agentbox remote worker can restart only stopped or failed sessions",
             ));
         }
-        session.mark_restarted()
+        let restart_attempt = session.mark_restarted();
+        session.record_lifecycle_event(
+            RemoteAgentPodLifecycleEvent::WorkerRestarted,
+            Some(request.reason.clone()),
+        );
+        session.record_lifecycle_event(
+            RemoteAgentPodLifecycleEvent::SessionResumed,
+            Some("remote worker resumed session".into()),
+        );
+        session.record_lifecycle_event(
+            RemoteAgentPodLifecycleEvent::EvidenceSealed,
+            Some("remote worker sealed restart evidence".into()),
+        );
+        restart_attempt
     };
     persist_sessions(&state).await.map_err(worker_state_error)?;
     Ok(Json(RemoteAgentPodRestartSessionResponse {
@@ -2392,6 +2484,10 @@ async fn record_stored_evidence_bundle(
                 storage_path: stored.path.clone(),
             });
     }
+    session.record_lifecycle_event(
+        RemoteAgentPodLifecycleEvent::EvidenceSealed,
+        Some("remote worker stored evidence bundle".into()),
+    );
     drop(sessions);
     persist_sessions(state).await.map_err(worker_state_error)?;
     Ok(())
@@ -2419,6 +2515,10 @@ async fn accept_evidence(
         sealed_at: Some(request.sealed_at),
     };
     session.evidence_receipts.push(receipt.clone());
+    session.record_lifecycle_event(
+        RemoteAgentPodLifecycleEvent::EvidenceSealed,
+        Some("remote worker accepted evidence receipt".into()),
+    );
     drop(sessions);
     persist_sessions(state).await.map_err(worker_state_error)?;
     Ok(receipt)
@@ -2474,6 +2574,15 @@ async fn accept_evidence_stream_chunk(
         stream.stream_sha256 = Some(sha256_hex(stream.contents_utf8.as_bytes()));
     }
     let stream_sha256 = stream.stream_sha256.clone();
+    if request.final_chunk {
+        session.record_lifecycle_event(
+            RemoteAgentPodLifecycleEvent::EvidenceSealed,
+            Some(format!(
+                "remote worker sealed evidence stream {}",
+                request.stream_id
+            )),
+        );
+    }
     drop(sessions);
     persist_sessions(state).await.map_err(worker_state_error)?;
     Ok(stream_sha256)
@@ -2526,6 +2635,10 @@ async fn accept_approval_grant(
             .push(request.grant.clone().bound_to_session(&request.session_id));
     }
     session.pending_approvals.remove(index);
+    session.record_lifecycle_event(
+        RemoteAgentPodLifecycleEvent::EvidenceSealed,
+        Some("remote worker accepted approval grant".into()),
+    );
     let remaining = session
         .pending_approvals
         .len()
@@ -2660,6 +2773,14 @@ async fn destroy_session(
         ));
     }
     session.mark_stopped();
+    session.record_lifecycle_event(
+        RemoteAgentPodLifecycleEvent::KillSwitchAck,
+        Some(request.reason.clone()),
+    );
+    session.record_lifecycle_event(
+        RemoteAgentPodLifecycleEvent::WorkerDestroyed,
+        Some("remote worker destroyed session".into()),
+    );
     drop(sessions);
     persist_sessions(&state).await.map_err(worker_state_error)?;
     Ok(Json(RemoteAgentPodDestroySessionResponse {

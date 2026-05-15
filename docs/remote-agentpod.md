@@ -141,6 +141,9 @@ After a worker accepts evidence, the CLI can query its evidence status route:
 ```sh
 agentbox remote-evidence-status \
   --session agentbox-session-id
+
+agentbox remote-events \
+  --session agentbox-session-id
 ```
 
 For sessions created through `agentbox run --provider remote-agentpod`, the CLI
@@ -157,7 +160,10 @@ agentbox remote-evidence-status \
 The command prints the validated worker response, including session status,
 restart policy metadata, heartbeat timestamp, kill-switch state, evidence-sealed
 state, evidence metadata receipts, pending approvals, stream state, and stored
-bundle payload references.
+bundle payload references. `remote-events` prints the persisted lifecycle event
+journal for the session, including allocation, command start/finish, evidence
+seal, restart, and destroy events with monotonically increasing sequence
+numbers.
 
 If the worker reports a stopped or failed session, the operator can explicitly
 resume the same worker session without replaying the prior command:
@@ -321,6 +327,7 @@ The worker requires an explicit 32-byte hex Ed25519 seed. It signs handshake
 acknowledgements using the Ed25519 format described above and exposes the same
 `/handshake`, `/sessions`, `/sessions/{worker_session_id}/exec`,
 `/sessions/{worker_session_id}/evidence`,
+`/sessions/{worker_session_id}/events`,
 `/sessions/{worker_session_id}/evidence/bundle`,
 `/sessions/{worker_session_id}/evidence/stream`,
 `/sessions/{worker_session_id}/restart`, and

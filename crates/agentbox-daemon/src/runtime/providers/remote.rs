@@ -1103,6 +1103,86 @@ pub struct RemoteAgentPodEvidenceStatusResponse {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteAgentPodLifecycleEventRecord {
+    pub sequence: u64,
+    pub event: RemoteAgentPodLifecycleEvent,
+    pub occurred_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+impl RemoteAgentPodLifecycleEventRecord {
+    pub fn validate(&self) -> Result<(), RuntimeError> {
+        if self.sequence == 0 {
+            return Err(RuntimeError::ManifestRejected(
+                "remote lifecycle event sequence must be positive".into(),
+            ));
+        }
+        if self
+            .reason
+            .as_ref()
+            .is_some_and(|reason| reason.trim().is_empty())
+        {
+            return Err(RuntimeError::ManifestRejected(
+                "remote lifecycle event reason must not be empty".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteAgentPodLifecycleEventsRequest {
+    pub session_id: String,
+    pub worker_session_id: String,
+}
+
+impl RemoteAgentPodLifecycleEventsRequest {
+    pub fn validate(&self) -> Result<(), RuntimeError> {
+        if self.session_id.trim().is_empty() || self.worker_session_id.trim().is_empty() {
+            return Err(RuntimeError::ManifestRejected(
+                "remote lifecycle events request must include session ids".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteAgentPodLifecycleEventsResponse {
+    pub session_id: String,
+    pub worker_session_id: String,
+    pub events: Vec<RemoteAgentPodLifecycleEventRecord>,
+}
+
+impl RemoteAgentPodLifecycleEventsResponse {
+    pub fn validate_for(
+        &self,
+        request: &RemoteAgentPodLifecycleEventsRequest,
+    ) -> Result<(), RuntimeError> {
+        request.validate()?;
+        if self.session_id != request.session_id
+            || self.worker_session_id != request.worker_session_id
+        {
+            return Err(RuntimeError::ManifestRejected(
+                "remote lifecycle events response session ids do not match request".into(),
+            ));
+        }
+        let mut previous = 0;
+        for event in &self.events {
+            event.validate()?;
+            if event.sequence <= previous {
+                return Err(RuntimeError::ManifestRejected(
+                    "remote lifecycle event sequence must be strictly increasing".into(),
+                ));
+            }
+            previous = event.sequence;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RemoteAgentPodWorkerSupervisionPersistence {
     MemoryOnly,
     StateDir,
@@ -1600,6 +1680,11 @@ pub trait RemoteAgentPodTransport: Send + Sync {
         request: RemoteAgentPodEvidenceStatusRequest,
     ) -> Result<RemoteAgentPodEvidenceStatusResponse, RuntimeError>;
 
+    async fn lifecycle_events(
+        &self,
+        request: RemoteAgentPodLifecycleEventsRequest,
+    ) -> Result<RemoteAgentPodLifecycleEventsResponse, RuntimeError>;
+
     async fn worker_status(&self) -> Result<RemoteAgentPodWorkerStatusResponse, RuntimeError>;
 
     async fn upload_evidence_stream_chunk(
@@ -1867,6 +1952,35 @@ impl RemoteAgentPodTransport for HttpRemoteAgentPodTransport {
             .map_err(|err| {
                 RuntimeError::ManifestRejected(format!(
                     "remote evidence status response was invalid JSON: {err}"
+                ))
+            })?;
+        response.validate_for(&request)?;
+        Ok(response)
+    }
+
+    async fn lifecycle_events(
+        &self,
+        request: RemoteAgentPodLifecycleEventsRequest,
+    ) -> Result<RemoteAgentPodLifecycleEventsResponse, RuntimeError> {
+        request.validate()?;
+        let response = self
+            .client
+            .get(self.route(format!("sessions/{}/events", request.worker_session_id)))
+            .query(&[("session_id", request.session_id.as_str())])
+            .send()
+            .await
+            .map_err(|err| {
+                RuntimeError::Unavailable(format!("remote lifecycle events failed: {err}"))
+            })?
+            .error_for_status()
+            .map_err(|err| {
+                RuntimeError::Unavailable(format!("remote lifecycle events rejected: {err}"))
+            })?
+            .json::<RemoteAgentPodLifecycleEventsResponse>()
+            .await
+            .map_err(|err| {
+                RuntimeError::ManifestRejected(format!(
+                    "remote lifecycle events response was invalid JSON: {err}"
                 ))
             })?;
         response.validate_for(&request)?;
@@ -3033,6 +3147,32 @@ mod tests {
                     recovered_sessions: 0,
                     persistence: RemoteAgentPodWorkerSupervisionPersistence::MemoryOnly,
                 }),
+            };
+            response.validate_for(&request)?;
+            Ok(response)
+        }
+
+        async fn lifecycle_events(
+            &self,
+            request: RemoteAgentPodLifecycleEventsRequest,
+        ) -> Result<RemoteAgentPodLifecycleEventsResponse, RuntimeError> {
+            let response = RemoteAgentPodLifecycleEventsResponse {
+                session_id: request.session_id.clone(),
+                worker_session_id: request.worker_session_id.clone(),
+                events: vec![
+                    RemoteAgentPodLifecycleEventRecord {
+                        sequence: 1,
+                        event: RemoteAgentPodLifecycleEvent::WorkerAllocated,
+                        occurred_at: Utc::now(),
+                        reason: Some("fake transport allocated worker".into()),
+                    },
+                    RemoteAgentPodLifecycleEventRecord {
+                        sequence: 2,
+                        event: RemoteAgentPodLifecycleEvent::SessionCreated,
+                        occurred_at: Utc::now(),
+                        reason: None,
+                    },
+                ],
             };
             response.validate_for(&request)?;
             Ok(response)
