@@ -55,6 +55,9 @@ validate_json "$TMPDIR/setup-plan-remote.json" \
 "${CLI[@]}" setup --dry-run --provider remote-agentpod --json >"$TMPDIR/setup-dry-run-remote.json"
 validate_json "$TMPDIR/setup-dry-run-remote.json" \
   "data.get('schema_version') == 1 and data.get('dry_run') == True and data.get('provider') == 'remote-agentpod' and data.get('shims') is None and data.get('setup_plan', {}).get('provider') == 'remote-agentpod' and 'export AGENTBOX_REMOTE_AGENTPOD_ENDPOINT=https://worker.example.com/agentpod' in data.get('operator_commands', [])"
+"${CLI[@]}" setup --dry-run --provider remote-agentpod --endpoint https://agentpod.example.com/run --json >"$TMPDIR/setup-dry-run-remote-endpoint.json"
+validate_json "$TMPDIR/setup-dry-run-remote-endpoint.json" \
+  "data.get('remote_endpoint') == 'https://agentpod.example.com/run' and 'export AGENTBOX_REMOTE_AGENTPOD_ENDPOINT=https://agentpod.example.com/run' in data.get('operator_commands', []) and 'agentbox remote-handshake --endpoint https://agentpod.example.com/run' in data.get('operator_commands', [])"
 
 log "checking AgentPod run plan JSON"
 "${CLI[@]}" run --plan --json -- echo agentbox-contract >"$TMPDIR/run-plan.json"

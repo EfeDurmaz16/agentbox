@@ -332,6 +332,7 @@ agentbox doctor          # Local readiness check for daemon, shims, audit, and p
 agentbox setup-plan      # Show the next local setup actions without changing host state
 agentbox setup-plan --provider remote-agentpod
 agentbox setup --dry-run --provider remote-agentpod --json
+agentbox setup --dry-run --provider remote-agentpod --endpoint https://agentpod.example.com/run --json
 agentbox evidence        # Export audit/evidence JSONL
 agentbox minipod-spec    # Generate and validate a governed minipod manifest
 agentbox minipod-spec --policy-bundle ./task-policy.json

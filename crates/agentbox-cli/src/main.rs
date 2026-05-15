@@ -48,6 +48,10 @@ enum Commands {
         /// Limit setup actions to one provider: direct-host, podman, agentpod-macos, agentpod-linux, agentpod-windows, or remote-agentpod
         #[arg(long)]
         provider: Option<String>,
+
+        /// Remote AgentPod worker endpoint to include in setup guidance
+        #[arg(long)]
+        endpoint: Option<String>,
     },
     /// Stop the daemon
     Stop,
@@ -779,10 +783,11 @@ fn cmd_start() {
     println!("daemon started (PID: {})", pid);
 }
 
-fn cmd_setup(json: bool, dry_run: bool, provider: Option<String>) {
+fn cmd_setup(json: bool, dry_run: bool, provider: Option<String>, endpoint: Option<String>) {
     use agentbox_daemon::config;
 
     let provider_filter = provider.as_deref().map(normalize_setup_provider_filter);
+    let remote_endpoint = setup_remote_endpoint(provider_filter.as_deref(), endpoint.as_deref());
     let mut actions = Vec::new();
     let mut config_summary = None;
     let mut shim_summary = None;
@@ -843,7 +848,7 @@ fn cmd_setup(json: bool, dry_run: bool, provider: Option<String>) {
 
     let report = build_doctor_report();
     let plan = setup_plan_from_doctor(&report, provider_filter.as_deref());
-    let operator_commands = setup_operator_commands(&plan);
+    let operator_commands = setup_operator_commands(&plan, remote_endpoint.as_deref());
     let setup_report = SetupReport {
         schema_version: 1,
         platform: std::env::consts::OS.to_string(),
@@ -852,6 +857,7 @@ fn cmd_setup(json: bool, dry_run: bool, provider: Option<String>) {
         actions,
         config: config_summary,
         shims: shim_summary,
+        remote_endpoint,
         operator_commands,
         setup_plan: plan,
     };
@@ -878,6 +884,9 @@ fn cmd_setup(json: bool, dry_run: bool, provider: Option<String>) {
         println!("socket:   {}", config.socket_path);
     } else {
         println!("config:   {}", config_path().display());
+    }
+    if let Some(endpoint) = &setup_report.remote_endpoint {
+        println!("endpoint: {endpoint}");
     }
     println!();
     for action in &setup_report.actions {
@@ -1303,6 +1312,7 @@ struct SetupReport {
     actions: Vec<SetupAction>,
     config: Option<SetupConfigSummary>,
     shims: Option<SetupShimSummary>,
+    remote_endpoint: Option<String>,
     operator_commands: Vec<String>,
     setup_plan: SetupPlan,
 }
@@ -1371,12 +1381,37 @@ fn setup_should_install_shims(provider: Option<&str>) -> bool {
     matches!(provider, None | Some("all") | Some("direct-host"))
 }
 
-fn setup_operator_commands(plan: &SetupPlan) -> Vec<String> {
+fn setup_remote_endpoint(provider: Option<&str>, endpoint: Option<&str>) -> Option<String> {
+    let endpoint = endpoint?.trim();
+    if !matches!(provider, Some("remote-agentpod")) {
+        eprintln!("error: --endpoint is only valid with --provider remote-agentpod");
+        std::process::exit(2);
+    }
+    let loopback_allowed = std::env::var("AGENTBOX_REMOTE_AGENTPOD_ALLOW_HTTP_LOOPBACK")
+        .map(|value| matches!(value.as_str(), "1" | "true" | "yes"))
+        .unwrap_or(false);
+    let (ok, detail) = remote_agentpod_endpoint_status(endpoint, loopback_allowed);
+    if !ok {
+        eprintln!("error: invalid remote AgentPod endpoint: {detail}");
+        std::process::exit(2);
+    }
+    Some(endpoint.to_string())
+}
+
+fn setup_operator_commands(plan: &SetupPlan, remote_endpoint: Option<&str>) -> Vec<String> {
     let mut commands = plan
         .steps
         .iter()
         .filter_map(|step| step.command.clone())
         .collect::<Vec<_>>();
+    if let Some(endpoint) = remote_endpoint {
+        commands
+            .retain(|command| !command.starts_with("export AGENTBOX_REMOTE_AGENTPOD_ENDPOINT="));
+        commands.push(format!(
+            "export AGENTBOX_REMOTE_AGENTPOD_ENDPOINT={endpoint}"
+        ));
+        commands.push(format!("agentbox remote-handshake --endpoint {endpoint}"));
+    }
     commands.sort();
     commands.dedup();
     commands
@@ -6235,7 +6270,8 @@ async fn main() {
             json,
             dry_run,
             provider,
-        } => cmd_setup(json, dry_run, provider),
+            endpoint,
+        } => cmd_setup(json, dry_run, provider, endpoint),
         Commands::Stop => cmd_stop(),
         Commands::Status => cmd_status(),
         Commands::Doctor { json } => cmd_doctor(json),
@@ -6708,13 +6744,34 @@ mod tests {
             ),
         ]);
         let plan = setup_plan_from_doctor(&report, Some("all"));
-        let commands = setup_operator_commands(&plan);
+        let commands = setup_operator_commands(&plan, None);
 
         assert_eq!(
             commands,
             vec![
                 "agentbox start".to_string(),
                 "export AGENTBOX_REMOTE_AGENTPOD_ENDPOINT=https://worker.example.com/agentpod"
+                    .to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn setup_operator_commands_use_explicit_remote_endpoint() {
+        let report = doctor_report(vec![doctor_advisory_check(
+            "remote-agentpod endpoint",
+            false,
+            "missing".into(),
+            "set endpoint",
+        )]);
+        let plan = setup_plan_from_doctor(&report, Some("remote-agentpod"));
+        let commands = setup_operator_commands(&plan, Some("https://agentpod.example.com/run"));
+
+        assert_eq!(
+            commands,
+            vec![
+                "agentbox remote-handshake --endpoint https://agentpod.example.com/run".to_string(),
+                "export AGENTBOX_REMOTE_AGENTPOD_ENDPOINT=https://agentpod.example.com/run"
                     .to_string()
             ]
         );
