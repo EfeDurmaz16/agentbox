@@ -1417,6 +1417,7 @@ mod tests {
                 "cgroup-plan",
                 "seccomp-plan",
                 "landlock-plan",
+                "nftables-plan",
             ]
         );
         assert_eq!(
@@ -1435,6 +1436,10 @@ mod tests {
             .expected_boundary
             .contains("resource write plan only"));
         assert_eq!(plan.layers[6].argv, vec!["ptrace", "bpf"]);
+        assert!(plan.layers[8]
+            .argv
+            .iter()
+            .any(|arg| arg.contains("domain:")));
     }
 
     #[test]
