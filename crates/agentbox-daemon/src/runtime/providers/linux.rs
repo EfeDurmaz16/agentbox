@@ -892,7 +892,8 @@ impl LinuxAgentPodExecutionPlan {
         let user_namespace = LinuxUserNamespaceLauncher::plan(command)?;
         let mount_namespace = LinuxMountNamespaceLauncher::plan(spec)?;
         let pid_namespace = LinuxPidNamespaceLauncher::plan(command)?;
-        let cgroup = LinuxCgroupV2Limiter::plan(&spec.id, &spec.resources)?;
+        let mut cgroup = LinuxCgroupV2Limiter::plan(&spec.id, &spec.resources)?;
+        cgroup.pids_max = linux_pids_max_from_spec(spec)?;
         let seccomp = LinuxSeccompProfileLoader::plan(&spec.seccomp)?;
         let landlock = LinuxLandlockRuleset::plan(spec)?;
         let nftables = LinuxNftablesPolicyDescriptor::plan(spec)?;
@@ -1184,6 +1185,21 @@ fn linux_seccomp_audit_arch() -> Option<u32> {
     } else {
         None
     }
+}
+
+fn linux_pids_max_from_spec(spec: &MinipodSpec) -> Result<Option<u32>, RuntimeError> {
+    let Some(raw) = spec.labels.get("agentbox.resources.pids_max") else {
+        return Ok(None);
+    };
+    let value = raw.parse::<u32>().map_err(|_| {
+        RuntimeError::ManifestRejected("agentbox.resources.pids_max must be a u32".into())
+    })?;
+    if value == 0 {
+        return Err(RuntimeError::ManifestRejected(
+            "agentbox.resources.pids_max cannot be zero".into(),
+        ));
+    }
+    Ok(Some(value))
 }
 
 #[cfg(target_os = "linux")]
@@ -1673,6 +1689,35 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn agentpod_execution_plan_maps_pids_max_label_to_cgroup_limit() {
+        let mut spec = MinipodSpec::for_agent_task("hermes", "/tmp/agentbox-work");
+        spec.labels
+            .insert("agentbox.resources.pids_max".into(), "64".into());
+        let command = command(&["/bin/true"]);
+
+        let plan = LinuxAgentPodExecutionPlan::from_minipod_spec(&spec, &command).unwrap();
+
+        assert_eq!(plan.cgroup.pids_max, Some(64));
+        assert!(plan
+            .cgroup
+            .writes()
+            .iter()
+            .any(|write| { write.file == "pids.max" && write.value == "64" }));
+    }
+
+    #[test]
+    fn agentpod_execution_plan_rejects_invalid_pids_max_label() {
+        let mut spec = MinipodSpec::for_agent_task("hermes", "/tmp/agentbox-work");
+        spec.labels
+            .insert("agentbox.resources.pids_max".into(), "not-a-number".into());
+        let command = command(&["/bin/true"]);
+
+        let err = LinuxAgentPodExecutionPlan::from_minipod_spec(&spec, &command).unwrap_err();
+
+        assert!(matches!(err, RuntimeError::ManifestRejected(_)));
     }
 
     #[test]

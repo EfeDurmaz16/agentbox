@@ -227,6 +227,10 @@ enum Commands {
         #[arg(long, default_value = "1024")]
         memory: u64,
 
+        /// Optional Linux cgroup pids.max process limit
+        #[arg(long = "max-processes")]
+        max_processes: Option<u32>,
+
         /// Optional command timeout in seconds
         #[arg(long = "timeout-seconds")]
         timeout_seconds: Option<u64>,
@@ -458,6 +462,10 @@ enum Commands {
         /// Enable a review-required writable workspace overlay rooted at this host directory
         #[arg(long = "workspace-overlay-dir")]
         workspace_overlay_dir: Option<PathBuf>,
+
+        /// Optional Linux cgroup pids.max process limit
+        #[arg(long = "max-processes")]
+        max_processes: Option<u32>,
     },
     /// List runtime providers and their current implementation status
     Providers {
@@ -2622,6 +2630,7 @@ struct RunOptions {
     workspace_mode: Option<String>,
     workspace_overlay_dir: Option<PathBuf>,
     memory: u64,
+    max_processes: Option<u32>,
     timeout_seconds: Option<u64>,
     deny_syscalls: Vec<String>,
     read_only_mounts: Vec<String>,
@@ -2774,6 +2783,16 @@ async fn cmd_run(options: RunOptions) {
         timeout_seconds: options.timeout_seconds,
         ..ResourcePolicy::default()
     };
+    if let Some(max_processes) = options.max_processes {
+        if max_processes == 0 {
+            eprintln!("error: --max-processes must be greater than zero");
+            std::process::exit(1);
+        }
+        spec.labels.insert(
+            "agentbox.resources.pids_max".to_string(),
+            max_processes.to_string(),
+        );
+    }
     if !options.deny_syscalls.is_empty() {
         let syscalls = options
             .deny_syscalls
@@ -5273,6 +5292,7 @@ struct MinipodSpecOptions {
     deny_localhost: bool,
     workspace_mode: Option<String>,
     workspace_overlay_dir: Option<PathBuf>,
+    max_processes: Option<u32>,
 }
 
 fn cmd_minipod_spec(options: MinipodSpecOptions) {
@@ -5346,6 +5366,16 @@ fn cmd_minipod_spec(options: MinipodSpecOptions) {
         options.workspace_mode.as_deref(),
         options.workspace_overlay_dir,
     );
+    if let Some(max_processes) = options.max_processes {
+        if max_processes == 0 {
+            eprintln!("error: --max-processes must be greater than zero");
+            std::process::exit(1);
+        }
+        spec.labels.insert(
+            "agentbox.resources.pids_max".to_string(),
+            max_processes.to_string(),
+        );
+    }
     if !options.allow_domains.is_empty() {
         spec.network.mode = NetworkMode::AllowListed;
         spec.network.allowed_domains = options.allow_domains;
@@ -7697,6 +7727,7 @@ async fn main() {
             workspace_mode,
             workspace_overlay_dir,
             memory,
+            max_processes,
             timeout_seconds,
             deny_syscalls,
             read_only_mounts,
@@ -7724,6 +7755,7 @@ async fn main() {
                 workspace_mode,
                 workspace_overlay_dir,
                 memory,
+                max_processes,
                 timeout_seconds,
                 deny_syscalls,
                 read_only_mounts,
@@ -7786,6 +7818,7 @@ async fn main() {
             policy_bundles,
             workspace_mode,
             workspace_overlay_dir,
+            max_processes,
             deny_domains,
             deny_localhost,
         } => cmd_minipod_spec(MinipodSpecOptions {
@@ -7808,6 +7841,7 @@ async fn main() {
             deny_localhost,
             workspace_mode,
             workspace_overlay_dir,
+            max_processes,
         }),
         Commands::Providers { json } => cmd_providers(json),
         Commands::BridgeHealth { json, provider } => cmd_bridge_health(json, provider),
