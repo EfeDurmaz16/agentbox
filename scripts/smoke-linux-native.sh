@@ -46,6 +46,8 @@ cargo run -q -p agentbox-cli -- native-plan \
     and .landlock.handled_access_mask == 434
     and .mount_namespace.workspace_bind_mount_wired == false
     and (.mount_namespace.workspace_mount_claim | contains("not wired"))
+    and any(.runner_phases[]; .name == "bind-workspace" and .status == "planned")
+    and any(.runner_phases[]; .name == "apply-landlock" and .status == "prototype")
     and (.security_claim | contains("bind-mount setup is not wired"))
   ' >/dev/null
 

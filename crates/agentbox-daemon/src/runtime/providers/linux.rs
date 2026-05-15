@@ -1069,6 +1069,7 @@ pub struct LinuxAgentPodExecutionPlan {
     pub session_id: String,
     pub command_argv: Vec<String>,
     pub composed_argv: Vec<String>,
+    pub runner_phases: Vec<LinuxAgentPodRunnerPhase>,
     pub user_namespace: LinuxUserNamespacePlan,
     pub mount_namespace: LinuxMountNamespacePlan,
     pub pid_namespace: LinuxPidNamespacePlan,
@@ -1082,6 +1083,13 @@ pub struct LinuxAgentPodExecutionPlan {
     pub live_execution_enabled: bool,
     pub requires_linux: bool,
     pub security_claim: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LinuxAgentPodRunnerPhase {
+    pub name: String,
+    pub status: String,
+    pub claim: String,
 }
 
 impl LinuxAgentPodExecutionPlan {
@@ -1122,6 +1130,7 @@ impl LinuxAgentPodExecutionPlan {
             session_id: spec.id.clone(),
             command_argv: command.argv.clone(),
             composed_argv,
+            runner_phases: linux_agentpod_runner_phases(&mount_namespace, &seccomp, &landlock),
             user_namespace,
             mount_namespace,
             pid_namespace,
@@ -1143,6 +1152,60 @@ impl LinuxAgentPodExecutionPlan {
     pub fn runnable_on_current_host(&self) -> bool {
         cfg!(target_os = "linux") && self.live_execution_enabled
     }
+}
+
+fn linux_agentpod_runner_phases(
+    mount_namespace: &LinuxMountNamespacePlan,
+    seccomp: &LinuxSeccompPlan,
+    landlock: &LinuxLandlockPlan,
+) -> Vec<LinuxAgentPodRunnerPhase> {
+    vec![
+        LinuxAgentPodRunnerPhase {
+            name: "enter-user-mount-pid-namespaces".into(),
+            status: "prototype".into(),
+            claim: format!(
+                "unshare user, mount, and PID namespaces with {} propagation",
+                mount_namespace.propagation
+            ),
+        },
+        LinuxAgentPodRunnerPhase {
+            name: "bind-workspace".into(),
+            status: if mount_namespace.workspace_bind_mount_wired {
+                "prototype"
+            } else {
+                "planned"
+            }
+            .into(),
+            claim: mount_namespace.workspace_mount_claim.clone(),
+        },
+        LinuxAgentPodRunnerPhase {
+            name: "apply-landlock".into(),
+            status: "prototype".into(),
+            claim: format!(
+                "apply handled filesystem access mask {} after no-new-privs",
+                landlock.handled_access_mask
+            ),
+        },
+        LinuxAgentPodRunnerPhase {
+            name: "apply-seccomp".into(),
+            status: if seccomp.requires_loader {
+                "prototype"
+            } else {
+                "inactive"
+            }
+            .into(),
+            claim: if seccomp.requires_loader {
+                "install supported BPF syscall deny filter after no-new-privs".into()
+            } else {
+                "no syscall deny filter requested".into()
+            },
+        },
+        LinuxAgentPodRunnerPhase {
+            name: "exec-command".into(),
+            status: "prototype".into(),
+            claim: "execute direct argv without shell wrapping and collect output".into(),
+        },
+    ]
 }
 
 pub struct LinuxAgentPodPrototypeExecutor;
@@ -2466,6 +2529,19 @@ mod tests {
         assert_eq!(plan.provider, "agentpod-linux");
         assert_eq!(plan.session_id, spec.id);
         assert_eq!(plan.command_argv, vec!["/bin/true"]);
+        assert_eq!(
+            plan.runner_phases
+                .iter()
+                .map(|phase| (phase.name.as_str(), phase.status.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("enter-user-mount-pid-namespaces", "prototype"),
+                ("bind-workspace", "planned"),
+                ("apply-landlock", "prototype"),
+                ("apply-seccomp", "inactive"),
+                ("exec-command", "prototype"),
+            ]
+        );
         assert_eq!(plan.live_env_var, "AGENTBOX_LINUX_NATIVE");
         assert!(!plan.cgroup_root.is_empty());
         assert!(plan.requires_linux);
