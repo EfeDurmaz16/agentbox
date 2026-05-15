@@ -35,6 +35,11 @@ log "provider support levels"
 validate_json "$ARTIFACT_DIR/providers.json" \
   "any(p.get('provider') == 'direct-host' and p.get('status') == 'shipped' for p in data) and any(p.get('provider') == 'remote-agentpod' and p.get('status') == 'experimental' for p in data) and any(p.get('provider') == 'agentpod-macos' and p.get('status') == 'descriptor-only' for p in data)"
 
+log "provider bridge readiness"
+"${CLI[@]}" bridge-health --json >"$ARTIFACT_DIR/bridge-health.json"
+validate_json "$ARTIFACT_DIR/bridge-health.json" \
+  "any(p.get('provider') == 'direct-host' and p.get('readiness', {}).get('verdict') == 'active-command-mediation' for p in data) and any(p.get('provider') == 'remote-agentpod' and p.get('readiness', {}).get('verdict') == 'endpoint-gated' for p in data) and any(p.get('provider') == 'agentpod-macos' and p.get('readiness', {}).get('verdict') == 'metadata-only' for p in data)"
+
 log "guided setup without mutation"
 "${CLI[@]}" setup --dry-run --wizard --json >"$ARTIFACT_DIR/setup-wizard.json"
 validate_json "$ARTIFACT_DIR/setup-wizard.json" \
