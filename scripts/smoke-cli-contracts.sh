@@ -34,6 +34,10 @@ log "checking provider truth JSON"
 validate_json "$TMPDIR/providers.json" \
   "any(p.get('provider') == 'podman' and p.get('setup_command') and p.get('verification_command') for p in data) and any(p.get('provider') == 'remote-agentpod' and p.get('status') == 'experimental' and p.get('setup_command') and p.get('doctor_check') == 'remote-agentpod endpoint' for p in data) and any(p.get('provider') == 'agentpod-windows' and 'job-objects' in p.get('boundary_primitives', []) and 'wfp' in p.get('boundary_primitives', []) and 'windows-sandbox' in p.get('boundary_primitives', []) and 'hyper-v' in p.get('boundary_primitives', []) for p in data) and any(p.get('provider') == 'agentpod-linux' and 'user-namespaces' in p.get('boundary_primitives', []) and 'seccomp' in p.get('boundary_primitives', []) and p.get('verification_command') for p in data)"
 
+log "checking daemon cleanup command surface"
+"${CLI[@]}" clean --help >"$TMPDIR/clean-help.txt"
+grep -F "Remove stale daemon pid and socket files" "$TMPDIR/clean-help.txt" >/dev/null
+
 log "checking doctor JSON truth"
 set +e
 "${CLI[@]}" doctor --json >"$TMPDIR/doctor.json"

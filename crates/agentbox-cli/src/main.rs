@@ -38,6 +38,8 @@ struct Cli {
 enum Commands {
     /// Start the daemon in background
     Start,
+    /// Remove stale daemon pid and socket files
+    Clean,
     /// Initialize local config, directories, and command shims
     Setup {
         /// Emit JSON
@@ -725,6 +727,11 @@ fn cleanup_stale_daemon_files() {
     }
 }
 
+fn stale_daemon_files_present() -> bool {
+    read_pid().is_some_and(|pid| !process_alive(pid))
+        || (socket_path().exists() && read_pid().is_none())
+}
+
 /// Locate the agentbox-daemon binary.
 /// Looks next to the current executable first, then falls back to PATH.
 fn find_daemon_binary() -> Option<PathBuf> {
@@ -804,6 +811,19 @@ fn cmd_start() {
     fs::write(pid_path(), pid.to_string()).expect("failed to write pid file");
 
     println!("daemon started (PID: {})", pid);
+}
+
+fn cmd_clean() {
+    let stale = stale_daemon_files_present();
+    cleanup_stale_daemon_files();
+    if socket_path().exists() && read_pid().is_none() {
+        let _ = fs::remove_file(socket_path());
+    }
+    if stale {
+        println!("cleaned stale daemon pid/socket files");
+    } else {
+        println!("no stale daemon pid/socket files found");
+    }
 }
 
 fn cmd_setup(json: bool, dry_run: bool, provider: Option<String>, endpoint: Option<String>) {
@@ -1546,8 +1566,15 @@ fn setup_plan_step_from_check(check: &DoctorCheck) -> SetupPlanStep {
         release_blocker: check.release_blocker,
         detail: check.detail.clone(),
         action: check.fix.to_string(),
-        command: setup_command_for_check(check.name).map(str::to_string),
+        command: setup_command_for_doctor_check(check),
     }
+}
+
+fn setup_command_for_doctor_check(check: &DoctorCheck) -> Option<String> {
+    if check.name == "daemon socket" && check.detail.contains("stale socket") {
+        return Some("agentbox clean && agentbox start".to_string());
+    }
+    setup_command_for_check(check.name).map(str::to_string)
 }
 
 fn setup_step_title(check_name: &str) -> &'static str {
@@ -6501,6 +6528,7 @@ async fn main() {
 
     match cli.command {
         Commands::Start => cmd_start(),
+        Commands::Clean => cmd_clean(),
         Commands::Setup {
             json,
             dry_run,
@@ -6896,6 +6924,23 @@ mod tests {
         let ready = daemon_socket_doctor_check(true, true, "/tmp/agentbox.sock".into());
         assert!(ready.ok);
         assert_eq!(ready.fix, "none");
+    }
+
+    #[test]
+    fn setup_plan_recommends_clean_for_stale_socket() {
+        let report = doctor_report(vec![daemon_socket_doctor_check(
+            true,
+            false,
+            "/tmp/agentbox.sock".into(),
+        )]);
+
+        let plan = setup_plan_from_doctor(&report, Some("direct-host"));
+
+        assert_eq!(plan.steps.len(), 1);
+        assert_eq!(
+            plan.steps[0].command.as_deref(),
+            Some("agentbox clean && agentbox start")
+        );
     }
 
     #[test]

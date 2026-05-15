@@ -319,6 +319,7 @@ For the public security boundary, see
 ```bash
 agentbox start           # Start the daemon
 agentbox stop            # Stop the daemon
+agentbox clean           # Remove stale daemon pid/socket files
 agentbox status          # Show daemon status + active shims
 
 agentbox install         # Create shim symlinks in ~/.agentbox/shims/
