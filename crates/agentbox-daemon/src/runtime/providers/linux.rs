@@ -977,6 +977,7 @@ impl LinuxAgentPodPrototypeExecutor {
         for (key, value) in &command.env {
             process.env(key, value);
         }
+        configure_linux_child_security(&mut process);
 
         let mut child = process.spawn().map_err(|err| {
             RuntimeError::ExecFailed(format!("Linux AgentPod prototype exec failed: {err}"))
@@ -1016,6 +1017,25 @@ impl LinuxAgentPodPrototypeExecutor {
         Err(RuntimeError::Unavailable(
             "Linux AgentPod prototype execution is only available on Linux".into(),
         ))
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn configure_linux_child_security(command: &mut std::process::Command) {
+    use std::os::unix::process::CommandExt;
+
+    // SAFETY: pre_exec runs after fork and before exec in the child. The closure only
+    // calls the async-signal-safe prctl syscall and constructs an io::Error from errno
+    // on failure, then returns to std::process for exec/error handling.
+    unsafe {
+        command.pre_exec(|| {
+            let result = libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
+            if result == 0 {
+                Ok(())
+            } else {
+                Err(std::io::Error::last_os_error())
+            }
+        });
     }
 }
 
@@ -1289,6 +1309,24 @@ mod tests {
         let err = wait_for_child_output(child, Some(0)).unwrap_err();
 
         assert!(matches!(err, RuntimeError::Timeout(0)));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_child_security_sets_no_new_privs() {
+        let mut command = std::process::Command::new("sh");
+        command
+            .arg("-c")
+            .arg("awk '/NoNewPrivs/ { print $2 }' /proc/self/status")
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        configure_linux_child_security(&mut command);
+
+        let child = command.spawn().unwrap();
+        let output = wait_for_child_output(child, Some(5)).unwrap();
+
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "1");
     }
 
     #[test]
