@@ -647,10 +647,16 @@ impl LinuxLandlockRuleset {
     }
 
     #[cfg(target_os = "linux")]
-    pub fn apply(
-        _plan: &LinuxLandlockPlan,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        Err("Landlock rules are modeled but not wired to a Linux loader yet".into())
+    pub fn apply(plan: &LinuxLandlockPlan) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let Some(ruleset) = prepare_linux_landlock_ruleset(plan)? else {
+            return Ok(());
+        };
+        let result = unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) };
+        if result != 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        restrict_self_with_landlock(&ruleset)?;
+        Ok(())
     }
 
     #[cfg(not(target_os = "linux"))]
@@ -670,6 +676,143 @@ fn landlock_access_mask(access: &[LinuxLandlockAccess]) -> u64 {
 
 fn landlock_handled_access_mask(rules: &[LinuxLandlockRule]) -> u64 {
     rules.iter().fold(0, |mask, rule| mask | rule.access_mask) & LANDLOCK_ABI_V1_FS_ACCESS_MASK
+}
+
+#[cfg(target_os = "linux")]
+#[repr(C)]
+struct LandlockRulesetAttrV1 {
+    handled_access_fs: u64,
+}
+
+#[cfg(target_os = "linux")]
+#[repr(C)]
+struct LandlockPathBeneathAttr {
+    allowed_access: u64,
+    parent_fd: i32,
+}
+
+#[cfg(target_os = "linux")]
+struct LinuxLandlockPreparedRuleset {
+    ruleset: std::fs::File,
+}
+
+#[cfg(target_os = "linux")]
+const LANDLOCK_CREATE_RULESET_VERSION: u32 = 1;
+#[cfg(target_os = "linux")]
+const LANDLOCK_RULE_PATH_BENEATH: u32 = 1;
+
+#[cfg(target_os = "linux")]
+fn prepare_linux_landlock_ruleset(
+    plan: &LinuxLandlockPlan,
+) -> Result<Option<LinuxLandlockPreparedRuleset>, Box<dyn std::error::Error + Send + Sync>> {
+    use std::os::fd::{AsRawFd, FromRawFd};
+
+    if plan.handled_access_mask == 0 {
+        return Ok(None);
+    }
+    let abi = linux_landlock_abi_version()?;
+    if abi < 1 {
+        return Err("Linux Landlock ABI version 1 or newer is required".into());
+    }
+
+    let attr = LandlockRulesetAttrV1 {
+        handled_access_fs: plan.handled_access_mask,
+    };
+    let ruleset_fd = unsafe {
+        libc::syscall(
+            libc::SYS_landlock_create_ruleset,
+            &attr as *const LandlockRulesetAttrV1,
+            std::mem::size_of::<LandlockRulesetAttrV1>(),
+            0u32,
+        )
+    };
+    if ruleset_fd < 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    set_fd_cloexec(ruleset_fd as i32)?;
+    let ruleset = unsafe { std::fs::File::from_raw_fd(ruleset_fd as i32) };
+
+    for rule in &plan.rules {
+        let allowed_access = rule.access_mask & plan.handled_access_mask;
+        if allowed_access == 0 {
+            continue;
+        }
+        let path = std::ffi::CString::new(rule.path.as_str())?;
+        let path_fd = unsafe { libc::open(path.as_ptr(), libc::O_PATH | libc::O_CLOEXEC) };
+        if path_fd < 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        let path_file = unsafe { std::fs::File::from_raw_fd(path_fd) };
+        let path_beneath = LandlockPathBeneathAttr {
+            allowed_access,
+            parent_fd: path_file.as_raw_fd(),
+        };
+        let result = unsafe {
+            libc::syscall(
+                libc::SYS_landlock_add_rule,
+                ruleset.as_raw_fd(),
+                LANDLOCK_RULE_PATH_BENEATH,
+                &path_beneath as *const LandlockPathBeneathAttr,
+                0u32,
+            )
+        };
+        if result != 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+    }
+
+    Ok(Some(LinuxLandlockPreparedRuleset { ruleset }))
+}
+
+#[cfg(target_os = "linux")]
+fn restrict_self_with_landlock(
+    ruleset: &LinuxLandlockPreparedRuleset,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    use std::os::fd::AsRawFd;
+
+    let result = unsafe {
+        libc::syscall(
+            libc::SYS_landlock_restrict_self,
+            ruleset.ruleset.as_raw_fd(),
+            0u32,
+        )
+    };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error().into())
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn linux_landlock_abi_version() -> Result<i64, Box<dyn std::error::Error + Send + Sync>> {
+    let abi = unsafe {
+        libc::syscall(
+            libc::SYS_landlock_create_ruleset,
+            std::ptr::null::<libc::c_void>(),
+            0usize,
+            LANDLOCK_CREATE_RULESET_VERSION,
+        )
+    };
+    if abi >= 0 {
+        Ok(abi)
+    } else {
+        Err(std::io::Error::last_os_error().into())
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn set_fd_cloexec(fd: i32) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+    if flags < 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    let result = unsafe { libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error().into())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1033,9 +1176,12 @@ impl LinuxAgentPodPrototypeExecutor {
         for (key, value) in &command.env {
             process.env(key, value);
         }
-        configure_linux_child_security(&mut process, Some(&plan.seccomp)).map_err(|err| {
-            RuntimeError::ExecFailed(format!("Linux AgentPod child security setup failed: {err}"))
-        })?;
+        configure_linux_child_security(&mut process, Some(&plan.seccomp), Some(&plan.landlock))
+            .map_err(|err| {
+                RuntimeError::ExecFailed(format!(
+                    "Linux AgentPod child security setup failed: {err}"
+                ))
+            })?;
 
         let mut child = process.spawn().map_err(|err| {
             RuntimeError::ExecFailed(format!("Linux AgentPod prototype exec failed: {err}"))
@@ -1082,11 +1228,16 @@ impl LinuxAgentPodPrototypeExecutor {
 fn configure_linux_child_security(
     command: &mut std::process::Command,
     seccomp: Option<&LinuxSeccompPlan>,
+    landlock: Option<&LinuxLandlockPlan>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     use std::os::unix::process::CommandExt;
 
     let seccomp_filter = seccomp
         .map(compile_linux_seccomp_filter)
+        .transpose()
+        .map(Option::flatten)?;
+    let landlock_ruleset = landlock
+        .map(prepare_linux_landlock_ruleset)
         .transpose()
         .map(Option::flatten)?;
 
@@ -1098,6 +1249,10 @@ fn configure_linux_child_security(
             let result = libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
             if result != 0 {
                 return Err(std::io::Error::last_os_error());
+            }
+            if let Some(ruleset) = &landlock_ruleset {
+                restrict_self_with_landlock(ruleset)
+                    .map_err(|_| std::io::Error::last_os_error())?;
             }
             if let Some(filter) = &seccomp_filter {
                 install_linux_seccomp_filter(filter)
@@ -1534,7 +1689,7 @@ mod tests {
             .arg("awk '/NoNewPrivs/ { print $2 }' /proc/self/status")
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
-        configure_linux_child_security(&mut command, None).unwrap();
+        configure_linux_child_security(&mut command, None, None).unwrap();
 
         let child = command.spawn().unwrap();
         let output = wait_for_child_output(child, Some(5)).unwrap();
@@ -1554,7 +1709,7 @@ mod tests {
             .arg("kill -0 $$; printf 'kill_status:%s\\n' \"$?\"")
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
-        configure_linux_child_security(&mut command, Some(&plan)).unwrap();
+        configure_linux_child_security(&mut command, Some(&plan), None).unwrap();
 
         let child = command.spawn().unwrap();
         let output = wait_for_child_output(child, Some(5)).unwrap();
@@ -1571,7 +1726,7 @@ mod tests {
         let plan = LinuxSeccompProfileLoader::plan(&profile).unwrap();
         let mut command = std::process::Command::new("true");
 
-        let err = configure_linux_child_security(&mut command, Some(&plan)).unwrap_err();
+        let err = configure_linux_child_security(&mut command, Some(&plan), None).unwrap_err();
 
         assert!(err.to_string().contains("not supported"));
     }

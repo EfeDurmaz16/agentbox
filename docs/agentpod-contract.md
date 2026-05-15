@@ -74,7 +74,7 @@ combines rootless user namespace, mount namespace metadata, PID namespace,
 cgroup v2 resource writes, seccomp profile metadata, and Landlock ruleset
 metadata into one object. The gated executor also sets `PR_SET_NO_NEW_PRIVS`
 before exec and can install a prototype BPF seccomp filter for supported
-syscall deny rules. This is still a prototype primitive: live execution must be
+syscall deny rules and a prototype Landlock path-beneath filesystem ruleset. This is still a prototype primitive: live execution must be
 explicitly gated with `AGENTBOX_LINUX_NATIVE`, and it is not a complete sandbox
 claim until the remaining loaders and provider lifecycle are wired and tested on
 Linux.

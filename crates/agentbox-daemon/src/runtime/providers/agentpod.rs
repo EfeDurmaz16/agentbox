@@ -273,7 +273,7 @@ impl RuntimeProvider for AgentPodProvider {
                             "gated cgroup v2 resource file writes, process attach, and cleanup"
                         }
                         AgentPodPrimitive::Landlock => {
-                            "Landlock ruleset descriptor only; ruleset loader is not wired"
+                            "gated prototype Landlock path-beneath ruleset loader before exec"
                         }
                         AgentPodPrimitive::Seccomp => {
                             "gated prototype BPF seccomp loader for supported syscall deny rules; not a complete libseccomp profile loader"
@@ -679,6 +679,12 @@ mod tests {
         assert!(seccomp
             .enforcement_scope
             .contains("not a complete libseccomp"));
+
+        let landlock = primitive_statuses
+            .iter()
+            .find(|status| status.primitive == "landlock")
+            .unwrap();
+        assert!(landlock.enforcement_scope.contains("ruleset loader"));
 
         let nftables = primitive_statuses
             .iter()
