@@ -15,6 +15,9 @@ use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+const REMOTE_LABEL_ENDPOINT: &str = "agentbox.remote.endpoint";
+const REMOTE_LABEL_WORKER_SESSION: &str = "agentbox.remote.worker_session";
+
 // ---------------------------------------------------------------------------
 // CLI definition
 // ---------------------------------------------------------------------------
@@ -5424,7 +5427,7 @@ fn remote_session_metadata_from_session(
         None => session
             .spec
             .labels
-            .get("agentbox.remote.endpoint")
+            .get(REMOTE_LABEL_ENDPOINT)
             .cloned()
             .ok_or_else(|| {
                 format!(
@@ -5438,7 +5441,7 @@ fn remote_session_metadata_from_session(
         None => session
             .spec
             .labels
-            .get("agentbox.remote.worker_session")
+            .get(REMOTE_LABEL_WORKER_SESSION)
             .cloned()
             .ok_or_else(|| {
                 format!(
@@ -6394,7 +6397,7 @@ fn remote_session_operator_commands(
     if !session
         .spec
         .labels
-        .contains_key("agentbox.remote.worker_session")
+        .contains_key(REMOTE_LABEL_WORKER_SESSION)
     {
         return Vec::new();
     }
@@ -7028,11 +7031,11 @@ mod tests {
             MinipodSpec::for_agent_task("hermes", "/tmp/agentbox-remote"),
         );
         session.spec.labels.insert(
-            "agentbox.remote.endpoint".into(),
+            REMOTE_LABEL_ENDPOINT.into(),
             "https://worker.example.com/agentpod".into(),
         );
         session.spec.labels.insert(
-            "agentbox.remote.worker_session".into(),
+            REMOTE_LABEL_WORKER_SESSION.into(),
             "worker-session-1".into(),
         );
 
@@ -7072,11 +7075,11 @@ mod tests {
             MinipodSpec::for_agent_task("hermes", "/tmp/agentbox-remote"),
         );
         session.spec.labels.insert(
-            "agentbox.remote.endpoint".into(),
+            REMOTE_LABEL_ENDPOINT.into(),
             "https://worker.example.com/agentpod".into(),
         );
         session.spec.labels.insert(
-            "agentbox.remote.worker_session".into(),
+            REMOTE_LABEL_WORKER_SESSION.into(),
             "worker-session-1".into(),
         );
 
