@@ -38,6 +38,35 @@ if not eval(expression, safe_globals, {"data": data}):
 PY
 }
 
+write_signing_artifact() {
+  python3 - "$ARTIFACT_DIR" <<'PY'
+import json
+import pathlib
+import sys
+
+artifact_dir = pathlib.Path(sys.argv[1])
+signing = {
+    "schema_version": 1,
+    "status": "unsigned-placeholder",
+    "signed": False,
+    "claim": "no release artifact signing is configured or claimed by this gate",
+    "required_before": [
+        "publishing binary archives",
+        "publishing installers",
+        "installing privileged or auto-starting platform components",
+    ],
+    "next_steps": [
+        "generate checksums for release archives",
+        "configure platform signing identities outside the public repo",
+        "attach signed artifact attestations only after verification",
+    ],
+}
+(artifact_dir / "signing.json").write_text(
+    json.dumps(signing, indent=2) + "\n", encoding="utf-8"
+)
+PY
+}
+
 run_step fmt cargo fmt --check
 run_step clippy cargo clippy --locked --workspace --all-targets -- -D warnings
 run_step test cargo test --locked --workspace
@@ -70,6 +99,11 @@ log "setup plan JSON"
 cargo run --locked -q -p agentbox-cli -- setup-plan --json >"$ARTIFACT_DIR/setup-plan.json"
 validate_json_file "$ARTIFACT_DIR/setup-plan.json" \
   "data.get('schema_version') == 1 and data.get('required_failed', 0) + data.get('advisory_failed', 0) == data.get('failed', 0) and data.get('steps') is not None"
+
+log "signing placeholder"
+write_signing_artifact
+validate_json_file "$ARTIFACT_DIR/signing.json" \
+  "data.get('schema_version') == 1 and data.get('signed') == False and data.get('status') == 'unsigned-placeholder'"
 
 run_step cli-contract-smoke bash scripts/smoke-cli-contracts.sh
 run_step v02-demo bash scripts/demo-v0.2.sh
@@ -107,26 +141,6 @@ manifest = {
     "setup_plan_json": "setup-plan.json",
 }
 (artifact_dir / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
-
-signing = {
-    "schema_version": 1,
-    "status": "unsigned-placeholder",
-    "signed": False,
-    "claim": "no release artifact signing is configured or claimed by this gate",
-    "required_before": [
-        "publishing binary archives",
-        "publishing installers",
-        "installing privileged or auto-starting platform components",
-    ],
-    "next_steps": [
-        "generate checksums for release archives",
-        "configure platform signing identities outside the public repo",
-        "attach signed artifact attestations only after verification",
-    ],
-}
-(artifact_dir / "signing.json").write_text(
-    json.dumps(signing, indent=2) + "\n", encoding="utf-8"
-)
 PY
 
 log "release readiness artifacts"
