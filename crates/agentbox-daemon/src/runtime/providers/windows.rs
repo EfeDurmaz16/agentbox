@@ -139,11 +139,37 @@ pub struct WindowsEtwObserverPlan {
     pub provider_name: String,
     pub session_name: String,
     pub event_kinds: Vec<String>,
+    pub correlation: WindowsEtwCorrelationPlan,
+    pub event_schema: Vec<WindowsEtwEventSchema>,
+    pub enforcement: WindowsEtwEnforcementMode,
+    pub evidence_claim: String,
     pub requires_etw: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WindowsEtwCorrelationPlan {
+    pub preferred_key: String,
+    pub job_name: String,
+    pub process_id_fallback: bool,
+    pub manifest_label_keys: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WindowsEtwEventSchema {
+    pub event_type: String,
+    pub provider: String,
+    pub evidence_use: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WindowsEtwEnforcementMode {
+    ObservedOnly,
 }
 
 impl WindowsEtwObserverPlan {
     pub fn from_minipod_spec(spec: &MinipodSpec) -> Self {
+        let mut manifest_label_keys: Vec<String> = spec.labels.keys().cloned().collect();
+        manifest_label_keys.sort();
         Self {
             schema_version: 1,
             provider_name: "Agentbox-AgentPod".into(),
@@ -156,6 +182,38 @@ impl WindowsEtwObserverPlan {
                 "network.connect".into(),
                 "provider.lifecycle".into(),
             ],
+            correlation: WindowsEtwCorrelationPlan {
+                preferred_key: "job_name".into(),
+                job_name: format!("agentbox-{}", spec.id),
+                process_id_fallback: true,
+                manifest_label_keys,
+            },
+            event_schema: vec![
+                WindowsEtwEventSchema {
+                    event_type: "windows.process.start".into(),
+                    provider: "Microsoft-Windows-Kernel-Process".into(),
+                    evidence_use: "process lineage and executable path evidence".into(),
+                },
+                WindowsEtwEventSchema {
+                    event_type: "windows.process.exit".into(),
+                    provider: "Microsoft-Windows-Kernel-Process".into(),
+                    evidence_use: "process lifetime and exit correlation".into(),
+                },
+                WindowsEtwEventSchema {
+                    event_type: "windows.network.connect".into(),
+                    provider: "Microsoft-Windows-WFP".into(),
+                    evidence_use: "flow metadata for network boundary evidence".into(),
+                },
+                WindowsEtwEventSchema {
+                    event_type: "agentbox.provider.lifecycle".into(),
+                    provider: "Agentbox-AgentPod".into(),
+                    evidence_use: "provider lifecycle and kill-switch acknowledgement evidence"
+                        .into(),
+                },
+            ],
+            enforcement: WindowsEtwEnforcementMode::ObservedOnly,
+            evidence_claim:
+                "ETW observer descriptor only; observed events are not enforcement proof".into(),
             requires_etw: true,
         }
     }
@@ -355,11 +413,55 @@ mod tests {
             .contains("no packet denial proof"));
         assert!(plan.etw.requires_etw);
         assert!(plan.etw.event_kinds.contains(&"process.start".into()));
+        assert_eq!(plan.etw.correlation.preferred_key, "job_name");
+        assert_eq!(
+            plan.etw.correlation.job_name,
+            format!("agentbox-{}", spec.id)
+        );
+        assert_eq!(
+            plan.etw.enforcement,
+            WindowsEtwEnforcementMode::ObservedOnly
+        );
+        assert!(plan
+            .etw
+            .event_schema
+            .iter()
+            .any(|event| event.event_type == "windows.network.connect"));
+        assert!(plan.etw.evidence_claim.contains("not enforcement proof"));
         assert_eq!(
             plan.vm_boundary.candidate_backends,
             vec!["windows-sandbox".to_string(), "hyper-v".to_string()]
         );
         assert!(!plan.runnable_on_current_host());
+    }
+
+    #[test]
+    fn etw_observer_plan_carries_session_correlation_and_evidence_schema() {
+        let mut spec = MinipodSpec::for_agent_task("codex", "C:\\agentbox\\work");
+        spec.labels
+            .insert("policy.bundle".into(), "deploy-default".into());
+
+        let plan = WindowsEtwObserverPlan::from_minipod_spec(&spec);
+
+        assert_eq!(plan.schema_version, 1);
+        assert_eq!(plan.provider_name, "Agentbox-AgentPod");
+        assert_eq!(plan.session_name, format!("agentbox-agentpod-{}", spec.id));
+        assert_eq!(plan.correlation.preferred_key, "job_name");
+        assert!(plan
+            .correlation
+            .manifest_label_keys
+            .contains(&"policy.bundle".to_string()));
+        assert_eq!(plan.enforcement, WindowsEtwEnforcementMode::ObservedOnly);
+        assert!(plan.event_schema.iter().any(|event| {
+            event.event_type == "windows.process.start"
+                && event.provider == "Microsoft-Windows-Kernel-Process"
+        }));
+        assert!(plan.event_schema.iter().any(|event| {
+            event.event_type == "agentbox.provider.lifecycle"
+                && event.provider == "Agentbox-AgentPod"
+        }));
+        assert!(plan.requires_etw);
+        assert!(plan.evidence_claim.contains("descriptor only"));
     }
 
     #[test]
