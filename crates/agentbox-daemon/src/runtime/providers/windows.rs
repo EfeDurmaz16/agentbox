@@ -14,6 +14,9 @@ pub struct WindowsJobObjectPlan {
     pub memory_limit_bytes: u64,
     pub cpu_rate_weight: u32,
     pub process_limit: Option<u32>,
+    pub timeout_seconds: Option<u64>,
+    pub timeout_action: String,
+    pub resource_claim: String,
     pub requires_windows: bool,
 }
 
@@ -36,7 +39,11 @@ impl WindowsJobObjectPlan {
             kill_on_close: true,
             memory_limit_bytes: spec.resources.memory_bytes,
             cpu_rate_weight: cpu_shares_to_job_weight(spec.resources.cpu_shares),
-            process_limit: None,
+            process_limit: Some(default_process_limit_for_risk(&spec.risk)),
+            timeout_seconds: spec.resources.timeout_seconds,
+            timeout_action: "terminate-job-and-seal-timeout-evidence".into(),
+            resource_claim:
+                "planned Job Object resource contract; live Win32 apply proof is not wired".into(),
             requires_windows: true,
         })
     }
@@ -61,6 +68,12 @@ impl WindowsJobObjectPlan {
             limits.push(WindowsJobObjectLimit {
                 name: "JOB_OBJECT_LIMIT_ACTIVE_PROCESS".into(),
                 value: process_limit.to_string(),
+            });
+        }
+        if let Some(timeout_seconds) = self.timeout_seconds {
+            limits.push(WindowsJobObjectLimit {
+                name: "AGENTBOX_WALL_CLOCK_TIMEOUT_SECONDS".into(),
+                value: timeout_seconds.to_string(),
             });
         }
 
@@ -535,6 +548,15 @@ fn cpu_shares_to_job_weight(cpu_shares: u32) -> u32 {
     weight.min(9) as u32
 }
 
+fn default_process_limit_for_risk(risk: &crate::runtime::types::AgentPodRiskLevel) -> u32 {
+    match risk {
+        crate::runtime::types::AgentPodRiskLevel::Low => 256,
+        crate::runtime::types::AgentPodRiskLevel::Medium => 128,
+        crate::runtime::types::AgentPodRiskLevel::High => 64,
+        crate::runtime::types::AgentPodRiskLevel::VeryHigh => 32,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -558,6 +580,13 @@ mod tests {
         assert!(plan.kill_on_close);
         assert_eq!(plan.memory_limit_bytes, 536_870_912);
         assert_eq!(plan.cpu_rate_weight, 1);
+        assert_eq!(plan.process_limit, Some(128));
+        assert_eq!(plan.timeout_seconds, Some(30));
+        assert_eq!(
+            plan.timeout_action,
+            "terminate-job-and-seal-timeout-evidence"
+        );
+        assert!(plan.resource_claim.contains("live Win32 apply proof"));
         assert!(plan.requires_windows);
         assert_eq!(
             plan.limit_writes(),
@@ -573,6 +602,14 @@ mod tests {
                 WindowsJobObjectLimit {
                     name: "JOB_OBJECT_CPU_RATE_CONTROL_WEIGHT_BASED".into(),
                     value: "1".into(),
+                },
+                WindowsJobObjectLimit {
+                    name: "JOB_OBJECT_LIMIT_ACTIVE_PROCESS".into(),
+                    value: "128".into(),
+                },
+                WindowsJobObjectLimit {
+                    name: "AGENTBOX_WALL_CLOCK_TIMEOUT_SECONDS".into(),
+                    value: "30".into(),
                 },
             ]
         );
@@ -636,6 +673,11 @@ mod tests {
         assert!(!plan.live_execution_enabled);
         assert!(plan.security_claim.contains("execution is not wired"));
         assert!(plan.job_object.kill_on_close);
+        assert_eq!(plan.job_object.process_limit, Some(128));
+        assert!(plan
+            .job_object
+            .resource_claim
+            .contains("live Win32 apply proof"));
         assert!(plan.app_container.requires_profile_creation);
         assert_eq!(plan.app_container.workspace_mode, "overlay-review");
         assert_eq!(

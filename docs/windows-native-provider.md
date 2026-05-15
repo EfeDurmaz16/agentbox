@@ -46,6 +46,9 @@ keeps the live Win32 apply path unavailable until Windows-only tests prove
 behavior. `agentbox native-plan --provider agentpod-windows -- <cmd>` now emits
 the full intended execution-cell contract across Job Objects, AppContainer, WFP,
 ETW, and Windows Sandbox/Hyper-V fallback metadata without running anything.
+The Job Object descriptor maps memory, CPU weight, risk-based process limits,
+and wall-clock timeout action metadata into the plan, while explicitly stating
+that live Win32 apply proof is not wired.
 The VM boundary descriptor includes the planned workspace mount, named-pipe or
 Hyper-V socket host bridge, policy/evidence endpoints, credential delivery
 channels, guest evidence spool path, and teardown policy. These fields are a

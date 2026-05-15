@@ -7758,6 +7758,11 @@ mod tests {
                 );
             }
             if provider == "agentpod-windows" {
+                assert!(plan["job_object"]["process_limit"].as_u64().unwrap() > 0);
+                assert!(plan["job_object"]["resource_claim"]
+                    .as_str()
+                    .unwrap()
+                    .contains("live Win32 apply proof"));
                 assert_eq!(plan["app_container"]["workspace_mode"], "overlay-review");
                 assert_eq!(
                     plan["app_container"]["workspace_boundary"]["review_required"],
