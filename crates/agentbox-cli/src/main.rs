@@ -535,8 +535,8 @@ enum Commands {
     },
     /// Generate a native provider execution plan without running it
     NativePlan {
-        /// Native provider: agentpod-linux, agentpod-macos, or agentpod-windows
-        #[arg(long = "provider", default_value = "agentpod-linux")]
+        /// Native provider: auto, agentpod-linux, agentpod-macos, or agentpod-windows
+        #[arg(long = "provider", default_value = "auto")]
         provider: String,
 
         /// Workspace directory for the AgentPod plan
@@ -5002,6 +5002,8 @@ fn cmd_native_plan(
     use agentbox_daemon::runtime::providers::windows::WindowsAgentPodExecutionPlan;
     use agentbox_daemon::runtime::types::{ExecCommand, MinipodSpec};
 
+    let provider = resolve_native_plan_provider(&provider);
+
     if !matches!(
         provider.as_str(),
         "agentpod-linux" | "agentpod-macos" | "agentpod-windows"
@@ -5065,6 +5067,21 @@ fn cmd_native_plan(
         "{}",
         serde_json::to_string_pretty(&plan).expect("failed to serialize native AgentPod plan")
     );
+}
+
+fn resolve_native_plan_provider(provider: &str) -> String {
+    let provider = provider.trim();
+    if !provider.is_empty() && !provider.eq_ignore_ascii_case("auto") {
+        return provider.to_string();
+    }
+
+    if cfg!(target_os = "macos") {
+        "agentpod-macos".into()
+    } else if cfg!(target_os = "windows") {
+        "agentpod-windows".into()
+    } else {
+        "agentpod-linux".into()
+    }
 }
 
 fn parse_remote_auth_kind(
@@ -5887,6 +5904,23 @@ mod tests {
         assert!(checks
             .iter()
             .any(|check| check.name == "Windows VM boundary" && !check.ok));
+    }
+
+    #[test]
+    fn native_plan_provider_auto_resolves_current_platform() {
+        let provider = resolve_native_plan_provider("auto");
+
+        if cfg!(target_os = "macos") {
+            assert_eq!(provider, "agentpod-macos");
+        } else if cfg!(target_os = "windows") {
+            assert_eq!(provider, "agentpod-windows");
+        } else {
+            assert_eq!(provider, "agentpod-linux");
+        }
+        assert_eq!(
+            resolve_native_plan_provider("agentpod-windows"),
+            "agentpod-windows"
+        );
     }
 
     #[test]

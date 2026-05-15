@@ -39,6 +39,13 @@ log "checking AgentPod run plan JSON"
 validate_json "$TMPDIR/run-plan.json" \
   "data.get('schema_version') == 1 and data.get('selected_provider', {}).get('availability_check') == 'not performed by --plan' and data.get('manifest', {}).get('kind') == 'AgentPod' and len(data.get('backend_actions', [])) >= 3"
 
+log "checking native plan auto provider truth"
+"${CLI[@]}" native-plan \
+  --workspace "$TMPDIR" \
+  -- /bin/true >"$TMPDIR/native-plan-auto.json"
+validate_json "$TMPDIR/native-plan-auto.json" \
+  "data.get('schema_version') == 1 and data.get('provider') in ['agentpod-linux', 'agentpod-macos', 'agentpod-windows'] and data.get('live_execution_enabled') == False and data.get('security_claim')"
+
 log "checking high-risk provider recommendation truth"
 "${CLI[@]}" run --plan --risk high --json -- echo agentbox-contract >"$TMPDIR/run-plan-high.json"
 validate_json "$TMPDIR/run-plan-high.json" \
