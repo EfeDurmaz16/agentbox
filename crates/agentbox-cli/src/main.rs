@@ -977,6 +977,9 @@ fn cmd_doctor() {
     if cfg!(target_os = "linux") {
         checks.extend(linux_native_doctor_checks());
     }
+    if cfg!(target_os = "windows") {
+        checks.extend(windows_native_doctor_checks());
+    }
 
     println!("Agentbox doctor");
     println!("{}", "-".repeat(64));
@@ -1212,6 +1215,48 @@ fn linux_landlock_abi_version() -> Option<i64> {
 #[cfg(not(target_os = "linux"))]
 fn linux_landlock_abi_version() -> Option<i64> {
     None
+}
+
+fn windows_native_doctor_checks() -> Vec<DoctorCheck> {
+    vec![
+        doctor_check(
+            "Windows native plan",
+            true,
+            "Job Object plan compiler available; provider execution remains unavailable"
+                .to_string(),
+            "inspect docs/windows-native-provider.md before enabling Windows execution",
+        ),
+        doctor_check(
+            "Windows Job Objects",
+            true,
+            "plan/controller modeled; Win32 apply path is not wired".to_string(),
+            "wire and live-test Job Object process containment before enabling execution",
+        ),
+        doctor_check(
+            "Windows AppContainer",
+            false,
+            "planned authority boundary; descriptor and live tests are not implemented".to_string(),
+            "add AppContainer descriptor plus Windows live containment tests",
+        ),
+        doctor_check(
+            "Windows WFP",
+            false,
+            "planned network boundary; no packet/domain denial proof yet".to_string(),
+            "add WFP integration only with live network denial tests",
+        ),
+        doctor_check(
+            "Windows ETW",
+            false,
+            "planned evidence boundary; event capture is not wired".to_string(),
+            "add ETW session/event capture linked to Agentbox session ids",
+        ),
+        doctor_check(
+            "Windows VM boundary",
+            false,
+            "Windows Sandbox/Hyper-V remain planned for higher-risk cells".to_string(),
+            "add a VM-backed provider only after lifecycle and evidence proof",
+        ),
+    ]
 }
 
 fn current_executable_has_entitlement(entitlement: &str) -> bool {
@@ -5799,6 +5844,29 @@ mod tests {
         assert!(checks
             .iter()
             .any(|check| check.name == "Linux Landlock ABI"));
+    }
+
+    #[test]
+    fn windows_native_doctor_checks_keep_execution_unavailable() {
+        let checks = windows_native_doctor_checks();
+
+        assert_eq!(checks[0].name, "Windows native plan");
+        assert!(checks[0].ok);
+        assert!(checks[0]
+            .detail
+            .contains("provider execution remains unavailable"));
+        assert!(checks
+            .iter()
+            .any(|check| check.name == "Windows Job Objects" && check.ok));
+        assert!(checks
+            .iter()
+            .any(|check| check.name == "Windows WFP" && !check.ok));
+        assert!(checks
+            .iter()
+            .any(|check| check.name == "Windows ETW" && !check.ok));
+        assert!(checks
+            .iter()
+            .any(|check| check.name == "Windows VM boundary" && !check.ok));
     }
 
     #[test]
