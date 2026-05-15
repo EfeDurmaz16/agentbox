@@ -49,6 +49,7 @@ jobs:
       - name: CLI smoke
         run: |
           cargo run --locked -p agentbox-cli -- --help
+          cargo run --locked -p agentbox-daemon --bin agentbox-linux-runner -- --help
           cargo run --locked -p agentbox-cli -- minipod-spec hermes --workspace .
           bash scripts/smoke-cli-contracts.sh
           bash scripts/smoke-remote-worker.sh
