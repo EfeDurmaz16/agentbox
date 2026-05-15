@@ -1266,12 +1266,12 @@ impl LinuxAgentPodPrototypeExecutor {
         }
 
         let runner_binary = linux_agentpod_runner_binary()?;
-        let request_path = write_linux_agentpod_runner_request(plan, command)?;
+        let request_file = write_linux_agentpod_runner_request(plan, command)?;
         let mut runner_argv = plan.composed_argv.clone();
         runner_argv.extend([
             runner_binary.display().to_string(),
             "--request".to_string(),
-            request_path.display().to_string(),
+            request_file.path().display().to_string(),
         ]);
         let (binary, args) = runner_argv.split_first().ok_or_else(|| {
             RuntimeError::ManifestRejected("Linux AgentPod runner argv cannot be empty".into())
@@ -1306,7 +1306,6 @@ impl LinuxAgentPodPrototypeExecutor {
                 cgroup_root.display()
             ))
         })?;
-        let _ = std::fs::remove_file(&request_path);
         let output = output_result?;
 
         Ok(CommandResult {
@@ -1325,6 +1324,25 @@ impl LinuxAgentPodPrototypeExecutor {
         Err(RuntimeError::Unavailable(
             "Linux AgentPod prototype execution is only available on Linux".into(),
         ))
+    }
+}
+
+#[cfg(target_os = "linux")]
+struct LinuxAgentPodRunnerRequestFile {
+    path: std::path::PathBuf,
+}
+
+#[cfg(target_os = "linux")]
+impl LinuxAgentPodRunnerRequestFile {
+    fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for LinuxAgentPodRunnerRequestFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
     }
 }
 
@@ -1359,7 +1377,7 @@ fn linux_agentpod_runner_binary() -> Result<std::path::PathBuf, RuntimeError> {
 fn write_linux_agentpod_runner_request(
     plan: &LinuxAgentPodExecutionPlan,
     command: &ExecCommand,
-) -> Result<std::path::PathBuf, RuntimeError> {
+) -> Result<LinuxAgentPodRunnerRequestFile, RuntimeError> {
     let request = LinuxAgentPodRunnerRequest::from_execution_plan(plan, command);
     let dir = std::env::temp_dir().join("agentbox-linux-runner");
     std::fs::create_dir_all(&dir).map_err(|err| {
@@ -1376,12 +1394,13 @@ fn write_linux_agentpod_runner_request(
         ))
     })?;
     serde_json::to_writer(file, &request).map_err(|err| {
+        let _ = std::fs::remove_file(&path);
         RuntimeError::ExecFailed(format!(
             "failed to serialize Linux runner request {}: {err}",
             path.display()
         ))
     })?;
-    Ok(path)
+    Ok(LinuxAgentPodRunnerRequestFile { path })
 }
 
 #[cfg(test)]
@@ -2688,6 +2707,23 @@ mod tests {
         assert_eq!(request.mount_namespace, plan.mount_namespace);
         assert_eq!(request.seccomp, plan.seccomp);
         assert_eq!(request.landlock, plan.landlock);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn agentpod_runner_request_file_is_removed_on_drop() {
+        let spec = MinipodSpec::for_agent_task("hermes", "/tmp/agentbox-work");
+        let command = command(&["/bin/true"]);
+        let plan = LinuxAgentPodExecutionPlan::from_minipod_spec(&spec, &command).unwrap();
+
+        let path = {
+            let request_file = write_linux_agentpod_runner_request(&plan, &command).unwrap();
+            let path = request_file.path().to_path_buf();
+            assert!(path.exists());
+            path
+        };
+
+        assert!(!path.exists());
     }
 
     #[test]
