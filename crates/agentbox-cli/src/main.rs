@@ -1317,7 +1317,7 @@ fn build_doctor_report() -> DoctorReport {
     checks.push(doctor_check(
         "shim PATH priority",
         shims_first_in_path(),
-        std::env::var("PATH").unwrap_or_default(),
+        shim_path_priority_detail(),
         "prepend `export PATH=\"$HOME/.agentbox/shims:$PATH\"` to your shell profile",
     ));
 
@@ -1948,6 +1948,29 @@ fn shims_first_in_path() -> bool {
         return false;
     };
     first == shims_dir()
+}
+
+fn shim_path_priority_detail() -> String {
+    let shims = shims_dir();
+    shim_path_priority_detail_for(std::env::var_os("PATH"), &shims)
+}
+
+fn shim_path_priority_detail_for(paths: Option<std::ffi::OsString>, shims: &Path) -> String {
+    let Some(paths) = paths else {
+        return format!("PATH is unset; expected first entry {}", shims.display());
+    };
+    let mut entries = std::env::split_paths(&paths);
+    let Some(first) = entries.next() else {
+        return format!("PATH is empty; expected first entry {}", shims.display());
+    };
+    if first == shims {
+        return format!("ok: {} is first in PATH", shims.display());
+    }
+    format!(
+        "not first: first PATH entry is {}; expected {}",
+        first.display(),
+        shims.display()
+    )
 }
 
 fn audit_event_count() -> Option<i64> {
@@ -7841,6 +7864,31 @@ mod tests {
         let ready = daemon_socket_doctor_check(true, true, "/tmp/agentbox.sock".into());
         assert!(ready.ok);
         assert_eq!(ready.fix, "none");
+    }
+
+    #[test]
+    fn shim_path_priority_detail_is_operator_sized() {
+        let shims = PathBuf::from("/tmp/agentbox-shims");
+        let path = std::env::join_paths([
+            PathBuf::from("/usr/local/bin"),
+            shims.clone(),
+            PathBuf::from("/usr/bin"),
+        ])
+        .unwrap();
+
+        let detail = shim_path_priority_detail_for(Some(path), &shims);
+
+        assert_eq!(
+            detail,
+            "not first: first PATH entry is /usr/local/bin; expected /tmp/agentbox-shims"
+        );
+
+        let ready = shim_path_priority_detail_for(
+            Some(std::env::join_paths([shims.clone(), PathBuf::from("/usr/bin")]).unwrap()),
+            &shims,
+        );
+        assert_eq!(ready, "ok: /tmp/agentbox-shims is first in PATH");
+        assert!(shim_path_priority_detail_for(None, &shims).contains("PATH is unset"));
     }
 
     #[test]
