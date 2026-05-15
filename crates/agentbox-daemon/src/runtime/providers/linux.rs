@@ -1384,7 +1384,7 @@ fn write_linux_agentpod_runner_request(
     Ok(path)
 }
 
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[cfg(test)]
 fn linux_agentpod_host_working_dir(
     plan: &LinuxAgentPodExecutionPlan,
     command: &ExecCommand,
@@ -1416,7 +1416,7 @@ fn linux_agentpod_host_working_dir(
     Some(std::path::PathBuf::from(working_dir))
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(test, target_os = "linux"))]
 fn configure_linux_child_security(
     command: &mut std::process::Command,
     seccomp: Option<&LinuxSeccompPlan>,
@@ -1436,13 +1436,13 @@ fn configure_linux_child_security(
     Ok(())
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(test, target_os = "linux"))]
 struct LinuxPreparedChildSecurity {
     seccomp_filter: Option<Vec<libc::sock_filter>>,
     landlock_ruleset: Option<LinuxLandlockPreparedRuleset>,
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(test, target_os = "linux"))]
 impl LinuxPreparedChildSecurity {
     fn prepare(
         seccomp: Option<&LinuxSeccompPlan>,
