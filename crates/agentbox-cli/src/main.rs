@@ -18,6 +18,31 @@ use sha2::{Digest, Sha256};
 const REMOTE_LABEL_ENDPOINT: &str = "agentbox.remote.endpoint";
 const REMOTE_LABEL_WORKER_SESSION: &str = "agentbox.remote.worker_session";
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct ReviewJsonOutput {
+    #[serde(flatten)]
+    snapshot: agentbox_daemon::runtime::workspace::WorkspaceDiffSnapshot,
+    action_plan: ReviewActionPlan,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct ReviewActionPlan {
+    schema_version: i64,
+    session_id: String,
+    actions: Vec<ReviewAction>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct ReviewAction {
+    key: &'static str,
+    id: &'static str,
+    label: &'static str,
+    command: String,
+    mutates_workspace: bool,
+    requires_message: bool,
+    description: &'static str,
+}
+
 // ---------------------------------------------------------------------------
 // CLI definition
 // ---------------------------------------------------------------------------
@@ -6550,9 +6575,13 @@ fn cmd_review(session_id: String, json: bool, patch: bool, tui: bool) {
     }
 
     if json {
+        let output = ReviewJsonOutput {
+            action_plan: review_action_plan(&session.id),
+            snapshot,
+        };
         println!(
             "{}",
-            serde_json::to_string_pretty(&snapshot).expect("failed to serialize workspace review")
+            serde_json::to_string_pretty(&output).expect("failed to serialize workspace review")
         );
         return;
     }
@@ -6606,18 +6635,75 @@ fn cmd_review(session_id: String, json: bool, patch: bool, tui: bool) {
 }
 
 fn print_review_tui_skeleton(session_id: &str) {
+    let action_plan = review_action_plan(session_id);
+
     println!();
     println!("Review actions");
     println!("{}", "-".repeat(64));
-    println!("  p  print patch      agentbox review {session_id} --patch");
-    println!("  a  apply changes    agentbox review-apply {session_id}");
-    println!(
-        "  c  commit changes   agentbox review-commit {session_id} --message \"agent output\""
-    );
-    println!("  d  discard overlay  agentbox review-discard {session_id}");
-    println!("  q  quit             no mutation");
+    for action in &action_plan.actions {
+        println!(
+            "  {:<2} {:<16} {}",
+            action.key, action.label, action.command
+        );
+    }
     println!();
     println!("This is a command menu skeleton; it does not read keys or mutate state.");
+}
+
+fn review_action_plan(session_id: &str) -> ReviewActionPlan {
+    ReviewActionPlan {
+        schema_version: 1,
+        session_id: session_id.to_string(),
+        actions: vec![
+            ReviewAction {
+                key: "p",
+                id: "print_patch",
+                label: "print patch",
+                command: format!("agentbox review {session_id} --patch"),
+                mutates_workspace: false,
+                requires_message: false,
+                description: "Print the captured workspace patch without changing files.",
+            },
+            ReviewAction {
+                key: "a",
+                id: "apply_changes",
+                label: "apply changes",
+                command: format!("agentbox review-apply {session_id}"),
+                mutates_workspace: true,
+                requires_message: false,
+                description: "Apply the projected workspace output to the lower workspace.",
+            },
+            ReviewAction {
+                key: "c",
+                id: "commit_changes",
+                label: "commit changes",
+                command: format!("agentbox review-commit {session_id} --message \"agent output\""),
+                mutates_workspace: true,
+                requires_message: true,
+                description:
+                    "Apply the projected workspace output and commit it in the lower workspace.",
+            },
+            ReviewAction {
+                key: "d",
+                id: "discard_overlay",
+                label: "discard overlay",
+                command: format!("agentbox review-discard {session_id}"),
+                mutates_workspace: true,
+                requires_message: false,
+                description:
+                    "Discard the projected review workspace without touching the lower workspace.",
+            },
+            ReviewAction {
+                key: "q",
+                id: "quit",
+                label: "quit",
+                command: "no mutation".to_string(),
+                mutates_workspace: false,
+                requires_message: false,
+                description: "Exit the review menu without changing files.",
+            },
+        ],
+    }
 }
 
 fn cmd_review_discard(session_id: String) {
@@ -7960,6 +8046,41 @@ mod tests {
         assert_eq!(report.files[0].action, "unchanged");
         let _ = fs::remove_dir_all(export_dir);
         let _ = fs::remove_dir_all(workspace);
+    }
+
+    #[test]
+    fn review_action_plan_exposes_stable_operator_commands() {
+        let plan = review_action_plan("session-123");
+
+        assert_eq!(plan.schema_version, 1);
+        assert_eq!(plan.session_id, "session-123");
+        assert_eq!(plan.actions.len(), 5);
+        assert_eq!(plan.actions[0].id, "print_patch");
+        assert_eq!(
+            plan.actions[0].command,
+            "agentbox review session-123 --patch"
+        );
+        assert!(!plan.actions[0].mutates_workspace);
+        assert_eq!(plan.actions[1].id, "apply_changes");
+        assert_eq!(plan.actions[1].command, "agentbox review-apply session-123");
+        assert!(plan.actions[1].mutates_workspace);
+        assert_eq!(plan.actions[2].id, "commit_changes");
+        assert!(plan.actions[2].requires_message);
+        assert_eq!(
+            plan.actions[2].command,
+            "agentbox review-commit session-123 --message \"agent output\""
+        );
+        assert_eq!(plan.actions[3].id, "discard_overlay");
+        assert_eq!(
+            plan.actions[3].command,
+            "agentbox review-discard session-123"
+        );
+        assert_eq!(plan.actions[4].id, "quit");
+
+        let payload = serde_json::to_value(&plan).unwrap();
+        assert_eq!(payload["actions"][1]["label"], "apply changes");
+        assert_eq!(payload["actions"][1]["mutates_workspace"], true);
+        assert_eq!(payload["actions"][4]["command"], "no mutation");
     }
 
     fn remote_workspace_file(path: &str, contents: &str) -> RemoteAgentPodWorkspaceFile {
