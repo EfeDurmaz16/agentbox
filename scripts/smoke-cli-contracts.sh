@@ -235,6 +235,11 @@ grep -F "Query remote AgentPod worker supervision status" \
   "$TMPDIR/remote-worker-status-help.txt" >/dev/null
 grep -F "omitted values can be read from --session" \
   "$TMPDIR/remote-worker-status-help.txt" >/dev/null
+"${CLI[@]}" remote-exec --help >"$TMPDIR/remote-exec-help.txt"
+grep -F "Execute an argv command through an existing remote AgentPod worker session" \
+  "$TMPDIR/remote-exec-help.txt" >/dev/null
+grep -F "Command argv to execute after --" \
+  "$TMPDIR/remote-exec-help.txt" >/dev/null
 "${CLI[@]}" remote-approval-grant --help >"$TMPDIR/remote-approval-grant-help.txt"
 grep -F "Grant a pending remote AgentPod command approval" \
   "$TMPDIR/remote-approval-grant-help.txt" >/dev/null

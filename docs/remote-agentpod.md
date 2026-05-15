@@ -169,6 +169,12 @@ agentbox remote-worker-status \
 agentbox remote-restart \
   --session agentbox-session-id \
   --reason "operator reviewed stopped worker state"
+
+agentbox remote-exec \
+  --session agentbox-session-id \
+  --timeout-seconds 30 \
+  -- \
+  printf resumed
 ```
 
 `remote-worker-status` prints the worker supervision status, including boot id,
@@ -176,7 +182,9 @@ boot count, previous boot id, recovered session count, and persistence mode.
 Like evidence status, `remote-restart` derives the worker endpoint and
 worker-side session id from the persisted local session when possible. It prints
 the validated restart response, including running status, restart attempt, and
-required lifecycle events.
+required lifecycle events. `remote-exec` sends a new argv command through the
+same typed transport path after a restart, without accepting arbitrary command
+environment material.
 
 For append-only stream evidence, the CLI can upload a UTF-8 file as ordered
 chunks:

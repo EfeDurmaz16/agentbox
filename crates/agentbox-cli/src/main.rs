@@ -559,6 +559,32 @@ enum Commands {
         #[arg(long = "session")]
         session_id: Option<String>,
     },
+    /// Execute an argv command through an existing remote AgentPod worker session
+    RemoteExec {
+        /// Remote worker endpoint, e.g. https://worker.example.com/agentpod; omitted values are read from the local session when possible
+        #[arg(long)]
+        endpoint: Option<String>,
+
+        /// Agentbox session id
+        #[arg(long = "session")]
+        session_id: String,
+
+        /// Worker-side session id; omitted values are read from the local session when possible
+        #[arg(long = "worker-session")]
+        worker_session_id: Option<String>,
+
+        /// Optional working directory inside the remote workspace
+        #[arg(long = "working-dir")]
+        working_dir: Option<String>,
+
+        /// Optional command timeout in seconds
+        #[arg(long = "timeout-seconds")]
+        timeout_seconds: Option<u64>,
+
+        /// Command argv to execute after --
+        #[arg(required = true, trailing_var_arg = true)]
+        command: Vec<String>,
+    },
     /// Upload a verified evidence bundle directory to a remote AgentPod worker
     RemoteEvidenceUpload {
         /// Remote worker endpoint, e.g. https://worker.example.com/agentpod; omitted values are read from the local session when possible
@@ -6204,6 +6230,54 @@ async fn cmd_remote_worker_status(endpoint: Option<String>, session_id: Option<S
     );
 }
 
+async fn cmd_remote_exec(
+    endpoint: Option<String>,
+    session_id: String,
+    worker_session_id: Option<String>,
+    working_dir: Option<String>,
+    timeout_seconds: Option<u64>,
+    command: Vec<String>,
+) {
+    use agentbox_daemon::runtime::providers::remote::{
+        HttpRemoteAgentPodTransport, RemoteAgentPodExecRequest, RemoteAgentPodTransport,
+    };
+    use agentbox_daemon::runtime::types::ExecCommand;
+
+    let (endpoint, worker_session_id) =
+        resolve_remote_session_metadata(&session_id, endpoint, worker_session_id);
+    let transport = HttpRemoteAgentPodTransport::new(endpoint).unwrap_or_else(|e| {
+        eprintln!(
+            "error: failed to build remote AgentPod exec transport: {}",
+            e
+        );
+        std::process::exit(1);
+    });
+    let request = RemoteAgentPodExecRequest {
+        session_id,
+        worker_session_id,
+        command: ExecCommand {
+            argv: command,
+            working_dir,
+            env: HashMap::new(),
+            timeout_seconds,
+        },
+    };
+    request.validate().unwrap_or_else(|e| {
+        eprintln!("error: failed to build remote AgentPod exec request: {}", e);
+        std::process::exit(1);
+    });
+    let response = transport.exec_command(request).await.unwrap_or_else(|e| {
+        eprintln!("error: failed to execute remote AgentPod command: {}", e);
+        std::process::exit(1);
+    });
+
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&response)
+            .expect("failed to serialize remote AgentPod exec response")
+    );
+}
+
 fn resolve_remote_worker_endpoint(endpoint: Option<String>, session_id: Option<String>) -> String {
     if let Some(endpoint) = endpoint {
         return endpoint;
@@ -7373,6 +7447,7 @@ fn remote_session_operator_commands(
         format!("agentbox remote-evidence-status --session {}", session.id),
         format!("agentbox remote-restart --session {}", session.id),
         format!("agentbox remote-worker-status --session {}", session.id),
+        format!("agentbox remote-exec --session {} -- <cmd>", session.id),
         format!(
             "agentbox remote-workspace-export --session {} --output-dir ./agentbox-workspace-review",
             session.id
@@ -7638,6 +7713,24 @@ async fn main() {
             endpoint,
             session_id,
         } => cmd_remote_worker_status(endpoint, session_id).await,
+        Commands::RemoteExec {
+            endpoint,
+            session_id,
+            worker_session_id,
+            working_dir,
+            timeout_seconds,
+            command,
+        } => {
+            cmd_remote_exec(
+                endpoint,
+                session_id,
+                worker_session_id,
+                working_dir,
+                timeout_seconds,
+                command,
+            )
+            .await
+        }
         Commands::RemoteEvidenceUpload {
             endpoint,
             session_id,
@@ -8437,6 +8530,7 @@ mod tests {
                 format!("agentbox remote-evidence-status --session {session_id}"),
                 format!("agentbox remote-restart --session {session_id}"),
                 format!("agentbox remote-worker-status --session {session_id}"),
+                format!("agentbox remote-exec --session {session_id} -- <cmd>"),
                 format!(
                     "agentbox remote-workspace-export --session {session_id} --output-dir ./agentbox-workspace-review"
                 ),

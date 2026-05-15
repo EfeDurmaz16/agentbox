@@ -27,7 +27,7 @@ cargo run --locked -q -p agentbox-remote-worker -- \
   --signing-key-hex "$SIGNING_KEY_HEX" >"$TMPDIR/worker.out" 2>"$TMPDIR/worker.err" &
 WORKER_PID="$!"
 
-for _ in $(seq 1 50); do
+for _ in $(seq 1 150); do
   if curl -fsS "http://127.0.0.1:${PORT}/handshake" \
     -H 'content-type: application/json' \
     --data '{"schema_version":1,"provider":"remote-agentpod","endpoint":"https://worker.example.com/agentpod","auth_kind":"SignedChallenge","challenge_id":"agentpod-challenge-smoke","challenge_nonce_sha256":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","expires_at":"2026-05-14T23:59:59Z","required_response_fields":["WorkerIdentity","WorkerPublicKey","SignedChallenge","Capabilities","EvidenceEndpoint","LifecycleAck"],"secret_material_included":false,"created_at":"2026-05-14T00:00:00Z"}' \
@@ -790,7 +790,7 @@ cargo run --locked -q -p agentbox-remote-worker -- \
   --signing-key-hex "$SIGNING_KEY_HEX" >"$TMPDIR/worker-restarted.out" 2>"$TMPDIR/worker-restarted.err" &
 WORKER_PID="$!"
 
-for _ in $(seq 1 50); do
+for _ in $(seq 1 150); do
   if curl -fsS "http://127.0.0.1:${PORT}/handshake" \
     -H 'content-type: application/json' \
     --data '{"schema_version":1,"provider":"remote-agentpod","endpoint":"https://worker.example.com/agentpod","auth_kind":"SignedChallenge","challenge_id":"agentpod-challenge-smoke-restarted","challenge_nonce_sha256":"1123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","expires_at":"2026-05-14T23:59:59Z","required_response_fields":["WorkerIdentity","WorkerPublicKey","SignedChallenge","Capabilities","EvidenceEndpoint","LifecycleAck"],"secret_material_included":false,"created_at":"2026-05-14T00:00:00Z"}' \
@@ -936,9 +936,14 @@ AGENTBOX_REMOTE_AGENTPOD_ALLOW_HTTP_LOOPBACK=1 \
   --reason "smoke explicit restart" \
   >"$TMPDIR/restart-response.json"
 
-curl -fsS "http://127.0.0.1:${PORT}/sessions/${LONG_WORKER_SESSION_ID}/exec" \
-  -H 'content-type: application/json' \
-  --data "{\"session_id\":\"${LONG_SESSION_ID}\",\"worker_session_id\":\"${LONG_WORKER_SESSION_ID}\",\"command\":{\"argv\":[\"printf\",\"explicit-restart\"],\"working_dir\":null,\"env\":{},\"timeout_seconds\":5}}" \
+AGENTBOX_REMOTE_AGENTPOD_ALLOW_HTTP_LOOPBACK=1 \
+"$ROOT/target/debug/agentbox-cli" remote-exec \
+  --endpoint "http://127.0.0.1:${PORT}" \
+  --session "$LONG_SESSION_ID" \
+  --worker-session "$LONG_WORKER_SESSION_ID" \
+  --timeout-seconds 5 \
+  -- \
+  printf explicit-restart \
   >"$TMPDIR/restarted-long-exec-response.json"
 
 python3 - "$TMPDIR/restart-response.json" "$TMPDIR/restarted-long-exec-response.json" <<'PY'

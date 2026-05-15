@@ -650,6 +650,23 @@ pub struct RemoteAgentPodExecRequest {
     pub command: ExecCommand,
 }
 
+impl RemoteAgentPodExecRequest {
+    pub fn validate(&self) -> Result<(), RuntimeError> {
+        if self.session_id.trim().is_empty() || self.worker_session_id.trim().is_empty() {
+            return Err(RuntimeError::ManifestRejected(
+                "remote exec request must include session ids".into(),
+            ));
+        }
+        if self.command.argv.is_empty() || self.command.argv.iter().any(|arg| arg.trim().is_empty())
+        {
+            return Err(RuntimeError::ManifestRejected(
+                "remote exec request must include non-empty command argv".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RemoteAgentPodExecResponse {
     pub result: CommandResult,
@@ -1693,6 +1710,7 @@ impl RemoteAgentPodTransport for HttpRemoteAgentPodTransport {
         &self,
         request: RemoteAgentPodExecRequest,
     ) -> Result<RemoteAgentPodExecResponse, RuntimeError> {
+        request.validate()?;
         let response = self
             .client
             .post(self.route(format!("sessions/{}/exec", request.worker_session_id)))
