@@ -307,6 +307,8 @@ See [docs/mac-mini-replacement-wedge.md](docs/mac-mini-replacement-wedge.md)
 for the local-software-boundary wedge and its limits.
 See [docs/release-readiness.md](docs/release-readiness.md) for the release
 gate before tagging public builds.
+See [docs/v0.2-demo-checklist.md](docs/v0.2-demo-checklist.md) for the honest
+public demo path.
 See [docs/installer-packaging.md](docs/installer-packaging.md) for the
 packaging path and the rule against shipping unverified installers.
 Evidence records can now be mapped into FIDES-style signed action drafts and
