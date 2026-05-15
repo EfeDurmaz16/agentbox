@@ -34,6 +34,17 @@ log "checking provider truth JSON"
 validate_json "$TMPDIR/providers.json" \
   "any(p.get('provider') == 'podman' for p in data) and any(p.get('provider') == 'remote-agentpod' and p.get('status') == 'experimental' for p in data) and any(p.get('provider') == 'agentpod-windows' and 'job-objects' in p.get('boundary_primitives', []) and 'wfp' in p.get('boundary_primitives', []) and 'windows-sandbox' in p.get('boundary_primitives', []) and 'hyper-v' in p.get('boundary_primitives', []) for p in data) and any(p.get('provider') == 'agentpod-linux' and 'user-namespaces' in p.get('boundary_primitives', []) and 'seccomp' in p.get('boundary_primitives', []) for p in data)"
 
+log "checking doctor JSON truth"
+set +e
+"${CLI[@]}" doctor --json >"$TMPDIR/doctor.json"
+doctor_status=$?
+set -e
+validate_json "$TMPDIR/doctor.json" \
+  "data.get('schema_version') == 1 and data.get('checks') is not None and data.get('ok', 0) + data.get('failed', 0) == len(data.get('checks', [])) and any(c.get('name') == 'agentbox-shim binary' for c in data.get('checks', []))"
+if [ "$doctor_status" -ne 0 ]; then
+  validate_json "$TMPDIR/doctor.json" "data.get('failed', 0) > 0"
+fi
+
 log "checking AgentPod run plan JSON"
 "${CLI[@]}" run --plan --json -- echo agentbox-contract >"$TMPDIR/run-plan.json"
 validate_json "$TMPDIR/run-plan.json" \

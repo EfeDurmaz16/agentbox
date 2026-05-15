@@ -42,7 +42,11 @@ enum Commands {
     /// Show daemon status
     Status,
     /// Run local readiness checks for daemon, shims, policy, audit, and minipods
-    Doctor,
+    Doctor {
+        /// Emit JSON
+        #[arg(long)]
+        json: bool,
+    },
     /// Query audit log
     Audit {
         /// Number of events to show
@@ -869,7 +873,40 @@ fn cmd_status() {
     }
 }
 
-fn cmd_doctor() {
+fn cmd_doctor(json: bool) {
+    let report = build_doctor_report();
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&report).expect("failed to serialize doctor report")
+        );
+        if report.failed > 0 {
+            std::process::exit(1);
+        }
+        return;
+    }
+
+    println!("Agentbox doctor");
+    println!("{}", "-".repeat(64));
+
+    for check in &report.checks {
+        let marker = if check.ok { "ok" } else { "fail" };
+        println!("{:<6} {:<24} {}", marker, check.name, check.detail);
+        if !check.ok {
+            println!("       fix: {}", check.fix);
+        }
+    }
+
+    println!("{}", "-".repeat(64));
+    println!("summary: {} ok, {} failed", report.ok, report.failed);
+
+    if report.failed > 0 {
+        std::process::exit(1);
+    }
+}
+
+fn build_doctor_report() -> DoctorReport {
     let mut checks = Vec::new();
 
     checks.push(doctor_check(
@@ -981,27 +1018,30 @@ fn cmd_doctor() {
         checks.extend(windows_native_doctor_checks());
     }
 
-    println!("Agentbox doctor");
-    println!("{}", "-".repeat(64));
+    doctor_report(checks)
+}
 
-    let mut failed = 0;
-    for check in &checks {
-        let marker = if check.ok { "ok" } else { "fail" };
-        println!("{:<6} {:<24} {}", marker, check.name, check.detail);
-        if !check.ok {
-            println!("       fix: {}", check.fix);
-            failed += 1;
-        }
-    }
+#[derive(Serialize)]
+struct DoctorReport {
+    schema_version: i64,
+    platform: String,
+    ok: usize,
+    failed: usize,
+    checks: Vec<DoctorCheck>,
+}
 
-    println!("{}", "-".repeat(64));
-    println!("summary: {} ok, {} failed", checks.len() - failed, failed);
-
-    if failed > 0 {
-        std::process::exit(1);
+fn doctor_report(checks: Vec<DoctorCheck>) -> DoctorReport {
+    let failed = checks.iter().filter(|check| !check.ok).count();
+    DoctorReport {
+        schema_version: 1,
+        platform: std::env::consts::OS.to_string(),
+        ok: checks.len() - failed,
+        failed,
+        checks,
     }
 }
 
+#[derive(Serialize)]
 struct DoctorCheck {
     name: &'static str,
     ok: bool,
@@ -5583,7 +5623,7 @@ async fn main() {
         Commands::Setup => cmd_setup(),
         Commands::Stop => cmd_stop(),
         Commands::Status => cmd_status(),
-        Commands::Doctor => cmd_doctor(),
+        Commands::Doctor { json } => cmd_doctor(json),
         Commands::Audit {
             limit,
             bucket,
@@ -5921,6 +5961,22 @@ mod tests {
             resolve_native_plan_provider("agentpod-windows"),
             "agentpod-windows"
         );
+    }
+
+    #[test]
+    fn doctor_report_counts_failed_checks_for_json_output() {
+        let report = doctor_report(vec![
+            doctor_check("ready", true, "ok".into(), "none"),
+            doctor_check("missing", false, "not found".into(), "install it"),
+        ]);
+
+        assert_eq!(report.schema_version, 1);
+        assert_eq!(report.ok, 1);
+        assert_eq!(report.failed, 1);
+        assert_eq!(report.checks.len(), 2);
+        let payload = serde_json::to_value(&report).unwrap();
+        assert_eq!(payload["checks"][1]["name"], "missing");
+        assert_eq!(payload["checks"][1]["fix"], "install it");
     }
 
     #[test]
