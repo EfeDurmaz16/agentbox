@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::runtime::provider::RuntimeError;
 use crate::runtime::types::{
-    CommandResult, ExecCommand, MinipodSpec, MountMode, ResourcePolicy, SeccompAction,
+    CommandResult, ExecCommand, MinipodSpec, MountMode, NetworkMode, ResourcePolicy, SeccompAction,
     SeccompProfile,
 };
 
@@ -562,6 +562,132 @@ impl LinuxLandlockRuleset {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LinuxNftablesPlan {
+    pub schema_version: i64,
+    pub table_name: String,
+    pub chain_name: String,
+    pub mode: NetworkMode,
+    pub default_policy: LinuxNftablesDefaultPolicy,
+    pub allow_localhost: bool,
+    pub allowed_domains: Vec<String>,
+    pub denied_domains: Vec<String>,
+    pub planned_rules: Vec<LinuxNftablesRulePlan>,
+    pub domain_rules_require_resolver: bool,
+    pub requires_nftables: bool,
+    pub requires_linux: bool,
+    pub enforcement_claim: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LinuxNftablesDefaultPolicy {
+    Drop,
+    AcceptWithGuardrails,
+    RequireApproval,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LinuxNftablesRulePlan {
+    pub action: LinuxNftablesRuleAction,
+    pub selector: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LinuxNftablesRuleAction {
+    Accept,
+    Drop,
+    ApprovalRequired,
+    Observe,
+}
+
+pub struct LinuxNftablesPolicyDescriptor;
+
+impl LinuxNftablesPolicyDescriptor {
+    pub fn plan(spec: &MinipodSpec) -> Result<LinuxNftablesPlan, RuntimeError> {
+        if spec.id.trim().is_empty() {
+            return Err(RuntimeError::ManifestRejected(
+                "nftables policy session id cannot be empty".into(),
+            ));
+        }
+
+        let mut planned_rules = Vec::new();
+        if spec.network.allow_localhost {
+            planned_rules.push(LinuxNftablesRulePlan {
+                action: LinuxNftablesRuleAction::Accept,
+                selector: "ip daddr 127.0.0.0/8; ip6 daddr ::1".into(),
+                reason: "manifest allows loopback service access".into(),
+            });
+        } else {
+            planned_rules.push(LinuxNftablesRulePlan {
+                action: LinuxNftablesRuleAction::Drop,
+                selector: "ip daddr 127.0.0.0/8; ip6 daddr ::1".into(),
+                reason: "manifest disables loopback service access".into(),
+            });
+        }
+        for domain in &spec.network.denied_domains {
+            planned_rules.push(LinuxNftablesRulePlan {
+                action: LinuxNftablesRuleAction::Drop,
+                selector: format!("domain:{domain}"),
+                reason: "manifest domain denylist; requires resolver/ipset compilation".into(),
+            });
+        }
+        for domain in &spec.network.allowed_domains {
+            planned_rules.push(LinuxNftablesRulePlan {
+                action: LinuxNftablesRuleAction::Accept,
+                selector: format!("domain:{domain}"),
+                reason: "manifest domain allowlist; requires resolver/ipset compilation".into(),
+            });
+        }
+
+        let default_policy = match spec.network.mode {
+            NetworkMode::None | NetworkMode::DenyByDefault | NetworkMode::AllowListed => {
+                LinuxNftablesDefaultPolicy::Drop
+            }
+            NetworkMode::ApprovalOnFirstContact => LinuxNftablesDefaultPolicy::RequireApproval,
+            NetworkMode::OpenWithGuardrails | NetworkMode::Host => {
+                LinuxNftablesDefaultPolicy::AcceptWithGuardrails
+            }
+        };
+
+        Ok(LinuxNftablesPlan {
+            schema_version: 1,
+            table_name: format!("agentbox_{}", sanitize_nft_name(&spec.id)),
+            chain_name: "agentpod_egress".into(),
+            mode: spec.network.mode.clone(),
+            default_policy,
+            allow_localhost: spec.network.allow_localhost,
+            allowed_domains: spec.network.allowed_domains.clone(),
+            denied_domains: spec.network.denied_domains.clone(),
+            planned_rules,
+            domain_rules_require_resolver: true,
+            requires_nftables: true,
+            requires_linux: true,
+            enforcement_claim:
+                "nftables policy descriptor only; no packet/domain denial proof is wired".into(),
+        })
+    }
+}
+
+fn sanitize_nft_name(raw: &str) -> String {
+    let sanitized: String = raw
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '_' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let trimmed = sanitized.trim_matches('_');
+    if trimmed.is_empty() {
+        "session".into()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LinuxIsolationBenchmarkPlan {
     pub schema_version: i64,
     pub iterations: u32,
@@ -591,6 +717,7 @@ pub struct LinuxAgentPodExecutionPlan {
     pub cgroup: LinuxCgroupV2Plan,
     pub seccomp: LinuxSeccompPlan,
     pub landlock: LinuxLandlockPlan,
+    pub nftables: LinuxNftablesPlan,
     pub live_env_var: String,
     pub live_execution_enabled: bool,
     pub requires_linux: bool,
@@ -614,6 +741,7 @@ impl LinuxAgentPodExecutionPlan {
         let cgroup = LinuxCgroupV2Limiter::plan(&spec.id, &spec.resources)?;
         let seccomp = LinuxSeccompProfileLoader::plan(&spec.seccomp)?;
         let landlock = LinuxLandlockRuleset::plan(spec)?;
+        let nftables = LinuxNftablesPolicyDescriptor::plan(spec)?;
 
         let mut composed_argv = vec![
             "unshare".to_string(),
@@ -638,6 +766,7 @@ impl LinuxAgentPodExecutionPlan {
             cgroup,
             seccomp,
             landlock,
+            nftables,
             live_env_var: "AGENTBOX_LINUX_NATIVE".into(),
             live_execution_enabled: linux_native_execution_enabled(),
             requires_linux: true,
@@ -738,6 +867,7 @@ impl LinuxIsolationBenchmarkPlan {
         let cgroup = LinuxCgroupV2Limiter::plan(&spec.id, &spec.resources)?;
         let seccomp = LinuxSeccompProfileLoader::plan(&spec.seccomp)?;
         let landlock = LinuxLandlockRuleset::plan(spec)?;
+        let nftables = LinuxNftablesPolicyDescriptor::plan(spec)?;
 
         let mut user_mount_pid = vec![
             "unshare".to_string(),
@@ -815,6 +945,15 @@ impl LinuxIsolationBenchmarkPlan {
                         .map(|rule| rule.path.clone())
                         .collect(),
                     expected_boundary: "Landlock ruleset plan only".into(),
+                },
+                LinuxIsolationBenchmarkLayer {
+                    name: "nftables-plan".into(),
+                    argv: nftables
+                        .planned_rules
+                        .iter()
+                        .map(|rule| rule.selector.clone())
+                        .collect(),
+                    expected_boundary: "nftables egress policy descriptor only".into(),
                 },
             ],
             live_env_var: "AGENTBOX_LINUX_BENCHMARK".into(),
@@ -1138,6 +1277,49 @@ mod tests {
         assert!(matches!(err, RuntimeError::ManifestRejected(_)));
     }
 
+    #[test]
+    fn nftables_plan_describes_domain_and_loopback_policy_without_claiming_enforcement() {
+        let mut spec = MinipodSpec::for_agent_task("hermes", "/tmp/agentbox-work");
+        spec.id = "agentpod.test/session-1".into();
+        spec.network.mode = NetworkMode::AllowListed;
+        spec.network.allow_localhost = false;
+        spec.network.allowed_domains = vec!["api.openai.com".into()];
+        spec.network.denied_domains = vec!["metadata.google.internal".into()];
+
+        let plan = LinuxNftablesPolicyDescriptor::plan(&spec).unwrap();
+
+        assert_eq!(plan.schema_version, 1);
+        assert_eq!(plan.table_name, "agentbox_agentpod_test_session_1");
+        assert_eq!(plan.chain_name, "agentpod_egress");
+        assert_eq!(plan.default_policy, LinuxNftablesDefaultPolicy::Drop);
+        assert!(!plan.allow_localhost);
+        assert!(plan.domain_rules_require_resolver);
+        assert!(plan.requires_nftables);
+        assert!(plan.requires_linux);
+        assert!(plan.enforcement_claim.contains("descriptor only"));
+        assert!(plan.planned_rules.iter().any(|rule| {
+            rule.action == LinuxNftablesRuleAction::Drop && rule.selector.contains("127.0.0.0/8")
+        }));
+        assert!(plan.planned_rules.iter().any(|rule| {
+            rule.action == LinuxNftablesRuleAction::Drop
+                && rule.selector == "domain:metadata.google.internal"
+        }));
+        assert!(plan.planned_rules.iter().any(|rule| {
+            rule.action == LinuxNftablesRuleAction::Accept
+                && rule.selector == "domain:api.openai.com"
+        }));
+    }
+
+    #[test]
+    fn nftables_plan_rejects_empty_session_ids() {
+        let mut spec = MinipodSpec::for_agent_task("hermes", "/tmp/agentbox-work");
+        spec.id = " ".into();
+
+        let err = LinuxNftablesPolicyDescriptor::plan(&spec).unwrap_err();
+
+        assert!(matches!(err, RuntimeError::ManifestRejected(_)));
+    }
+
     #[cfg(not(target_os = "linux"))]
     #[test]
     fn landlock_apply_is_explicitly_linux_only() {
@@ -1179,6 +1361,9 @@ mod tests {
         assert!(seccomp.requires_loader);
         assert!(landlock.default_deny);
         assert!(landlock.requires_loader);
+        let plan = LinuxAgentPodExecutionPlan::from_minipod_spec(&spec, &command).unwrap();
+        assert_eq!(plan.nftables.chain_name, "agentpod_egress");
+        assert!(plan.nftables.requires_nftables);
     }
 
     #[test]

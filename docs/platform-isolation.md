@@ -89,7 +89,8 @@ AgentPod because the platform has strong local primitives:
 - seccomp for syscall filtering, including OCI/libseccomp profile JSON
   rendering in the native execution plan before a loader is wired
 - Landlock for unprivileged filesystem constraints
-- nftables or eBPF for network visibility and enforcement
+- nftables descriptors for egress posture, and eBPF for network visibility and
+  enforcement after live denial tests
 
 The near-term goal is not to recreate Docker. The goal is a narrow agent-task
 runtime with explicit filesystem, network, credential, process, approval, and
