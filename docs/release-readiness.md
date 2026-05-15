@@ -89,7 +89,7 @@ doctor report without mutating host state.
 
 ## Minipods And Providers
 
-- [ ] `agentbox minipod-spec hermes --workspace .` emits valid JSON.
+- [x] `agentbox minipod-spec hermes --workspace .` emits valid JSON.
 - [x] `scripts/demo-v0.2.sh` passes.
 - [x] `scripts/demo-autonomous-agent.sh` passes.
 - [x] macOS native plan compiler output is tested without claiming execution.
