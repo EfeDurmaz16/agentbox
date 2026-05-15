@@ -213,6 +213,8 @@ log "checking workspace review command surface"
 grep -F "Review workspace output for an AgentPod session" \
   "$TMPDIR/review-help.txt" >/dev/null
 grep -F "Emit only the workspace patch" "$TMPDIR/review-help.txt" >/dev/null
+grep -F "Print a keyboard-style review command menu" \
+  "$TMPDIR/review-help.txt" >/dev/null
 "${CLI[@]}" review-apply --help >"$TMPDIR/review-apply-help.txt"
 grep -F "Apply projected workspace output to the lower workspace" \
   "$TMPDIR/review-apply-help.txt" >/dev/null

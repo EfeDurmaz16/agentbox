@@ -634,6 +634,10 @@ enum Commands {
         /// Emit only the workspace patch
         #[arg(long)]
         patch: bool,
+
+        /// Print a keyboard-style review command menu after the summary
+        #[arg(long)]
+        tui: bool,
     },
     /// Discard projected workspace output for an AgentPod session
     ReviewDiscard {
@@ -6458,7 +6462,7 @@ fn cmd_minipod_inspect(session_id: Option<String>, json: bool) {
     }
 }
 
-fn cmd_review(session_id: String, json: bool, patch: bool) {
+fn cmd_review(session_id: String, json: bool, patch: bool, tui: bool) {
     use agentbox_daemon::audit::AuditStore;
     use agentbox_daemon::config;
     use agentbox_daemon::runtime::manager::RuntimeManager;
@@ -6574,6 +6578,24 @@ fn cmd_review(session_id: String, json: bool, patch: bool) {
             println!("  - {}", file);
         }
     }
+    if tui {
+        print_review_tui_skeleton(&session.id);
+    }
+}
+
+fn print_review_tui_skeleton(session_id: &str) {
+    println!();
+    println!("Review actions");
+    println!("{}", "-".repeat(64));
+    println!("  p  print patch      agentbox review {session_id} --patch");
+    println!("  a  apply changes    agentbox review-apply {session_id}");
+    println!(
+        "  c  commit changes   agentbox review-commit {session_id} --message \"agent output\""
+    );
+    println!("  d  discard overlay  agentbox review-discard {session_id}");
+    println!("  q  quit             no mutation");
+    println!();
+    println!("This is a command menu skeleton; it does not read keys or mutate state.");
 }
 
 fn cmd_review_discard(session_id: String) {
@@ -7079,7 +7101,8 @@ async fn main() {
             session_id,
             json,
             patch,
-        } => cmd_review(session_id, json, patch),
+            tui,
+        } => cmd_review(session_id, json, patch, tui),
         Commands::ReviewDiscard { session_id } => cmd_review_discard(session_id),
         Commands::ReviewApply { session_id } => cmd_review_apply(session_id),
         Commands::ReviewCommit {

@@ -210,6 +210,7 @@ agentbox minipod-spec hermes --workspace . --workspace-mode overlay-review
 
 # Review projected workspace output after a persisted AgentPod session.
 agentbox review <session-id>
+agentbox review <session-id> --tui
 agentbox review <session-id> --patch
 agentbox review-apply <session-id>
 agentbox review-discard <session-id>
