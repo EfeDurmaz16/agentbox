@@ -333,6 +333,8 @@ agentbox setup-plan      # Show the next local setup actions without changing ho
 agentbox setup-plan --provider remote-agentpod
 agentbox setup --dry-run --provider remote-agentpod --json
 agentbox setup --dry-run --provider remote-agentpod --endpoint https://agentpod.example.com/run --json
+agentbox pods --json       # Inspect persisted AgentPod sessions
+agentbox pods --provider remote-agentpod --status running
 agentbox evidence        # Export audit/evidence JSONL
 agentbox minipod-spec    # Generate and validate a governed minipod manifest
 agentbox minipod-spec --policy-bundle ./task-policy.json

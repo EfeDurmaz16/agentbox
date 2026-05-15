@@ -242,8 +242,28 @@ enum Commands {
         /// Minipod session id; legacy sb-* backend ids are still accepted
         pod_id: String,
     },
-    /// List running minipods
-    Pods,
+    /// List persisted AgentPod sessions
+    Pods {
+        /// Emit JSON
+        #[arg(long)]
+        json: bool,
+
+        /// Refresh the session list until interrupted
+        #[arg(long)]
+        watch: bool,
+
+        /// Watch refresh interval in seconds
+        #[arg(long = "interval-seconds", default_value_t = 2)]
+        interval_seconds: u64,
+
+        /// Filter by provider
+        #[arg(long)]
+        provider: Option<String>,
+
+        /// Filter by status substring, e.g. running, stopped, failed
+        #[arg(long)]
+        status: Option<String>,
+    },
     /// Explain the last blocked or denied action
     Why,
     /// Show current policy posture (allow/approve/block rules)
@@ -2812,32 +2832,67 @@ fn stop_legacy_podman_pod(raw_id: &str) {
     }
 }
 
-async fn cmd_pods() {
+async fn cmd_pods(
+    json: bool,
+    watch: bool,
+    interval_seconds: u64,
+    provider: Option<String>,
+    status: Option<String>,
+) {
     use agentbox_daemon::config;
     use agentbox_daemon::runtime::session::RuntimeSessionStore;
+
+    if watch && json {
+        eprintln!("error: --watch cannot be combined with --json");
+        std::process::exit(2);
+    }
+    if watch && interval_seconds == 0 {
+        eprintln!("error: --interval-seconds must be greater than zero");
+        std::process::exit(2);
+    }
 
     let config = config::load().unwrap_or_else(|e| {
         eprintln!("error: failed to load Agentbox config: {}", e);
         std::process::exit(1);
     });
     let store = RuntimeSessionStore::new(config.session_store_path);
-    let sessions = store.list().unwrap_or_else(|e| {
-        eprintln!("error: failed to read runtime session store: {}", e);
-        std::process::exit(1);
-    });
 
+    loop {
+        let sessions = store.list().unwrap_or_else(|e| {
+            eprintln!("error: failed to read runtime session store: {}", e);
+            std::process::exit(1);
+        });
+        let sessions = filter_pod_sessions(sessions, provider.as_deref(), status.as_deref());
+
+        if json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&sessions).expect("failed to serialize sessions")
+            );
+            return;
+        }
+
+        print_pod_sessions(&sessions);
+        if !watch {
+            return;
+        }
+        thread::sleep(Duration::from_secs(interval_seconds));
+        println!();
+    }
+}
+
+fn print_pod_sessions(sessions: &[agentbox_daemon::runtime::types::RuntimeSession]) {
     if sessions.is_empty() {
         println!("No persisted AgentPod sessions.");
         return;
     }
-
     println!(
         "{:<28} {:<18} {:<12} {:<10} {:<12} AGENT",
         "SESSION", "NAME", "PROVIDER", "STATUS", "RISK"
     );
     println!("{}", "-".repeat(104));
 
-    for session in &sessions {
+    for session in sessions {
         println!(
             "{:<28} {:<18} {:<12} {:<10} {:<12} {}",
             session.id,
@@ -2848,6 +2903,30 @@ async fn cmd_pods() {
             session.spec.agent.name
         );
     }
+}
+
+fn filter_pod_sessions(
+    sessions: Vec<agentbox_daemon::runtime::types::RuntimeSession>,
+    provider: Option<&str>,
+    status: Option<&str>,
+) -> Vec<agentbox_daemon::runtime::types::RuntimeSession> {
+    let provider = provider.map(|value| value.trim().to_ascii_lowercase());
+    let status = status.map(|value| value.trim().to_ascii_lowercase());
+    sessions
+        .into_iter()
+        .filter(|session| {
+            provider
+                .as_deref()
+                .is_none_or(|provider| session.provider.to_ascii_lowercase() == provider)
+        })
+        .filter(|session| {
+            status.as_deref().is_none_or(|status| {
+                format!("{:?}", session.status)
+                    .to_ascii_lowercase()
+                    .contains(status)
+            })
+        })
+        .collect()
 }
 
 fn cmd_allow(domain: String) {
@@ -6350,7 +6429,13 @@ async fn main() {
             .await
         }
         Commands::StopPod { pod_id } => cmd_stop_pod(pod_id).await,
-        Commands::Pods => cmd_pods().await,
+        Commands::Pods {
+            json,
+            watch,
+            interval_seconds,
+            provider,
+            status,
+        } => cmd_pods(json, watch, interval_seconds, provider, status).await,
         Commands::Why => cmd_why(),
         Commands::Policy => cmd_policy(),
         Commands::PolicySimulate { command } => cmd_policy_simulate(command),
@@ -6775,6 +6860,37 @@ mod tests {
                     .to_string()
             ]
         );
+    }
+
+    #[test]
+    fn pod_session_filters_match_provider_and_status() {
+        let mut direct = RuntimeSession::new(
+            "direct".into(),
+            "direct-host".into(),
+            "macos".into(),
+            MinipodSpec::for_agent_task("codex", "/tmp/agentbox-direct"),
+        );
+        direct.status = agentbox_daemon::runtime::types::RuntimeStatus::Running;
+        let mut remote = RuntimeSession::new(
+            "remote".into(),
+            "remote-agentpod".into(),
+            "remote".into(),
+            MinipodSpec::for_agent_task("hermes", "/tmp/agentbox-remote"),
+        );
+        remote.status = agentbox_daemon::runtime::types::RuntimeStatus::Stopped;
+
+        let filtered = filter_pod_sessions(
+            vec![direct, remote],
+            Some("remote-agentpod"),
+            Some("stopped"),
+        );
+
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].provider, "remote-agentpod");
+        assert!(matches!(
+            filtered[0].status,
+            agentbox_daemon::runtime::types::RuntimeStatus::Stopped
+        ));
     }
 
     #[test]
