@@ -347,6 +347,8 @@ pub struct LinuxSeccompPlan {
     pub enabled: bool,
     pub default_action: SeccompAction,
     pub syscall_rules: Vec<LinuxSeccompRule>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub oci_profile: Option<LinuxSeccompOciProfile>,
     pub requires_loader: bool,
     pub requires_linux: bool,
 }
@@ -356,6 +358,24 @@ pub struct LinuxSeccompRule {
     pub syscall: String,
     pub action: SeccompAction,
     pub reason: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LinuxSeccompOciProfile {
+    pub default_action: String,
+    pub architectures: Vec<String>,
+    pub syscalls: Vec<LinuxSeccompOciSyscall>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LinuxSeccompOciSyscall {
+    pub names: Vec<String>,
+    pub action: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub errno_ret: Option<i32>,
+    pub comment: String,
 }
 
 impl LinuxSeccompPlan {
@@ -373,9 +393,49 @@ impl LinuxSeccompPlan {
                     reason: rule.reason.clone(),
                 })
                 .collect(),
+            oci_profile: profile.enabled.then(|| LinuxSeccompOciProfile {
+                default_action: seccomp_action_to_oci(&profile.default_action).0,
+                architectures: vec![current_seccomp_architecture().to_string()],
+                syscalls: profile
+                    .rules
+                    .iter()
+                    .map(|rule| {
+                        let (action, errno_ret) = seccomp_action_to_oci(&rule.action);
+                        LinuxSeccompOciSyscall {
+                            names: vec![rule.syscall.clone()],
+                            action,
+                            errno_ret,
+                            comment: rule.reason.clone(),
+                        }
+                    })
+                    .collect(),
+            }),
             requires_loader: profile.enabled,
             requires_linux: true,
         }
+    }
+}
+
+fn seccomp_action_to_oci(action: &SeccompAction) -> (String, Option<i32>) {
+    match action {
+        SeccompAction::Allow => ("SCMP_ACT_ALLOW".into(), None),
+        SeccompAction::Errno(errno) => ("SCMP_ACT_ERRNO".into(), Some(*errno)),
+        SeccompAction::KillProcess => ("SCMP_ACT_KILL_PROCESS".into(), None),
+        SeccompAction::Log => ("SCMP_ACT_LOG".into(), None),
+    }
+}
+
+fn current_seccomp_architecture() -> &'static str {
+    if cfg!(target_arch = "x86_64") {
+        "SCMP_ARCH_X86_64"
+    } else if cfg!(target_arch = "aarch64") {
+        "SCMP_ARCH_AARCH64"
+    } else if cfg!(target_arch = "arm") {
+        "SCMP_ARCH_ARM"
+    } else if cfg!(target_arch = "x86") {
+        "SCMP_ARCH_X86"
+    } else {
+        "SCMP_ARCH_NATIVE"
     }
 }
 
@@ -983,6 +1043,7 @@ mod tests {
         assert!(!plan.enabled);
         assert_eq!(plan.default_action, SeccompAction::Allow);
         assert!(plan.syscall_rules.is_empty());
+        assert!(plan.oci_profile.is_none());
         assert!(!plan.requires_loader);
         assert!(plan.requires_linux);
     }
@@ -1004,6 +1065,17 @@ mod tests {
             plan.syscall_rules[0].action,
             SeccompAction::Errno(libc::EPERM)
         );
+        let oci_profile = plan.oci_profile.as_ref().unwrap();
+        assert_eq!(oci_profile.default_action, "SCMP_ACT_ALLOW");
+        assert!(!oci_profile.architectures.is_empty());
+        assert_eq!(oci_profile.syscalls[0].names, vec!["ptrace"]);
+        assert_eq!(oci_profile.syscalls[0].action, "SCMP_ACT_ERRNO");
+        assert_eq!(oci_profile.syscalls[0].errno_ret, Some(libc::EPERM));
+        assert!(oci_profile.syscalls[0].comment.contains("debugging"));
+        let oci_json = serde_json::to_value(oci_profile).unwrap();
+        assert_eq!(oci_json["defaultAction"], "SCMP_ACT_ALLOW");
+        assert_eq!(oci_json["syscalls"][0]["errnoRet"], libc::EPERM);
+        assert!(oci_json.get("default_action").is_none());
     }
 
     #[test]

@@ -86,7 +86,8 @@ AgentPod because the platform has strong local primitives:
 - user, mount, PID, IPC, UTS, and network namespaces
 - cgroups v2 for resource control
 - overlayfs or equivalent workspace layering
-- seccomp for syscall filtering
+- seccomp for syscall filtering, including OCI/libseccomp profile JSON
+  rendering in the native execution plan before a loader is wired
 - Landlock for unprivileged filesystem constraints
 - nftables or eBPF for network visibility and enforcement
 
