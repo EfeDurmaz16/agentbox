@@ -1,14 +1,21 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+skip() {
+  printf 'SKIP: %s\n' "$*" >&2
+  exit 77
+}
+
 if [[ "$(uname -s)" != "Linux" ]]; then
-  echo "error: Linux native AgentPod smoke must run on Linux" >&2
-  exit 1
+  skip "Linux native AgentPod smoke must run on Linux"
 fi
 
 if ! command -v unshare >/dev/null 2>&1; then
-  echo "error: unshare is required for the Linux native AgentPod smoke" >&2
-  exit 1
+  skip "unshare is required for the Linux native AgentPod smoke"
+fi
+
+if ! command -v jq >/dev/null 2>&1; then
+  skip "jq is required for the Linux native AgentPod smoke"
 fi
 
 workspace="${AGENTBOX_LINUX_NATIVE_WORKSPACE:-$(mktemp -d)}"

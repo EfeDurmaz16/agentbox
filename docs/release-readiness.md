@@ -102,7 +102,7 @@ doctor report without mutating host state.
 - [ ] `scripts/smoke-podman-bridge.sh` proves daemon socket visibility and shim
       execution inside a Podman minipod, or skips with code 77 when Podman is
       absent.
-- [ ] Linux benchmark and native primitive scripts skip honestly on non-Linux
+- [x] Linux benchmark and native primitive scripts skip honestly on non-Linux
       hosts.
 - [ ] Windows and macOS native provider docs match provider status.
 
