@@ -681,15 +681,27 @@ PY
 curl -fsS "http://127.0.0.1:${PORT}/sessions/${WORKER_SESSION_ID}/evidence/status?session_id=${SESSION_ID}" \
   >"$TMPDIR/evidence-status.json"
 
-python3 - "$TMPDIR/evidence-status.json" "$TMPDIR/evidence-bundle-upload.expected" <<'PY'
+AGENTBOX_REMOTE_AGENTPOD_ALLOW_HTTP_LOOPBACK=1 \
+"$ROOT/target/debug/agentbox-cli" remote-evidence-status \
+  --endpoint "http://127.0.0.1:${PORT}" \
+  --session "$SESSION_ID" \
+  --worker-session "$WORKER_SESSION_ID" \
+  >"$TMPDIR/evidence-status-cli.json"
+
+python3 - "$TMPDIR/evidence-status.json" "$TMPDIR/evidence-status-cli.json" "$TMPDIR/evidence-bundle-upload.expected" <<'PY'
 import json
 import sys
 
 with open(sys.argv[1], "r", encoding="utf-8") as fh:
     data = json.load(fh)
 with open(sys.argv[2], "r", encoding="utf-8") as fh:
+    cli = json.load(fh)
+with open(sys.argv[3], "r", encoding="utf-8") as fh:
     expected_bundle_hash = fh.read().strip()
 
+for key in ["boot_id", "boot_count", "recovered_sessions", "persistence"]:
+    assert cli["supervision"][key] == data["supervision"][key]
+assert cli["supervision"].get("previous_boot_id") == data["supervision"].get("previous_boot_id")
 assert data["status"] == "Running"
 assert data["commands_started"] >= 1
 assert data["commands_finished"] >= 1

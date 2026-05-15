@@ -1081,6 +1081,8 @@ pub struct RemoteAgentPodEvidenceStatusResponse {
     pub pending_approvals: Vec<RemoteAgentPodPendingApprovalStatus>,
     #[serde(default)]
     pub credentials: Vec<RemoteAgentPodCredentialStatus>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supervision: Option<RemoteAgentPodWorkerStatusResponse>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1176,6 +1178,9 @@ impl RemoteAgentPodEvidenceStatusResponse {
         }
         for credential in &self.credentials {
             credential.validate()?;
+        }
+        if let Some(supervision) = &self.supervision {
+            supervision.validate()?;
         }
         Ok(())
     }
@@ -3002,6 +3007,14 @@ mod tests {
                     bytes: None,
                     one_time: false,
                 }],
+                supervision: Some(RemoteAgentPodWorkerStatusResponse {
+                    boot_id: "boot-test".into(),
+                    boot_count: 1,
+                    previous_boot_id: None,
+                    started_at: Utc::now(),
+                    recovered_sessions: 0,
+                    persistence: RemoteAgentPodWorkerSupervisionPersistence::MemoryOnly,
+                }),
             };
             response.validate_for(&request)?;
             Ok(response)
@@ -4040,6 +4053,14 @@ mod tests {
                 bytes: Some(42),
                 one_time: true,
             }],
+            supervision: Some(RemoteAgentPodWorkerStatusResponse {
+                boot_id: "boot-test".into(),
+                boot_count: 1,
+                previous_boot_id: None,
+                started_at: Utc::now(),
+                recovered_sessions: 0,
+                persistence: RemoteAgentPodWorkerSupervisionPersistence::MemoryOnly,
+            }),
         };
 
         response.validate_for(&request).unwrap();
@@ -4050,6 +4071,7 @@ mod tests {
         assert_eq!(response.heartbeat_interval_seconds, 30);
         assert!(response.kill_switch_armed);
         assert!(response.evidence_sealed);
+        assert_eq!(response.supervision.unwrap().boot_count, 1);
     }
 
     #[test]
@@ -4081,6 +4103,7 @@ mod tests {
             evidence_streams: Vec::new(),
             pending_approvals: Vec::new(),
             credentials: Vec::new(),
+            supervision: None,
         };
 
         let err = response.validate_for(&request).unwrap_err();
