@@ -129,6 +129,11 @@ grep -F "Query a remote AgentPod worker for accepted evidence state" \
   "$TMPDIR/remote-evidence-status-help.txt" >/dev/null
 grep -F "omitted values are read from the local session when possible" \
   "$TMPDIR/remote-evidence-status-help.txt" >/dev/null
+"${CLI[@]}" remote-approval-grant --help >"$TMPDIR/remote-approval-grant-help.txt"
+grep -F "Grant a pending remote AgentPod command approval" \
+  "$TMPDIR/remote-approval-grant-help.txt" >/dev/null
+grep -F "omitted values are read from the local session when possible" \
+  "$TMPDIR/remote-approval-grant-help.txt" >/dev/null
 "${CLI[@]}" remote-evidence-upload --help >"$TMPDIR/remote-evidence-upload-help.txt"
 grep -F "Upload a verified evidence bundle directory to a remote AgentPod worker" \
   "$TMPDIR/remote-evidence-upload-help.txt" >/dev/null

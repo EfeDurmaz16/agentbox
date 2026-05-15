@@ -511,17 +511,17 @@ enum Commands {
     },
     /// Grant a pending remote AgentPod command approval
     RemoteApprovalGrant {
-        /// Remote worker endpoint, e.g. https://worker.example.com/agentpod
+        /// Remote worker endpoint, e.g. https://worker.example.com/agentpod; omitted values are read from the local session when possible
         #[arg(long)]
-        endpoint: String,
+        endpoint: Option<String>,
 
         /// Agentbox session id
         #[arg(long = "session")]
         session_id: String,
 
-        /// Worker-side session id
+        /// Worker-side session id; omitted values are read from the local session when possible
         #[arg(long = "worker-session")]
-        worker_session_id: String,
+        worker_session_id: Option<String>,
 
         /// Pending approval request id from remote-evidence-status
         #[arg(long = "request")]
@@ -5632,9 +5632,9 @@ async fn cmd_remote_evidence_stream(
 }
 
 async fn cmd_remote_approval_grant(
-    endpoint: String,
+    endpoint: Option<String>,
     session_id: String,
-    worker_session_id: String,
+    worker_session_id: Option<String>,
     request_id: String,
     reason: String,
     ttl_seconds: Option<i64>,
@@ -5645,6 +5645,8 @@ async fn cmd_remote_approval_grant(
     };
     use agentbox_daemon::runtime::types::{ApprovalGrant, ApprovalScope};
 
+    let (endpoint, worker_session_id) =
+        resolve_remote_session_metadata(&session_id, endpoint, worker_session_id);
     let transport = HttpRemoteAgentPodTransport::new(endpoint).unwrap_or_else(|e| {
         eprintln!(
             "error: failed to build remote AgentPod approval grant transport: {}",

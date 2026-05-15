@@ -175,12 +175,15 @@ Pending command approvals can be resolved explicitly with a command-scope grant:
 
 ```sh
 agentbox remote-approval-grant \
-  --endpoint https://worker.example.com/agentpod \
   --session agentbox-session-id \
-  --worker-session worker-session-id \
   --request approval-request-id \
   --ttl-seconds 300
 ```
+
+Like `remote-evidence-status`, this derives the worker endpoint and worker-side
+session id from local runtime session metadata when the session was created by
+the remote provider. Operators can pass `--endpoint` and `--worker-session`
+manually when granting against an external worker session.
 
 The CLI first reads the worker evidence status, finds the pending request, and
 derives a command-scope grant from the blocked argv. The worker accepts the
