@@ -7281,6 +7281,30 @@ mod tests {
     }
 
     #[test]
+    fn macos_native_doctor_checks_keep_execution_unavailable() {
+        let checks = macos_native_doctor_checks();
+
+        assert_eq!(checks[0].name, "macOS native plan");
+        assert!(checks[0].ok);
+        assert!(checks[0]
+            .detail
+            .contains("provider execution remains unavailable"));
+        assert!(checks
+            .iter()
+            .any(|check| check.name == "Apple Virtualization"));
+        assert!(checks
+            .iter()
+            .any(|check| check.name == "Endpoint Security entitlement"));
+        assert!(checks
+            .iter()
+            .any(|check| check.name == "Network Extension entitlement"));
+        assert!(checks
+            .iter()
+            .filter(|check| check.name.contains("entitlement"))
+            .all(|check| !check.release_blocker));
+    }
+
+    #[test]
     fn linux_native_doctor_checks_do_not_claim_live_sandbox() {
         let checks = linux_native_doctor_checks();
 

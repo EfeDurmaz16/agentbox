@@ -93,9 +93,9 @@ doctor report without mutating host state.
 - [ ] `scripts/demo-v0.2.sh` passes.
 - [ ] `scripts/demo-autonomous-agent.sh` passes.
 - [x] macOS native plan compiler output is tested without claiming execution.
-- [ ] `agentbox doctor` reports macOS native plan, Apple Virtualization, and
+- [x] `agentbox doctor` reports macOS native plan, Apple Virtualization, and
       future ES/NE entitlement readiness honestly.
-- [ ] Native AgentPod providers remain unavailable until live enforcement lands,
+- [x] Native AgentPod providers remain unavailable until live enforcement lands,
       except explicitly gated Linux prototype runs.
 - [ ] Podman compatibility is marked experimental or unavailable honestly.
 - [ ] Podman live smoke is run only on hosts where Podman is installed.
