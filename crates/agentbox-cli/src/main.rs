@@ -453,17 +453,17 @@ enum Commands {
     },
     /// Query a remote AgentPod worker for accepted evidence state
     RemoteEvidenceStatus {
-        /// Remote worker endpoint, e.g. https://worker.example.com/agentpod
+        /// Remote worker endpoint, e.g. https://worker.example.com/agentpod; omitted values are read from the local session when possible
         #[arg(long)]
-        endpoint: String,
+        endpoint: Option<String>,
 
         /// Agentbox session id
         #[arg(long = "session")]
         session_id: String,
 
-        /// Worker-side session id
+        /// Worker-side session id; omitted values are read from the local session when possible
         #[arg(long = "worker-session")]
-        worker_session_id: String,
+        worker_session_id: Option<String>,
     },
     /// Upload a verified evidence bundle directory to a remote AgentPod worker
     RemoteEvidenceUpload {
@@ -5325,14 +5325,16 @@ fn cmd_remote_evidence(
 }
 
 async fn cmd_remote_evidence_status(
-    endpoint: String,
+    endpoint: Option<String>,
     session_id: String,
-    worker_session_id: String,
+    worker_session_id: Option<String>,
 ) {
     use agentbox_daemon::runtime::providers::remote::{
         HttpRemoteAgentPodTransport, RemoteAgentPodEvidenceStatusRequest, RemoteAgentPodTransport,
     };
 
+    let (endpoint, worker_session_id) =
+        resolve_remote_session_metadata(&session_id, endpoint, worker_session_id);
     let transport = HttpRemoteAgentPodTransport::new(endpoint).unwrap_or_else(|e| {
         eprintln!(
             "error: failed to build remote AgentPod evidence status transport: {}",
@@ -5367,6 +5369,85 @@ async fn cmd_remote_evidence_status(
         serde_json::to_string_pretty(&response)
             .expect("failed to serialize remote AgentPod evidence status")
     );
+}
+
+fn resolve_remote_session_metadata(
+    session_id: &str,
+    endpoint: Option<String>,
+    worker_session_id: Option<String>,
+) -> (String, String) {
+    if let (Some(endpoint), Some(worker_session_id)) =
+        (endpoint.as_ref(), worker_session_id.as_ref())
+    {
+        return (endpoint.clone(), worker_session_id.clone());
+    }
+
+    let session = load_persisted_session_for_remote_metadata(session_id);
+    remote_session_metadata_from_session(&session, endpoint, worker_session_id).unwrap_or_else(
+        |e| {
+            eprintln!("{e}");
+            std::process::exit(1);
+        },
+    )
+}
+
+fn load_persisted_session_for_remote_metadata(
+    session_id: &str,
+) -> agentbox_daemon::runtime::types::RuntimeSession {
+    use agentbox_daemon::config;
+    use agentbox_daemon::runtime::session::RuntimeSessionStore;
+
+    let config = config::load().unwrap_or_else(|e| {
+        eprintln!("error: failed to load Agentbox config: {}", e);
+        std::process::exit(1);
+    });
+    let store = RuntimeSessionStore::new(config.session_store_path);
+    store
+        .get(session_id)
+        .unwrap_or_else(|e| {
+            eprintln!("error: failed to read runtime session store: {}", e);
+            std::process::exit(1);
+        })
+        .unwrap_or_else(|| {
+            eprintln!("error: remote AgentPod session not found: {session_id}");
+            std::process::exit(1);
+        })
+}
+
+fn remote_session_metadata_from_session(
+    session: &agentbox_daemon::runtime::types::RuntimeSession,
+    endpoint: Option<String>,
+    worker_session_id: Option<String>,
+) -> Result<(String, String), String> {
+    let endpoint = match endpoint {
+        Some(endpoint) => endpoint,
+        None => session
+            .spec
+            .labels
+            .get("agentbox.remote.endpoint")
+            .cloned()
+            .ok_or_else(|| {
+                format!(
+                    "error: session {} does not contain remote endpoint metadata; pass --endpoint",
+                    session.id
+                )
+            })?,
+    };
+    let worker_session_id = match worker_session_id {
+        Some(worker_session_id) => worker_session_id,
+        None => session
+            .spec
+            .labels
+            .get("agentbox.remote.worker_session")
+            .cloned()
+            .ok_or_else(|| {
+                format!(
+                    "error: session {} does not contain remote worker session metadata; pass --worker-session",
+                    session.id
+                )
+            })?,
+    };
+    Ok((endpoint, worker_session_id))
 }
 
 async fn cmd_remote_evidence_upload(
@@ -6891,6 +6972,50 @@ mod tests {
             filtered[0].status,
             agentbox_daemon::runtime::types::RuntimeStatus::Stopped
         ));
+    }
+
+    #[test]
+    fn remote_evidence_status_metadata_can_use_persisted_session_labels() {
+        let mut session = RuntimeSession::new(
+            "remote".into(),
+            "remote-agentpod".into(),
+            "remote".into(),
+            MinipodSpec::for_agent_task("hermes", "/tmp/agentbox-remote"),
+        );
+        session.spec.labels.insert(
+            "agentbox.remote.endpoint".into(),
+            "https://worker.example.com/agentpod".into(),
+        );
+        session.spec.labels.insert(
+            "agentbox.remote.worker_session".into(),
+            "worker-session-1".into(),
+        );
+
+        let (endpoint, worker_session_id) =
+            remote_session_metadata_from_session(&session, None, None).unwrap();
+
+        assert_eq!(endpoint, "https://worker.example.com/agentpod");
+        assert_eq!(worker_session_id, "worker-session-1");
+    }
+
+    #[test]
+    fn remote_evidence_status_metadata_allows_explicit_overrides() {
+        let session = RuntimeSession::new(
+            "remote".into(),
+            "remote-agentpod".into(),
+            "remote".into(),
+            MinipodSpec::for_agent_task("hermes", "/tmp/agentbox-remote"),
+        );
+
+        let (endpoint, worker_session_id) = remote_session_metadata_from_session(
+            &session,
+            Some("https://override.example.com/agentpod".into()),
+            Some("override-worker".into()),
+        )
+        .unwrap();
+
+        assert_eq!(endpoint, "https://override.example.com/agentpod");
+        assert_eq!(worker_session_id, "override-worker");
     }
 
     #[test]

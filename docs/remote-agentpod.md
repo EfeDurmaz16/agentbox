@@ -136,13 +136,23 @@ After a worker accepts evidence, the CLI can query its evidence status route:
 
 ```sh
 agentbox remote-evidence-status \
+  --session agentbox-session-id
+```
+
+For sessions created through `agentbox run --provider remote-agentpod`, the CLI
+derives the worker endpoint and worker-side session id from the local runtime
+session metadata. Operators can still override both values explicitly:
+
+```sh
+agentbox remote-evidence-status \
   --endpoint https://worker.example.com/agentpod \
   --session agentbox-session-id \
   --worker-session worker-session-id
 ```
 
 The command prints the validated worker response, including session status,
-evidence metadata receipts, and stored bundle payload references.
+evidence metadata receipts, pending approvals, stream state, and stored bundle
+payload references.
 
 For append-only stream evidence, the CLI can upload a UTF-8 file as ordered
 chunks:
