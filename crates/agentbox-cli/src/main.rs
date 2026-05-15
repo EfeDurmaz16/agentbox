@@ -1995,6 +1995,9 @@ fn setup_command_for_check(check_name: &str) -> Option<&'static str> {
         }
         "macOS native plan" => Some("agentbox native-plan --provider agentpod-macos -- <cmd>"),
         "Linux native plan" => Some("agentbox native-plan --provider agentpod-linux -- <cmd>"),
+        "Linux cgroups v2" => {
+            Some("export AGENTBOX_LINUX_CGROUP_ROOT=/sys/fs/cgroup # or a delegated writable cgroup v2 root")
+        }
         "Windows native plan" => Some("agentbox native-plan --provider agentpod-windows -- <cmd>"),
         _ => None,
     }
@@ -8467,6 +8470,27 @@ mod tests {
         assert_eq!(podman.provider.as_deref(), Some("podman"));
         assert_eq!(podman.required_failed, 1);
         assert_eq!(podman.steps[0].check, "podman provider");
+    }
+
+    #[test]
+    fn setup_plan_exposes_linux_cgroup_root_hint() {
+        let report = doctor_report(vec![doctor_advisory_check(
+            "Linux cgroups v2",
+            false,
+            "root missing".into(),
+            "delegate cgroup root",
+        )]);
+
+        let plan = setup_plan_from_doctor(&report, Some("agentpod-linux"));
+
+        assert_eq!(plan.provider.as_deref(), Some("agentpod-linux"));
+        assert_eq!(plan.advisory_failed, 1);
+        assert_eq!(plan.steps[0].check, "Linux cgroups v2");
+        assert!(plan.steps[0]
+            .command
+            .as_deref()
+            .unwrap()
+            .contains("AGENTBOX_LINUX_CGROUP_ROOT"));
     }
 
     #[test]
