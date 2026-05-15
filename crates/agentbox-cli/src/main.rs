@@ -453,6 +453,16 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
+    /// Inspect provider host-bridge capability health without starting a session
+    BridgeHealth {
+        /// Emit JSON
+        #[arg(long)]
+        json: bool,
+
+        /// Limit health output to one provider
+        #[arg(long)]
+        provider: Option<String>,
+    },
     /// Generate a secret-free remote AgentPod transport descriptor
     RemoteDescriptor {
         /// Remote worker endpoint, e.g. https://worker.example.com/agentpod or ssh://agentpod@host
@@ -5486,7 +5496,7 @@ fn apply_credential_ttl(
     }
 }
 
-fn cmd_providers(json: bool) {
+fn provider_status_rows() -> Vec<serde_json::Value> {
     use agentbox_daemon::runtime::registry::RuntimeProviderRegistry;
 
     let mut rows = vec![serde_json::json!({
@@ -5632,6 +5642,12 @@ fn cmd_providers(json: bool) {
         "verification_command": "agentbox run --provider podman -- <cmd>",
     }));
 
+    rows
+}
+
+fn cmd_providers(json: bool) {
+    let rows = provider_status_rows();
+
     if json {
         println!(
             "{}",
@@ -5645,44 +5661,175 @@ fn cmd_providers(json: bool) {
         "PROVIDER", "FAMILY", "PLATFORM", "STATUS", "BRIDGE", "NETWORK"
     );
     println!("{}", "-".repeat(152));
-    println!(
-        "{:<18} {:<14} {:<10} {:<18} {:<18} {:<24} shim, policy, approval, audit",
-        "direct-host",
-        "direct-host",
-        std::env::consts::OS,
-        "shipped",
-        "unix-socket",
-        "command-mediation"
-    );
-    for name in registry.names() {
-        let provider = registry
-            .get(name)
-            .expect("provider name came from registry");
-        if provider.name() == "podman" {
-            continue;
-        }
-        let capabilities = provider
-            .capabilities()
-            .iter()
-            .map(|capability| format!("{capability:?}"))
-            .collect::<Vec<_>>()
-            .join(", ");
+    for row in rows {
+        let capabilities = row["capabilities"]
+            .as_array()
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            })
+            .unwrap_or_default();
         println!(
             "{:<18} {:<14} {:<10} {:<18} {:<18} {:<24} {}",
-            provider.name(),
-            format_provider_family(provider.family()),
-            provider.platform(),
-            format_provider_status(provider.implementation_status()),
-            format_bridge_transports(provider.bridge_transport_kinds()),
-            format_network_enforcement(provider.network_enforcement_capabilities()),
+            row["provider"].as_str().unwrap_or_default(),
+            row["family"].as_str().unwrap_or_default(),
+            row["platform"].as_str().unwrap_or_default(),
+            row["status"].as_str().unwrap_or_default(),
+            row["bridge"].as_str().unwrap_or_default(),
+            row["network"].as_str().unwrap_or_default(),
             capabilities
         );
     }
+}
+
+fn cmd_bridge_health(json: bool, provider_filter: Option<String>) {
+    let mut rows = provider_status_rows()
+        .into_iter()
+        .filter_map(|row| {
+            let provider = row.get("provider")?.as_str()?.to_string();
+            let health = row.get("bridge_health")?.clone();
+            if provider_filter
+                .as_deref()
+                .is_some_and(|filter| filter != provider)
+            {
+                return None;
+            }
+            Some(serde_json::json!({
+                "provider": provider,
+                "family": row.get("family").cloned().unwrap_or(serde_json::Value::Null),
+                "platform": row.get("platform").cloned().unwrap_or(serde_json::Value::Null),
+                "status": row.get("status").cloned().unwrap_or(serde_json::Value::Null),
+                "doctor_check": row.get("doctor_check").cloned().unwrap_or(serde_json::Value::Null),
+                "verification_command": row.get("verification_command").cloned().unwrap_or(serde_json::Value::Null),
+                "readiness": bridge_readiness(&row),
+                "bridge_health": health,
+            }))
+        })
+        .collect::<Vec<_>>();
+
+    if let Some(provider) = provider_filter.as_deref() {
+        if rows.is_empty() {
+            eprintln!("error: unknown provider `{provider}`");
+            eprintln!(
+                "hint: expected direct-host, podman, agentpod-macos, agentpod-linux, agentpod-windows, or remote-agentpod"
+            );
+            std::process::exit(1);
+        }
+    }
+
+    rows.sort_by(|left, right| {
+        left["provider"]
+            .as_str()
+            .unwrap_or_default()
+            .cmp(right["provider"].as_str().unwrap_or_default())
+    });
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&rows).expect("failed to serialize bridge health")
+        );
+        return;
+    }
 
     println!(
-        "{:<18} {:<14} {:<10} {:<18} {:<18} {:<24} container isolation, shim bridge",
-        "podman", "compat", "linux-vm", podman_status, "unix-socket", "none"
+        "{:<18} {:<14} {:<12} {:<9} {:<9} {:<9} {:<9} {:<9}",
+        "PROVIDER", "STATUS", "TRANSPORT", "POLICY", "APPROVAL", "CREDS", "EVIDENCE", "NETWORK"
     );
+    println!("{}", "-".repeat(98));
+    for row in rows {
+        let health = &row["bridge_health"];
+        println!(
+            "{:<18} {:<14} {:<12} {:<9} {:<9} {:<9} {:<9} {:<9}",
+            row["provider"].as_str().unwrap_or_default(),
+            row["status"].as_str().unwrap_or_default(),
+            health["transports"]
+                .as_array()
+                .and_then(|values| values.first())
+                .and_then(|value| value.as_str())
+                .unwrap_or("none"),
+            bridge_health_cell(&health["policy"]),
+            bridge_health_cell(&health["approval"]),
+            bridge_health_cell(&health["credentials"]),
+            bridge_health_cell(&health["evidence"]),
+            bridge_health_cell(&health["network"]),
+        );
+    }
+}
+
+fn bridge_health_cell(value: &serde_json::Value) -> &'static str {
+    match (
+        value.get("supported").and_then(serde_json::Value::as_bool),
+        value.get("active").and_then(serde_json::Value::as_bool),
+    ) {
+        (Some(true), Some(true)) => "active",
+        (Some(true), _) => "supported",
+        _ => "none",
+    }
+}
+
+fn bridge_readiness(row: &serde_json::Value) -> serde_json::Value {
+    let provider = row["provider"].as_str().unwrap_or_default();
+    let status = row["status"].as_str().unwrap_or_default();
+    let verification = row
+        .get("verification_command")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("agentbox providers --json");
+
+    let (verdict, execution_scope, claim_boundary, next_command) = match provider {
+        "direct-host" => (
+            "active-command-mediation",
+            "host process command mediation",
+            "PATH/shim and daemon-mediated commands only; not a full sandbox",
+            "agentbox doctor",
+        ),
+        "podman" if status == "experimental" => (
+            "active-if-podman-available",
+            "compatibility container provider",
+            "Podman compatibility backend, not the AgentPod-native runtime",
+            verification,
+        ),
+        "podman" => (
+            "needs-podman",
+            "compatibility container provider",
+            "Podman is not installed or unavailable on this host",
+            "install Podman; on macOS run `podman machine init && podman machine start`",
+        ),
+        "agentpod-linux" => (
+            "prototype-gated",
+            "Linux native primitive prototype",
+            "requires Linux and AGENTBOX_LINUX_NATIVE=1; not a complete sandbox claim",
+            verification,
+        ),
+        "remote-agentpod" => (
+            "endpoint-gated",
+            "remote/disposable AgentPod worker bridge",
+            "requires configured worker endpoint; worker-side sandboxing remains explicit",
+            "agentbox setup --provider remote-agentpod --dry-run --wizard",
+        ),
+        "agentpod-macos" | "agentpod-windows" => (
+            "metadata-only",
+            "native provider descriptor",
+            "execution is not wired in this build",
+            verification,
+        ),
+        _ => (
+            "metadata-only",
+            "unknown provider surface",
+            "no live execution claim",
+            verification,
+        ),
+    };
+
+    serde_json::json!({
+        "verdict": verdict,
+        "execution_scope": execution_scope,
+        "claim_boundary": claim_boundary,
+        "next_command": next_command,
+    })
 }
 
 fn provider_doctor_check(provider: &str) -> Option<&'static str> {
@@ -7237,6 +7384,7 @@ async fn main() {
             workspace_overlay_dir,
         }),
         Commands::Providers { json } => cmd_providers(json),
+        Commands::BridgeHealth { json, provider } => cmd_bridge_health(json, provider),
         Commands::RemoteDescriptor {
             endpoint,
             auth,
@@ -7526,6 +7674,46 @@ mod tests {
         .unwrap_err();
 
         assert!(err.contains("native plan command cannot be empty"));
+    }
+
+    #[test]
+    fn bridge_health_rows_expose_provider_capability_contract() {
+        let rows = provider_status_rows();
+
+        assert!(rows.iter().all(|row| row.get("bridge_health").is_some()));
+        let remote = rows
+            .iter()
+            .find(|row| row["provider"] == "remote-agentpod")
+            .expect("remote provider should be listed");
+        assert_eq!(
+            remote["bridge_health"]["transports"][0],
+            serde_json::json!("RemoteTunnel")
+        );
+        assert_eq!(
+            remote["bridge_health"]["approval"]["supported"],
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            bridge_readiness(remote)["verdict"],
+            serde_json::json!("endpoint-gated")
+        );
+
+        let direct = rows
+            .iter()
+            .find(|row| row["provider"] == "direct-host")
+            .expect("direct host provider should be listed");
+        assert_eq!(
+            bridge_health_cell(&direct["bridge_health"]["policy"]),
+            "active"
+        );
+
+        assert_eq!(
+            bridge_health_cell(&serde_json::json!({
+                "supported": true,
+                "active": false
+            })),
+            "supported"
+        );
     }
 
     #[test]
