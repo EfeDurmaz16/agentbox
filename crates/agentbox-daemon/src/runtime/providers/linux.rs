@@ -1092,6 +1092,27 @@ pub struct LinuxAgentPodRunnerPhase {
     pub claim: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LinuxAgentPodRunnerRequest {
+    pub mount_namespace: LinuxMountNamespacePlan,
+    pub seccomp: LinuxSeccompPlan,
+    pub landlock: LinuxLandlockPlan,
+    pub command_argv: Vec<String>,
+    pub working_dir: Option<String>,
+}
+
+impl LinuxAgentPodRunnerRequest {
+    pub fn from_execution_plan(plan: &LinuxAgentPodExecutionPlan, command: &ExecCommand) -> Self {
+        Self {
+            mount_namespace: plan.mount_namespace.clone(),
+            seccomp: plan.seccomp.clone(),
+            landlock: plan.landlock.clone(),
+            command_argv: command.argv.clone(),
+            working_dir: command.working_dir.clone(),
+        }
+    }
+}
+
 impl LinuxAgentPodExecutionPlan {
     pub fn from_minipod_spec(
         spec: &MinipodSpec,
@@ -2588,6 +2609,21 @@ mod tests {
             linux_agentpod_host_working_dir(&plan, &command).unwrap(),
             PathBuf::from("/var/tmp")
         );
+    }
+
+    #[test]
+    fn agentpod_runner_request_is_derived_from_execution_plan() {
+        let spec = MinipodSpec::for_agent_task("hermes", "/tmp/agentbox-work");
+        let command = command(&["/bin/true"]);
+        let plan = LinuxAgentPodExecutionPlan::from_minipod_spec(&spec, &command).unwrap();
+
+        let request = LinuxAgentPodRunnerRequest::from_execution_plan(&plan, &command);
+
+        assert_eq!(request.command_argv, vec!["/bin/true"]);
+        assert_eq!(request.working_dir, Some("/workspace".into()));
+        assert_eq!(request.mount_namespace, plan.mount_namespace);
+        assert_eq!(request.seccomp, plan.seccomp);
+        assert_eq!(request.landlock, plan.landlock);
     }
 
     #[test]

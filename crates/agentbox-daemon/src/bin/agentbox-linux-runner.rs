@@ -1,19 +1,8 @@
 use agentbox_daemon::runtime::providers::linux::{
-    LinuxLandlockPlan, LinuxLandlockRuleset, LinuxMountNamespacePlan, LinuxSeccompPlan,
+    LinuxAgentPodRunnerRequest, LinuxLandlockRuleset, LinuxMountNamespacePlan,
     LinuxSeccompProfileLoader,
 };
-use serde::Deserialize;
 use std::path::{Path, PathBuf};
-
-#[derive(Debug, Deserialize)]
-struct LinuxRunnerRequest {
-    mount_namespace: LinuxMountNamespacePlan,
-    seccomp: LinuxSeccompPlan,
-    landlock: LinuxLandlockPlan,
-    command_argv: Vec<String>,
-    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-    working_dir: Option<String>,
-}
 
 fn main() {
     if let Err(err) = run() {
@@ -52,13 +41,13 @@ fn print_usage() {
 
 fn read_request(
     path: &Path,
-) -> Result<LinuxRunnerRequest, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<LinuxAgentPodRunnerRequest, Box<dyn std::error::Error + Send + Sync>> {
     let file = std::fs::File::open(path)?;
     Ok(serde_json::from_reader(file)?)
 }
 
 fn validate_request(
-    request: &LinuxRunnerRequest,
+    request: &LinuxAgentPodRunnerRequest,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     if request.command_argv.is_empty() {
         return Err("runner command argv cannot be empty".into());
@@ -155,7 +144,7 @@ fn bind_mount(
 
 #[cfg(target_os = "linux")]
 fn exec_request(
-    request: LinuxRunnerRequest,
+    request: LinuxAgentPodRunnerRequest,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     use std::os::unix::process::CommandExt;
 
@@ -170,7 +159,7 @@ fn exec_request(
 
 #[cfg(not(target_os = "linux"))]
 fn exec_request(
-    _request: LinuxRunnerRequest,
+    _request: LinuxAgentPodRunnerRequest,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     Err("agentbox-linux-runner exec is only available on Linux".into())
 }
