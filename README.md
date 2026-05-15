@@ -329,6 +329,7 @@ agentbox history         # Rich timeline view with stats
 agentbox why             # Explain the last block/deny
 agentbox policy          # Show current policy posture
 agentbox doctor          # Local readiness check for daemon, shims, audit, and providers
+agentbox setup-plan      # Show the next local setup actions without changing host state
 agentbox evidence        # Export audit/evidence JSONL
 agentbox minipod-spec    # Generate and validate a governed minipod manifest
 agentbox minipod-spec --policy-bundle ./task-policy.json

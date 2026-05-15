@@ -49,6 +49,10 @@ local required doctor checks are expected to fail on a candidate host, set
 as an explicit release blocker rather than a pass. Optional platform/live smoke
 scripts run only with `AGENTBOX_RELEASE_LIVE_SMOKE=1`.
 
+For interactive setup debugging, run `agentbox setup-plan` or
+`agentbox setup-plan --json`. It derives the next operator action from the same
+doctor report without mutating host state.
+
 ## Install And CLI
 
 - [ ] `cargo build --release` succeeds.

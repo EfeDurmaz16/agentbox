@@ -24,7 +24,7 @@ path, expression = sys.argv[1], sys.argv[2]
 with open(path, "r", encoding="utf-8") as fh:
     data = json.load(fh)
 
-if not eval(expression, {"__builtins__": {}}, {"data": data, "any": any, "len": len}):
+if not eval(expression, {"__builtins__": {}}, {"data": data, "all": all, "any": any, "len": len}):
     raise SystemExit(f"JSON contract failed for {path}: {expression}")
 PY
 }
@@ -44,6 +44,11 @@ validate_json "$TMPDIR/doctor.json" \
 if [ "$doctor_status" -ne 0 ]; then
   validate_json "$TMPDIR/doctor.json" "data.get('required_failed', 0) > 0"
 fi
+
+log "checking setup plan JSON truth"
+"${CLI[@]}" setup-plan --json >"$TMPDIR/setup-plan.json"
+validate_json "$TMPDIR/setup-plan.json" \
+  "data.get('schema_version') == 1 and data.get('required_failed', 0) + data.get('advisory_failed', 0) == data.get('failed', 0) and data.get('steps') is not None and all(step.get('severity') in ['required', 'advisory'] for step in data.get('steps', []))"
 
 log "checking AgentPod run plan JSON"
 "${CLI[@]}" run --plan --json -- echo agentbox-contract >"$TMPDIR/run-plan.json"

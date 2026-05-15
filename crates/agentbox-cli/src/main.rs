@@ -47,6 +47,12 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
+    /// Print the next local setup actions without changing the host
+    SetupPlan {
+        /// Emit JSON
+        #[arg(long)]
+        json: bool,
+    },
     /// Query audit log
     Audit {
         /// Number of events to show
@@ -916,6 +922,50 @@ fn cmd_doctor(json: bool) {
     }
 }
 
+fn cmd_setup_plan(json: bool) {
+    let report = build_doctor_report();
+    let plan = setup_plan_from_doctor(&report);
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&plan).expect("failed to serialize setup plan")
+        );
+        return;
+    }
+
+    println!("Agentbox setup plan");
+    println!("{}", "-".repeat(64));
+    println!(
+        "readiness: {} ok, {} required failed, {} advisory failed",
+        plan.ok, plan.required_failed, plan.advisory_failed
+    );
+    if let Some(command) = &plan.next_command {
+        println!("next:      {command}");
+    } else {
+        println!("next:      no required setup action");
+    }
+    println!("{}", "-".repeat(64));
+
+    if plan.steps.is_empty() {
+        println!("All required setup checks passed.");
+        if plan.advisory_failed > 0 {
+            println!("Advisory provider prerequisites are still listed in `agentbox doctor`.");
+        }
+        return;
+    }
+
+    for (index, step) in plan.steps.iter().enumerate() {
+        println!("{}. [{}] {}", index + 1, step.severity, step.title);
+        println!("   check:  {}", step.check);
+        println!("   detail: {}", step.detail);
+        println!("   action: {}", step.action);
+        if let Some(command) = &step.command {
+            println!("   run:    {command}");
+        }
+    }
+}
+
 fn build_doctor_report() -> DoctorReport {
     let mut checks = Vec::new();
 
@@ -1097,6 +1147,114 @@ fn doctor_advisory_check(
         release_blocker: false,
         detail,
         fix,
+    }
+}
+
+#[derive(Serialize)]
+struct SetupPlan {
+    schema_version: i64,
+    platform: String,
+    ok: usize,
+    failed: usize,
+    required_failed: usize,
+    advisory_failed: usize,
+    ready_for_required_setup: bool,
+    next_command: Option<String>,
+    steps: Vec<SetupPlanStep>,
+}
+
+#[derive(Serialize)]
+struct SetupPlanStep {
+    check: String,
+    title: String,
+    severity: String,
+    required: bool,
+    release_blocker: bool,
+    detail: String,
+    action: String,
+    command: Option<String>,
+}
+
+fn setup_plan_from_doctor(report: &DoctorReport) -> SetupPlan {
+    let mut steps = report
+        .checks
+        .iter()
+        .filter(|check| !check.ok)
+        .map(setup_plan_step_from_check)
+        .collect::<Vec<_>>();
+    steps.sort_by_key(|step| (!step.required, step.check.clone()));
+    let next_command = steps
+        .iter()
+        .find(|step| step.required)
+        .and_then(|step| step.command.clone());
+
+    SetupPlan {
+        schema_version: 1,
+        platform: report.platform.clone(),
+        ok: report.ok,
+        failed: report.failed,
+        required_failed: report.required_failed,
+        advisory_failed: report.advisory_failed,
+        ready_for_required_setup: report.required_failed == 0,
+        next_command,
+        steps,
+    }
+}
+
+fn setup_plan_step_from_check(check: &DoctorCheck) -> SetupPlanStep {
+    SetupPlanStep {
+        check: check.name.to_string(),
+        title: setup_step_title(check.name).to_string(),
+        severity: check.severity.to_string(),
+        required: check.required,
+        release_blocker: check.release_blocker,
+        detail: check.detail.clone(),
+        action: check.fix.to_string(),
+        command: setup_command_for_check(check.name).map(str::to_string),
+    }
+}
+
+fn setup_step_title(check_name: &str) -> &'static str {
+    match check_name {
+        "agentbox directory" | "config file" => "Initialize Agentbox local state",
+        "daemon process" | "daemon socket" => "Start the Agentbox daemon",
+        "agentbox-daemon binary" | "agentbox-shim binary" => "Build Agentbox binaries",
+        "installed shims" => "Install command shims",
+        "shim PATH priority" => "Put Agentbox shims first in PATH",
+        "audit database" => "Create audit state",
+        "podman provider" => "Install the compatibility provider",
+        "podman machine" => "Start the Podman machine",
+        "macOS native plan" | "Linux native plan" | "Windows native plan" => {
+            "Inspect native AgentPod plan"
+        }
+        "Apple Virtualization" => "Enable VM-backed macOS planning prerequisites",
+        "Endpoint Security entitlement" => "Prepare macOS Endpoint Security signing",
+        "Network Extension entitlement" => "Prepare macOS Network Extension signing",
+        "Linux user namespace" => "Enable Linux user namespaces",
+        "Linux cgroups v2" => "Enable Linux cgroups v2",
+        "Linux seccomp" => "Enable Linux seccomp",
+        "Linux Landlock ABI" => "Enable Linux Landlock",
+        "Windows Job Objects" => "Wire Windows Job Object containment",
+        "Windows AppContainer" => "Model Windows AppContainer authority",
+        "Windows WFP" => "Model Windows network filtering",
+        "Windows ETW" => "Model Windows event evidence",
+        "Windows VM boundary" => "Plan Windows VM-backed AgentPods",
+        _ => "Resolve readiness check",
+    }
+}
+
+fn setup_command_for_check(check_name: &str) -> Option<&'static str> {
+    match check_name {
+        "agentbox directory" | "config file" | "daemon process" | "daemon socket"
+        | "audit database" => Some("agentbox start"),
+        "agentbox-daemon binary" | "agentbox-shim binary" => Some("cargo build --release"),
+        "installed shims" => Some("agentbox install"),
+        "shim PATH priority" => Some("export PATH=\"$HOME/.agentbox/shims:$PATH\""),
+        "podman machine" => Some("podman machine init && podman machine start"),
+        "macOS native plan" => Some("agentbox native-plan --provider agentpod-macos -- <cmd>"),
+        "Linux native plan" => Some("agentbox native-plan --provider agentpod-linux -- <cmd>"),
+        "Windows native plan" => Some("agentbox native-plan --provider agentpod-windows -- <cmd>"),
+        _ => None,
     }
 }
 
@@ -5666,6 +5824,7 @@ async fn main() {
         Commands::Stop => cmd_stop(),
         Commands::Status => cmd_status(),
         Commands::Doctor { json } => cmd_doctor(json),
+        Commands::SetupPlan { json } => cmd_setup_plan(json),
         Commands::Audit {
             limit,
             bucket,
@@ -6026,6 +6185,48 @@ mod tests {
         assert_eq!(payload["checks"][1]["fix"], "install it");
         assert_eq!(payload["checks"][2]["severity"], "advisory");
         assert_eq!(payload["checks"][2]["release_blocker"], false);
+    }
+
+    #[test]
+    fn setup_plan_prioritizes_required_next_command() {
+        let report = doctor_report(vec![
+            doctor_advisory_check(
+                "Endpoint Security entitlement",
+                false,
+                "missing".into(),
+                "sign extension",
+            ),
+            doctor_check(
+                "agentbox-shim binary",
+                false,
+                "not found".into(),
+                "run `cargo build --release` or put agentbox-shim on PATH",
+            ),
+            doctor_check(
+                "installed shims",
+                false,
+                "0 shims".into(),
+                "run `agentbox install`",
+            ),
+        ]);
+
+        let plan = setup_plan_from_doctor(&report);
+
+        assert_eq!(plan.schema_version, 1);
+        assert_eq!(plan.required_failed, 2);
+        assert_eq!(plan.advisory_failed, 1);
+        assert!(!plan.ready_for_required_setup);
+        assert_eq!(plan.next_command.as_deref(), Some("cargo build --release"));
+        assert_eq!(plan.steps[0].severity, "required");
+        assert_eq!(
+            plan.steps[0].command.as_deref(),
+            Some("cargo build --release")
+        );
+        assert_eq!(plan.steps.last().unwrap().severity, "advisory");
+
+        let payload = serde_json::to_value(&plan).unwrap();
+        assert_eq!(payload["steps"][0]["release_blocker"], true);
+        assert_eq!(payload["steps"][2]["release_blocker"], false);
     }
 
     #[test]
