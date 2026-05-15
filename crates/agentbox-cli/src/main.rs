@@ -1001,6 +1001,12 @@ fn cmd_status() {
 
     let sock = socket_path();
     println!("socket:  {}", sock.display());
+    if let Some(socket_state) = daemon_socket_status_line(sock.exists(), running) {
+        println!("socket state: {}", socket_state);
+        if !running {
+            println!("hint:    run `agentbox clean && agentbox start`");
+        }
+    }
 
     // Read ntfy topic from config if available
     let topic = fs::read_to_string(config_path())
@@ -1042,6 +1048,15 @@ fn cmd_status() {
         }
     } else {
         println!("shims:   (not installed, run `agentbox install`)");
+    }
+}
+
+fn daemon_socket_status_line(socket_exists: bool, daemon_running: bool) -> Option<&'static str> {
+    match (socket_exists, daemon_running) {
+        (true, true) => Some("ready"),
+        (true, false) => Some("stale socket file"),
+        (false, true) => Some("missing while daemon appears to be running"),
+        (false, false) => None,
     }
 }
 
@@ -6941,6 +6956,20 @@ mod tests {
             plan.steps[0].command.as_deref(),
             Some("agentbox clean && agentbox start")
         );
+    }
+
+    #[test]
+    fn daemon_socket_status_line_reports_stale_socket() {
+        assert_eq!(
+            daemon_socket_status_line(true, false),
+            Some("stale socket file")
+        );
+        assert_eq!(daemon_socket_status_line(true, true), Some("ready"));
+        assert_eq!(
+            daemon_socket_status_line(false, true),
+            Some("missing while daemon appears to be running")
+        );
+        assert_eq!(daemon_socket_status_line(false, false), None);
     }
 
     #[test]
