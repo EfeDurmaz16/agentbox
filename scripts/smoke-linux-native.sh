@@ -38,6 +38,7 @@ cargo run -q -p agentbox-cli -- native-plan \
   jq -e '
     .provider == "agentpod-linux"
     and .live_env_var == "AGENTBOX_LINUX_NATIVE"
+    and .landlock.handled_access_mask == 434
     and .security_claim == "prototype namespace/resource execution with cgroup v2 process attach; not a complete sandbox"
   ' >/dev/null
 
@@ -49,5 +50,39 @@ cargo run -q -p agentbox-cli -- native-plan \
     --timeout-seconds "$timeout_seconds" \
     -- $command_string
 )
+
+proof_outside="$(mktemp -d)"
+trap 'rm -rf "$proof_outside"' EXIT
+proof_allowed="$workspace/agentbox-landlock-allowed"
+proof_denied="$proof_outside/agentbox-landlock-denied"
+rm -f "$proof_allowed" "$proof_denied"
+
+set +e
+proof_output="$(
+  cd "$workspace"
+  printf 'y\n' | AGENTBOX_LINUX_NATIVE=1 cargo run -q -p agentbox-cli -- run \
+    --provider agentpod-linux \
+    --workspace-mode direct \
+    --timeout-seconds "$timeout_seconds" \
+    -- /bin/sh -c 'printf ok > "$1"; printf no > "$2"' sh "$proof_allowed" "$proof_denied" 2>&1
+)"
+proof_status=$?
+set -e
+
+if [[ "$proof_status" -eq 0 ]]; then
+  printf '%s\n' "$proof_output" >&2
+  echo "expected Linux Landlock proof command to fail on outside-workspace write" >&2
+  exit 1
+fi
+if [[ "$(cat "$proof_allowed")" != "ok" ]]; then
+  printf '%s\n' "$proof_output" >&2
+  echo "expected Linux Landlock proof command to write inside workspace" >&2
+  exit 1
+fi
+if [[ -e "$proof_denied" ]]; then
+  printf '%s\n' "$proof_output" >&2
+  echo "expected Linux Landlock proof command to deny outside-workspace write" >&2
+  exit 1
+fi
 
 echo "linux native AgentPod smoke passed"

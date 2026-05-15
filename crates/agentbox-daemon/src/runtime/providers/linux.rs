@@ -1173,7 +1173,7 @@ impl LinuxAgentPodPrototypeExecutor {
         let start = std::time::Instant::now();
         let mut process = std::process::Command::new(binary);
         process.args(args);
-        if let Some(working_dir) = &command.working_dir {
+        if let Some(working_dir) = linux_agentpod_host_working_dir(plan, command) {
             process.current_dir(working_dir);
         }
         process
@@ -1228,6 +1228,38 @@ impl LinuxAgentPodPrototypeExecutor {
             "Linux AgentPod prototype execution is only available on Linux".into(),
         ))
     }
+}
+
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn linux_agentpod_host_working_dir(
+    plan: &LinuxAgentPodExecutionPlan,
+    command: &ExecCommand,
+) -> Option<std::path::PathBuf> {
+    let working_dir = command.working_dir.as_ref()?;
+    let guest_workspace = plan
+        .mount_namespace
+        .workspace_guest_path
+        .trim_end_matches('/');
+    if guest_workspace.is_empty() {
+        return Some(std::path::PathBuf::from(working_dir));
+    }
+
+    if working_dir == guest_workspace {
+        return Some(std::path::PathBuf::from(
+            &plan.mount_namespace.workspace_host_path,
+        ));
+    }
+
+    if let Some(relative) = working_dir
+        .strip_prefix(guest_workspace)
+        .and_then(|value| value.strip_prefix('/'))
+    {
+        return Some(
+            std::path::Path::new(&plan.mount_namespace.workspace_host_path).join(relative),
+        );
+    }
+
+    Some(std::path::PathBuf::from(working_dir))
 }
 
 #[cfg(target_os = "linux")]
@@ -2424,6 +2456,30 @@ mod tests {
         assert_eq!(plan.cgroup.cgroup_name, format!("agentbox-{}", spec.id));
         assert!(plan.landlock.default_deny);
         assert!(!plan.seccomp.requires_loader);
+    }
+
+    #[test]
+    fn agentpod_executor_maps_guest_workspace_working_dir_to_host_path() {
+        let spec = MinipodSpec::for_agent_task("hermes", "/tmp/agentbox-work");
+        let mut command = command(&["/bin/true"]);
+        let plan = LinuxAgentPodExecutionPlan::from_minipod_spec(&spec, &command).unwrap();
+
+        assert_eq!(
+            linux_agentpod_host_working_dir(&plan, &command).unwrap(),
+            PathBuf::from("/tmp/agentbox-work")
+        );
+
+        command.working_dir = Some("/workspace/src".into());
+        assert_eq!(
+            linux_agentpod_host_working_dir(&plan, &command).unwrap(),
+            PathBuf::from("/tmp/agentbox-work/src")
+        );
+
+        command.working_dir = Some("/var/tmp".into());
+        assert_eq!(
+            linux_agentpod_host_working_dir(&plan, &command).unwrap(),
+            PathBuf::from("/var/tmp")
+        );
     }
 
     #[test]
