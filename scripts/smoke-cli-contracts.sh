@@ -32,7 +32,7 @@ PY
 log "checking provider truth JSON"
 "${CLI[@]}" providers --json >"$TMPDIR/providers.json"
 validate_json "$TMPDIR/providers.json" \
-  "any(p.get('provider') == 'podman' and p.get('setup_command') and p.get('verification_command') for p in data) and any(p.get('provider') == 'remote-agentpod' and p.get('status') == 'experimental' and p.get('setup_command') for p in data) and any(p.get('provider') == 'agentpod-windows' and 'job-objects' in p.get('boundary_primitives', []) and 'wfp' in p.get('boundary_primitives', []) and 'windows-sandbox' in p.get('boundary_primitives', []) and 'hyper-v' in p.get('boundary_primitives', []) for p in data) and any(p.get('provider') == 'agentpod-linux' and 'user-namespaces' in p.get('boundary_primitives', []) and 'seccomp' in p.get('boundary_primitives', []) and p.get('verification_command') for p in data)"
+  "any(p.get('provider') == 'podman' and p.get('setup_command') and p.get('verification_command') for p in data) and any(p.get('provider') == 'remote-agentpod' and p.get('status') == 'experimental' and p.get('setup_command') and p.get('doctor_check') == 'remote-agentpod endpoint' for p in data) and any(p.get('provider') == 'agentpod-windows' and 'job-objects' in p.get('boundary_primitives', []) and 'wfp' in p.get('boundary_primitives', []) and 'windows-sandbox' in p.get('boundary_primitives', []) and 'hyper-v' in p.get('boundary_primitives', []) for p in data) and any(p.get('provider') == 'agentpod-linux' and 'user-namespaces' in p.get('boundary_primitives', []) and 'seccomp' in p.get('boundary_primitives', []) and p.get('verification_command') for p in data)"
 
 log "checking doctor JSON truth"
 set +e
@@ -40,7 +40,7 @@ set +e
 doctor_status=$?
 set -e
 validate_json "$TMPDIR/doctor.json" \
-  "data.get('schema_version') == 1 and data.get('checks') is not None and data.get('ok', 0) + data.get('failed', 0) == len(data.get('checks', [])) and data.get('required_failed', 0) + data.get('advisory_failed', 0) == data.get('failed', 0) and any(c.get('name') == 'agentbox-shim binary' and c.get('severity') == 'required' and c.get('release_blocker') == (not c.get('ok')) for c in data.get('checks', []))"
+  "data.get('schema_version') == 1 and data.get('checks') is not None and data.get('ok', 0) + data.get('failed', 0) == len(data.get('checks', [])) and data.get('required_failed', 0) + data.get('advisory_failed', 0) == data.get('failed', 0) and any(c.get('name') == 'agentbox-shim binary' and c.get('severity') == 'required' and c.get('release_blocker') == (not c.get('ok')) for c in data.get('checks', [])) and any(c.get('name') == 'remote-agentpod endpoint' and c.get('severity') == 'advisory' for c in data.get('checks', []))"
 if [ "$doctor_status" -ne 0 ]; then
   validate_json "$TMPDIR/doctor.json" "data.get('required_failed', 0) > 0"
 fi

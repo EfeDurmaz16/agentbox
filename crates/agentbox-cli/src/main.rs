@@ -1061,6 +1061,7 @@ fn build_doctor_report() -> DoctorReport {
         podman_version().unwrap_or_else(|| "not found".to_string()),
         "install Podman; on macOS also run `podman machine init && podman machine start`",
     ));
+    checks.extend(remote_agentpod_doctor_checks());
     if cfg!(target_os = "macos") {
         let machine = podman_machine_status();
         checks.push(doctor_check(
@@ -1224,6 +1225,7 @@ fn setup_step_title(check_name: &str) -> &'static str {
         "audit database" => "Create audit state",
         "podman provider" => "Install the compatibility provider",
         "podman machine" => "Start the Podman machine",
+        "remote-agentpod endpoint" => "Configure a remote AgentPod worker",
         "macOS native plan" | "Linux native plan" | "Windows native plan" => {
             "Inspect native AgentPod plan"
         }
@@ -1251,6 +1253,9 @@ fn setup_command_for_check(check_name: &str) -> Option<&'static str> {
         "installed shims" => Some("agentbox install"),
         "shim PATH priority" => Some("export PATH=\"$HOME/.agentbox/shims:$PATH\""),
         "podman machine" => Some("podman machine init && podman machine start"),
+        "remote-agentpod endpoint" => {
+            Some("export AGENTBOX_REMOTE_AGENTPOD_ENDPOINT=https://worker.example.com/agentpod")
+        }
         "macOS native plan" => Some("agentbox native-plan --provider agentpod-macos -- <cmd>"),
         "Linux native plan" => Some("agentbox native-plan --provider agentpod-linux -- <cmd>"),
         "Windows native plan" => Some("agentbox native-plan --provider agentpod-windows -- <cmd>"),
@@ -1300,6 +1305,77 @@ fn podman_version() -> Option<String> {
         return None;
     }
     Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+fn remote_agentpod_doctor_checks() -> Vec<DoctorCheck> {
+    let endpoint = std::env::var("AGENTBOX_REMOTE_AGENTPOD_ENDPOINT").unwrap_or_default();
+    let loopback_allowed = remote_agentpod_loopback_http_allowed();
+    let (ok, detail) = remote_agentpod_endpoint_status(&endpoint, loopback_allowed);
+
+    vec![doctor_advisory_check(
+        "remote-agentpod endpoint",
+        ok,
+        detail,
+        "set AGENTBOX_REMOTE_AGENTPOD_ENDPOINT=https://worker.example.com/agentpod; use AGENTBOX_REMOTE_AGENTPOD_ALLOW_HTTP_LOOPBACK=1 only for local worker smoke tests",
+    )]
+}
+
+fn remote_agentpod_loopback_http_allowed() -> bool {
+    matches!(
+        std::env::var("AGENTBOX_REMOTE_AGENTPOD_ALLOW_HTTP_LOOPBACK")
+            .unwrap_or_default()
+            .to_ascii_lowercase()
+            .as_str(),
+        "1" | "true" | "yes"
+    )
+}
+
+fn remote_agentpod_endpoint_status(endpoint: &str, allow_http_loopback: bool) -> (bool, String) {
+    let endpoint = endpoint.trim();
+    if endpoint.is_empty() {
+        return (
+            false,
+            "AGENTBOX_REMOTE_AGENTPOD_ENDPOINT is not set".to_string(),
+        );
+    }
+    if endpoint.contains('@') && !endpoint.starts_with("ssh://") {
+        return (
+            false,
+            "endpoint must not embed credentials outside ssh://".to_string(),
+        );
+    }
+    if endpoint.starts_with("http://") {
+        if allow_http_loopback && is_remote_loopback_http_endpoint(endpoint) {
+            return (true, format!("{endpoint} (loopback HTTP dev mode)"));
+        }
+        return (
+            false,
+            "http:// is allowed only for loopback workers with AGENTBOX_REMOTE_AGENTPOD_ALLOW_HTTP_LOOPBACK=1".to_string(),
+        );
+    }
+    if endpoint.starts_with("https://") || endpoint.starts_with("ssh://") {
+        return (true, endpoint.to_string());
+    }
+    (false, "endpoint must use https:// or ssh://".to_string())
+}
+
+fn is_remote_loopback_http_endpoint(endpoint: &str) -> bool {
+    let Some(authority) = endpoint.strip_prefix("http://") else {
+        return false;
+    };
+    let host = authority
+        .split('/')
+        .next()
+        .unwrap_or_default()
+        .rsplit_once('@')
+        .map(|(_, host)| host)
+        .unwrap_or(authority);
+    let host = if host.starts_with('[') {
+        host.split(']').next().unwrap_or_default()
+    } else {
+        host.split(':').next().unwrap_or_default()
+    };
+    matches!(host, "localhost" | "127.0.0.1" | "::1" | "[::1]")
 }
 
 struct PodmanMachineDoctor {
@@ -4698,7 +4774,7 @@ fn provider_doctor_check(provider: &str) -> Option<&'static str> {
         "agentpod-macos" => Some("macOS native plan"),
         "agentpod-linux" => Some("Linux native plan"),
         "agentpod-windows" => Some("Windows native plan"),
-        "remote-agentpod" => None,
+        "remote-agentpod" => Some("remote-agentpod endpoint"),
         "podman" => Some("podman provider"),
         _ => None,
     }
@@ -6278,6 +6354,19 @@ mod tests {
         let payload = serde_json::to_value(&plan).unwrap();
         assert_eq!(payload["steps"][0]["release_blocker"], true);
         assert_eq!(payload["steps"][2]["release_blocker"], false);
+    }
+
+    #[test]
+    fn remote_agentpod_endpoint_status_matches_transport_rules() {
+        assert!(!remote_agentpod_endpoint_status("", false).0);
+        assert!(remote_agentpod_endpoint_status("https://worker.example.com/agentpod", false).0);
+        assert!(remote_agentpod_endpoint_status("ssh://agentpod@example.com", false).0);
+        assert!(!remote_agentpod_endpoint_status("http://worker.example.com/agentpod", true).0);
+        assert!(!remote_agentpod_endpoint_status("http://127.0.0.1:63000/agentpod", false).0);
+        assert!(remote_agentpod_endpoint_status("http://127.0.0.1:63000/agentpod", true).0);
+        assert!(
+            !remote_agentpod_endpoint_status("https://token@worker.example.com/agentpod", false).0
+        );
     }
 
     #[test]
