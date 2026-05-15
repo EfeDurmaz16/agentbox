@@ -97,6 +97,23 @@ log "checking AgentPod run plan JSON"
 validate_json "$TMPDIR/run-plan.json" \
   "data.get('schema_version') == 1 and data.get('selected_provider', {}).get('availability_check') == 'not performed by --plan' and data.get('manifest', {}).get('kind') == 'AgentPod' and len(data.get('backend_actions', [])) >= 3"
 
+log "checking workspace review mode manifests"
+"${CLI[@]}" minipod-spec codex \
+  --workspace "$TMPDIR" \
+  --workspace-mode overlay-review >"$TMPDIR/minipod-overlay-review.json"
+validate_json "$TMPDIR/minipod-overlay-review.json" \
+  "data.get('kind') == 'AgentPod' and data.get('workspace_mode') == 'OverlayReview' and data.get('filesystem', {}).get('workspace_write_policy') == 'WritableOverlay' and data.get('filesystem', {}).get('workspace_overlay', {}).get('mode') == 'ReviewRequired' and data.get('filesystem', {}).get('workspace_overlay', {}).get('upper_host_path') and data.get('filesystem', {}).get('workspace_overlay', {}).get('work_host_path')"
+"${CLI[@]}" minipod-spec codex \
+  --workspace "$TMPDIR" \
+  --workspace-mode ephemeral >"$TMPDIR/minipod-ephemeral.json"
+validate_json "$TMPDIR/minipod-ephemeral.json" \
+  "data.get('workspace_mode') == 'Ephemeral' and data.get('filesystem', {}).get('workspace_write_policy') == 'WritableOverlay' and data.get('filesystem', {}).get('workspace_overlay', {}).get('mode') == 'DiscardOnDestroy'"
+"${CLI[@]}" minipod-spec codex \
+  --workspace "$TMPDIR" \
+  --workspace-mode commit-gated >"$TMPDIR/minipod-commit-gated.json"
+validate_json "$TMPDIR/minipod-commit-gated.json" \
+  "data.get('workspace_mode') == 'CommitGated' and data.get('filesystem', {}).get('workspace_write_policy') == 'WritableOverlay' and data.get('filesystem', {}).get('workspace_overlay', {}).get('mode') == 'ReviewRequired'"
+
 log "checking native plan auto provider truth"
 "${CLI[@]}" native-plan \
   --workspace "$TMPDIR" \
@@ -180,6 +197,23 @@ grep -F "omitted values are read from the local session when possible" \
 "${CLI[@]}" remote-workspace-apply --help >"$TMPDIR/remote-workspace-apply-help.txt"
 grep -F "Apply a pulled remote AgentPod workspace export to a local workspace" \
   "$TMPDIR/remote-workspace-apply-help.txt" >/dev/null
+
+log "checking workspace review command surface"
+"${CLI[@]}" review --help >"$TMPDIR/review-help.txt"
+grep -F "Review workspace output for an AgentPod session" \
+  "$TMPDIR/review-help.txt" >/dev/null
+grep -F "Emit only the workspace patch" "$TMPDIR/review-help.txt" >/dev/null
+"${CLI[@]}" review-apply --help >"$TMPDIR/review-apply-help.txt"
+grep -F "Apply projected workspace output to the lower workspace" \
+  "$TMPDIR/review-apply-help.txt" >/dev/null
+"${CLI[@]}" review-discard --help >"$TMPDIR/review-discard-help.txt"
+grep -F "Discard projected workspace output for an AgentPod session" \
+  "$TMPDIR/review-discard-help.txt" >/dev/null
+"${CLI[@]}" review-commit --help >"$TMPDIR/review-commit-help.txt"
+grep -F "Apply projected workspace output and commit it in the lower workspace" \
+  "$TMPDIR/review-commit-help.txt" >/dev/null
+grep -F "Commit message for the lower workspace" \
+  "$TMPDIR/review-commit-help.txt" >/dev/null
 
 log "checking evidence bundle verification"
 BUNDLE_DIR="$TMPDIR/evidence-bundle"

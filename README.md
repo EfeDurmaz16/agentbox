@@ -189,6 +189,13 @@ agentbox minipod-spec hermes --workspace . --allow-domain api.openai.com
 # separate from this manifest contract.
 agentbox minipod-spec hermes --workspace . --workspace-mode overlay-review
 
+# Review projected workspace output after a persisted AgentPod session.
+agentbox review <session-id>
+agentbox review <session-id> --patch
+agentbox review-apply <session-id>
+agentbox review-discard <session-id>
+agentbox review-commit <session-id> --message "agent output"
+
 # Generate a higher-risk manifest that recommends the platform AgentPod provider
 # while staying honest if that provider is descriptor-only.
 agentbox minipod-spec codex --workspace . --risk high --provider auto
@@ -286,7 +293,9 @@ Evidence records can now be mapped into FIDES-style signed action drafts and
 AGIT-style lineage drafts, but both intentionally require external authority or
 adapter code before claiming live integration.
 Runtime sessions can also capture Git workspace diff snapshots as evidence
-references for later AGIT lineage attachment.
+references for later AGIT lineage attachment. Non-direct workspace modes can
+materialize a projected review workspace, export its patch, apply it to the
+lower workspace, discard it, or commit it through explicit operator commands.
 Session evidence bundles include redacted command transcripts so operators can
 inspect what ran without storing raw credential-like output.
 They also include metadata-only replay steps linked to audit hashes; Agentbox
