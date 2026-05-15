@@ -1934,8 +1934,11 @@ fn setup_provider_check_names(provider: &str) -> &'static [&'static str] {
         "agentpod-macos" => &[
             "macOS native plan",
             "Apple Virtualization",
+            "macOS VM runner binary",
             "Endpoint Security entitlement",
+            "macOS system extension",
             "Network Extension entitlement",
+            "macOS network extension",
         ],
         "agentpod-linux" => &[
             "Linux native plan",
@@ -1991,8 +1994,11 @@ fn setup_step_title(check_name: &str) -> &'static str {
             "Inspect native AgentPod plan"
         }
         "Apple Virtualization" => "Enable VM-backed macOS planning prerequisites",
+        "macOS VM runner binary" => "Build the macOS VM runner",
         "Endpoint Security entitlement" => "Prepare macOS Endpoint Security signing",
+        "macOS system extension" => "Install the macOS Endpoint Security extension",
         "Network Extension entitlement" => "Prepare macOS Network Extension signing",
+        "macOS network extension" => "Install the macOS Network Extension",
         "Linux user namespace" => "Enable Linux user namespaces",
         "Linux cgroups v2" => "Enable Linux cgroups v2",
         "Linux seccomp" => "Enable Linux seccomp",
@@ -2227,10 +2233,24 @@ fn macos_native_doctor_checks() -> Vec<DoctorCheck> {
             "use macOS 11+ with Apple Virtualization framework available",
         ),
         doctor_advisory_check(
+            "macOS VM runner binary",
+            which_in_path("agentbox-macos-vm-runner").is_some(),
+            which_in_path("agentbox-macos-vm-runner")
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|| "agentbox-macos-vm-runner not found in PATH".to_string()),
+            "build and sign the future Apple Virtualization VM runner",
+        ),
+        doctor_advisory_check(
             "Endpoint Security entitlement",
             current_executable_has_entitlement("com.apple.developer.endpoint-security.client"),
             current_executable_entitlement_detail("com.apple.developer.endpoint-security.client"),
             "sign the future system extension with the Endpoint Security entitlement",
+        ),
+        doctor_advisory_check(
+            "macOS system extension",
+            false,
+            "signed Endpoint Security system extension lifecycle is not wired".to_string(),
+            "install and approve the future Agentbox Endpoint Security system extension",
         ),
         doctor_advisory_check(
             "Network Extension entitlement",
@@ -2239,6 +2259,12 @@ fn macos_native_doctor_checks() -> Vec<DoctorCheck> {
                 "com.apple.developer.networking.networkextension",
             ),
             "sign the future network extension with the required Network Extension entitlement",
+        ),
+        doctor_advisory_check(
+            "macOS network extension",
+            false,
+            "signed Network Extension lifecycle is not wired".to_string(),
+            "install and approve the future Agentbox Network Extension",
         ),
     ]
 }
@@ -8131,10 +8157,22 @@ mod tests {
             .any(|check| check.name == "Apple Virtualization"));
         assert!(checks
             .iter()
+            .any(|check| check.name == "macOS VM runner binary"
+                && check.detail.contains("agentbox-macos-vm-runner")));
+        assert!(checks
+            .iter()
             .any(|check| check.name == "Endpoint Security entitlement"));
         assert!(checks
             .iter()
+            .any(|check| check.name == "macOS system extension"
+                && check.detail.contains("not wired")));
+        assert!(checks
+            .iter()
             .any(|check| check.name == "Network Extension entitlement"));
+        assert!(checks
+            .iter()
+            .any(|check| check.name == "macOS network extension"
+                && check.detail.contains("not wired")));
         assert!(checks
             .iter()
             .filter(|check| check.name.contains("entitlement"))
