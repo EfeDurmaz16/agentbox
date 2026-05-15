@@ -160,9 +160,7 @@ chunks:
 
 ```sh
 agentbox remote-evidence-stream \
-  --endpoint https://worker.example.com/agentpod \
   --session agentbox-session-id \
-  --worker-session worker-session-id \
   --stream stdout \
   --file ./stdout.txt \
   --chunk-bytes 65536
@@ -171,6 +169,8 @@ agentbox remote-evidence-stream \
 The command splits on UTF-8 character boundaries, sends monotonically ordered
 chunks with byte offsets and per-chunk SHA-256 hashes, marks the final chunk,
 and prints the worker acknowledgements plus the sealed stream SHA-256.
+For remote-provider sessions, endpoint and worker-session metadata are read from
+the local runtime session; manual overrides remain available.
 
 Pending command approvals can be resolved explicitly with a command-scope grant:
 

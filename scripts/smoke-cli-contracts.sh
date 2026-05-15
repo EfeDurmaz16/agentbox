@@ -139,6 +139,11 @@ grep -F "Upload a verified evidence bundle directory to a remote AgentPod worker
   "$TMPDIR/remote-evidence-upload-help.txt" >/dev/null
 grep -F "omitted values are read from the local session when possible" \
   "$TMPDIR/remote-evidence-upload-help.txt" >/dev/null
+"${CLI[@]}" remote-evidence-stream --help >"$TMPDIR/remote-evidence-stream-help.txt"
+grep -F "Upload UTF-8 evidence stream chunks to a remote AgentPod worker" \
+  "$TMPDIR/remote-evidence-stream-help.txt" >/dev/null
+grep -F "omitted values are read from the local session when possible" \
+  "$TMPDIR/remote-evidence-stream-help.txt" >/dev/null
 "${CLI[@]}" remote-workspace-export --help >"$TMPDIR/remote-workspace-export-help.txt"
 grep -F "Export a remote AgentPod worker workspace into a local review directory" \
   "$TMPDIR/remote-workspace-export-help.txt" >/dev/null

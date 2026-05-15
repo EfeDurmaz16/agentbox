@@ -485,17 +485,17 @@ enum Commands {
     },
     /// Upload UTF-8 evidence stream chunks to a remote AgentPod worker
     RemoteEvidenceStream {
-        /// Remote worker endpoint, e.g. https://worker.example.com/agentpod
+        /// Remote worker endpoint, e.g. https://worker.example.com/agentpod; omitted values are read from the local session when possible
         #[arg(long)]
-        endpoint: String,
+        endpoint: Option<String>,
 
         /// Agentbox session id
         #[arg(long = "session")]
         session_id: String,
 
-        /// Worker-side session id
+        /// Worker-side session id; omitted values are read from the local session when possible
         #[arg(long = "worker-session")]
-        worker_session_id: String,
+        worker_session_id: Option<String>,
 
         /// Evidence stream id, e.g. stdout, stderr, events
         #[arg(long = "stream", default_value = "stdout")]
@@ -5548,9 +5548,9 @@ async fn cmd_remote_evidence_upload(
 }
 
 async fn cmd_remote_evidence_stream(
-    endpoint: String,
+    endpoint: Option<String>,
     session_id: String,
-    worker_session_id: String,
+    worker_session_id: Option<String>,
     stream_id: String,
     file: PathBuf,
     chunk_bytes: usize,
@@ -5560,6 +5560,8 @@ async fn cmd_remote_evidence_stream(
         RemoteAgentPodTransport,
     };
 
+    let (endpoint, worker_session_id) =
+        resolve_remote_session_metadata(&session_id, endpoint, worker_session_id);
     let contents = fs::read_to_string(&file).unwrap_or_else(|e| {
         eprintln!(
             "error: failed to read remote AgentPod evidence stream file {}: {}",
