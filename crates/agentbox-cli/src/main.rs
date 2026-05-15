@@ -5150,6 +5150,29 @@ fn cmd_providers(json: bool) {
         "bridge": "unix-socket",
         "network": "command-mediation",
         "boundary_primitives": ["path-shim", "unix-socket", "sqlite-audit"],
+        "boundary_primitive_statuses": [
+            {
+                "primitive": "path-shim",
+                "status": "shipped",
+                "active": true,
+                "requires_gate": null,
+                "enforcement_scope": "host PATH command mediation through agentbox-shim"
+            },
+            {
+                "primitive": "unix-socket",
+                "status": "shipped",
+                "active": true,
+                "requires_gate": null,
+                "enforcement_scope": "local daemon approval and policy transport"
+            },
+            {
+                "primitive": "sqlite-audit",
+                "status": "shipped",
+                "active": true,
+                "requires_gate": null,
+                "enforcement_scope": "hash-chained local audit persistence"
+            }
+        ],
         "capabilities": ["shim", "policy", "approval", "audit"],
         "doctor_check": "daemon socket",
         "setup_command": "agentbox setup-plan",
@@ -5217,6 +5240,22 @@ fn cmd_providers(json: bool) {
         "bridge": "unix-socket",
         "network": "none",
         "boundary_primitives": ["podman-container", "guest-shim"],
+        "boundary_primitive_statuses": [
+            {
+                "primitive": "podman-container",
+                "status": podman_status,
+                "active": podman_status == "experimental",
+                "requires_gate": "podman --version",
+                "enforcement_scope": "compatibility container boundary managed by Podman"
+            },
+            {
+                "primitive": "guest-shim",
+                "status": podman_status,
+                "active": podman_status == "experimental",
+                "requires_gate": "AGENTBOX_LINUX_SHIM or build-linux-shim artifact",
+                "enforcement_scope": "guest command bridge inside compatibility container"
+            }
+        ],
         "capabilities": ["container isolation", "shim bridge"],
         "doctor_check": "podman provider",
         "setup_command": "install Podman; on macOS run `podman machine init && podman machine start`",
