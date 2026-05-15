@@ -368,6 +368,10 @@ impl LinuxCgroupV2Limiter {
         plan: &LinuxCgroupV2Plan,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let cgroup_dir = root.join(&plan.cgroup_name);
+        for write in plan.writes() {
+            let _ = std::fs::remove_file(cgroup_dir.join(write.file));
+        }
+        let _ = std::fs::remove_file(cgroup_dir.join("cgroup.procs"));
         match std::fs::remove_dir(&cgroup_dir) {
             Ok(()) => Ok(()),
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
