@@ -974,6 +974,9 @@ fn cmd_doctor() {
         ));
         checks.extend(macos_native_doctor_checks());
     }
+    if cfg!(target_os = "linux") {
+        checks.extend(linux_native_doctor_checks());
+    }
 
     println!("Agentbox doctor");
     println!("{}", "-".repeat(64));
@@ -1132,6 +1135,83 @@ fn macos_native_doctor_checks() -> Vec<DoctorCheck> {
             "sign the future network extension with the required Network Extension entitlement",
         ),
     ]
+}
+
+fn linux_native_doctor_checks() -> Vec<DoctorCheck> {
+    vec![
+        doctor_check(
+            "Linux native plan",
+            true,
+            "compiler available; gated prototype execution requires AGENTBOX_LINUX_NATIVE=1"
+                .to_string(),
+            "inspect with `agentbox native-plan --provider agentpod-linux -- <cmd>`",
+        ),
+        doctor_check(
+            "Linux user namespace",
+            linux_user_namespace_available(),
+            linux_user_namespace_detail(),
+            "enable unprivileged user namespaces or run on a kernel/distribution that supports them",
+        ),
+        doctor_check(
+            "Linux cgroups v2",
+            Path::new("/sys/fs/cgroup/cgroup.controllers").exists(),
+            "/sys/fs/cgroup/cgroup.controllers".to_string(),
+            "boot with cgroup v2 enabled",
+        ),
+        doctor_check(
+            "Linux seccomp",
+            Path::new("/proc/sys/kernel/seccomp/actions_avail").exists(),
+            fs::read_to_string("/proc/sys/kernel/seccomp/actions_avail")
+                .map(|contents| contents.trim().to_string())
+                .unwrap_or_else(|_| "seccomp actions file not readable".to_string()),
+            "use a kernel with seccomp enabled",
+        ),
+        doctor_check(
+            "Linux Landlock ABI",
+            linux_landlock_abi_version().is_some(),
+            linux_landlock_abi_version()
+                .map(|version| format!("ABI version {version}"))
+                .unwrap_or_else(|| "not available or blocked by kernel policy".to_string()),
+            "use Linux 5.13+ with Landlock enabled",
+        ),
+    ]
+}
+
+fn linux_user_namespace_available() -> bool {
+    Path::new("/proc/self/ns/user").exists()
+        && fs::read_to_string("/proc/sys/kernel/unprivileged_userns_clone")
+            .map(|value| value.trim() != "0")
+            .unwrap_or(true)
+}
+
+fn linux_user_namespace_detail() -> String {
+    let ns = if Path::new("/proc/self/ns/user").exists() {
+        "present"
+    } else {
+        "missing"
+    };
+    let clone = fs::read_to_string("/proc/sys/kernel/unprivileged_userns_clone")
+        .map(|value| format!("unprivileged_userns_clone={}", value.trim()))
+        .unwrap_or_else(|_| "unprivileged_userns_clone=unknown".to_string());
+    format!("namespace={ns}; {clone}")
+}
+
+#[cfg(target_os = "linux")]
+fn linux_landlock_abi_version() -> Option<i64> {
+    let abi = unsafe {
+        libc::syscall(
+            libc::SYS_landlock_create_ruleset,
+            std::ptr::null::<libc::c_void>(),
+            0usize,
+            1u32,
+        )
+    };
+    (abi >= 0).then_some(abi)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn linux_landlock_abi_version() -> Option<i64> {
+    None
 }
 
 fn current_executable_has_entitlement(entitlement: &str) -> bool {
@@ -5705,6 +5785,20 @@ mod tests {
             plist,
             "com.apple.developer.networking.networkextension"
         ));
+    }
+
+    #[test]
+    fn linux_native_doctor_checks_do_not_claim_live_sandbox() {
+        let checks = linux_native_doctor_checks();
+
+        assert_eq!(checks[0].name, "Linux native plan");
+        assert!(checks[0].ok);
+        assert!(checks[0].detail.contains("compiler available"));
+        assert!(checks[0].detail.contains("AGENTBOX_LINUX_NATIVE=1"));
+        assert!(checks.iter().any(|check| check.name == "Linux seccomp"));
+        assert!(checks
+            .iter()
+            .any(|check| check.name == "Linux Landlock ABI"));
     }
 
     #[test]
