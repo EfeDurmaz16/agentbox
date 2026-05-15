@@ -100,6 +100,26 @@ manifest = {
     "setup_plan_json": "setup-plan.json",
 }
 (artifact_dir / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+
+signing = {
+    "schema_version": 1,
+    "status": "unsigned-placeholder",
+    "signed": False,
+    "claim": "no release artifact signing is configured or claimed by this gate",
+    "required_before": [
+        "publishing binary archives",
+        "publishing installers",
+        "installing privileged or auto-starting platform components",
+    ],
+    "next_steps": [
+        "generate checksums for release archives",
+        "configure platform signing identities outside the public repo",
+        "attach signed artifact attestations only after verification",
+    ],
+}
+(artifact_dir / "signing.json").write_text(
+    json.dumps(signing, indent=2) + "\n", encoding="utf-8"
+)
 PY
 
 log "release readiness artifacts"

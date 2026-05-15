@@ -128,6 +128,8 @@ Future package shapes:
 Public release artifacts should include:
 
 - checksums for every archive or installer
+- `signing.json` from `scripts/release-readiness.sh`, with `signed: false`
+  until real signing and verification are configured
 - a generated software bill of materials when the release pipeline supports it
 - release notes that name shipped, experimental, prototype, descriptor-only,
   and planned surfaces separately
@@ -149,11 +151,13 @@ If `doctor` fails because local state is missing, fix the installer or record
 the failure as a release blocker. Do not convert missing daemon, PATH, shim,
 Podman, audit, or native-provider readiness into a fake pass.
 
-The script emits machine-readable `doctor.json`, `setup-plan.json`, and
-`providers.json` artifacts under `target/agentbox-release-readiness` by default.
-`doctor.json` separates required failures from advisory native-provider
-prerequisites, and `setup-plan.json` records the next operator action an
-installer or package UI should show. Packaging jobs may set
+The script emits machine-readable `doctor.json`, `setup-plan.json`,
+`providers.json`, and `signing.json` artifacts under
+`target/agentbox-release-readiness` by default. `doctor.json` separates
+required failures from advisory native-provider prerequisites, `signing.json`
+states that artifacts are unsigned until real signing is configured, and
+`setup-plan.json` records the next operator action an installer or package UI
+should show. Packaging jobs may set
 `AGENTBOX_RELEASE_ARTIFACT_DIR` to persist those files with installer logs.
 
 ## Do Not Ship Rule
