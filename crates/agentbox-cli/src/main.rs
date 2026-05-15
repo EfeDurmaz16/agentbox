@@ -549,6 +549,16 @@ enum Commands {
         #[arg(long, default_value = "operator requested remote AgentPod restart")]
         reason: String,
     },
+    /// Query remote AgentPod worker supervision status
+    RemoteWorkerStatus {
+        /// Remote worker endpoint, e.g. https://worker.example.com/agentpod; omitted values can be read from --session
+        #[arg(long)]
+        endpoint: Option<String>,
+
+        /// Agentbox session id to use for persisted remote endpoint metadata
+        #[arg(long = "session")]
+        session_id: Option<String>,
+    },
     /// Upload a verified evidence bundle directory to a remote AgentPod worker
     RemoteEvidenceUpload {
         /// Remote worker endpoint, e.g. https://worker.example.com/agentpod; omitted values are read from the local session when possible
@@ -6166,6 +6176,58 @@ async fn cmd_remote_restart(
     );
 }
 
+async fn cmd_remote_worker_status(endpoint: Option<String>, session_id: Option<String>) {
+    use agentbox_daemon::runtime::providers::remote::{
+        HttpRemoteAgentPodTransport, RemoteAgentPodTransport,
+    };
+
+    let endpoint = resolve_remote_worker_endpoint(endpoint, session_id);
+    let transport = HttpRemoteAgentPodTransport::new(endpoint).unwrap_or_else(|e| {
+        eprintln!(
+            "error: failed to build remote AgentPod worker status transport: {}",
+            e
+        );
+        std::process::exit(1);
+    });
+    let response = transport.worker_status().await.unwrap_or_else(|e| {
+        eprintln!(
+            "error: failed to query remote AgentPod worker status: {}",
+            e
+        );
+        std::process::exit(1);
+    });
+
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&response)
+            .expect("failed to serialize remote AgentPod worker status")
+    );
+}
+
+fn resolve_remote_worker_endpoint(endpoint: Option<String>, session_id: Option<String>) -> String {
+    if let Some(endpoint) = endpoint {
+        return endpoint;
+    }
+
+    let Some(session_id) = session_id else {
+        eprintln!("error: remote worker status requires --endpoint or --session");
+        std::process::exit(1);
+    };
+    let session = load_persisted_session_for_remote_metadata(&session_id);
+    session
+        .spec
+        .labels
+        .get(REMOTE_LABEL_ENDPOINT)
+        .cloned()
+        .unwrap_or_else(|| {
+            eprintln!(
+                "error: session {} does not contain remote endpoint metadata; pass --endpoint",
+                session.id
+            );
+            std::process::exit(1);
+        })
+}
+
 fn resolve_remote_session_metadata(
     session_id: &str,
     endpoint: Option<String>,
@@ -7310,6 +7372,7 @@ fn remote_session_operator_commands(
     vec![
         format!("agentbox remote-evidence-status --session {}", session.id),
         format!("agentbox remote-restart --session {}", session.id),
+        format!("agentbox remote-worker-status --session {}", session.id),
         format!(
             "agentbox remote-workspace-export --session {} --output-dir ./agentbox-workspace-review",
             session.id
@@ -7571,6 +7634,10 @@ async fn main() {
             worker_session_id,
             reason,
         } => cmd_remote_restart(endpoint, session_id, worker_session_id, reason).await,
+        Commands::RemoteWorkerStatus {
+            endpoint,
+            session_id,
+        } => cmd_remote_worker_status(endpoint, session_id).await,
         Commands::RemoteEvidenceUpload {
             endpoint,
             session_id,
@@ -8369,6 +8436,7 @@ mod tests {
             vec![
                 format!("agentbox remote-evidence-status --session {session_id}"),
                 format!("agentbox remote-restart --session {session_id}"),
+                format!("agentbox remote-worker-status --session {session_id}"),
                 format!(
                     "agentbox remote-workspace-export --session {session_id} --output-dir ./agentbox-workspace-review"
                 ),

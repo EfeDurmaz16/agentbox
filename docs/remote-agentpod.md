@@ -163,14 +163,19 @@ If the worker reports a stopped or failed session, the operator can explicitly
 resume the same worker session without replaying the prior command:
 
 ```sh
+agentbox remote-worker-status \
+  --session agentbox-session-id
+
 agentbox remote-restart \
   --session agentbox-session-id \
   --reason "operator reviewed stopped worker state"
 ```
 
-Like evidence status, the command derives the worker endpoint and worker-side
-session id from the persisted local session when possible. It prints the
-validated restart response, including running status, restart attempt, and
+`remote-worker-status` prints the worker supervision status, including boot id,
+boot count, previous boot id, recovered session count, and persistence mode.
+Like evidence status, `remote-restart` derives the worker endpoint and
+worker-side session id from the persisted local session when possible. It prints
+the validated restart response, including running status, restart attempt, and
 required lifecycle events.
 
 For append-only stream evidence, the CLI can upload a UTF-8 file as ordered

@@ -790,7 +790,12 @@ done
 
 curl -fsS "http://127.0.0.1:${PORT}/worker/status" >"$TMPDIR/worker-status-after-restart.json"
 
-python3 - "$TMPDIR/worker-status-before-restart.json" "$TMPDIR/worker-status-after-restart.json" <<'PY'
+AGENTBOX_REMOTE_AGENTPOD_ALLOW_HTTP_LOOPBACK=1 \
+"$ROOT/target/debug/agentbox-cli" remote-worker-status \
+  --endpoint "http://127.0.0.1:${PORT}" \
+  >"$TMPDIR/worker-status-cli.json"
+
+python3 - "$TMPDIR/worker-status-before-restart.json" "$TMPDIR/worker-status-after-restart.json" "$TMPDIR/worker-status-cli.json" <<'PY'
 import json
 import sys
 
@@ -798,12 +803,15 @@ with open(sys.argv[1], "r", encoding="utf-8") as fh:
     before = json.load(fh)
 with open(sys.argv[2], "r", encoding="utf-8") as fh:
     after = json.load(fh)
+with open(sys.argv[3], "r", encoding="utf-8") as fh:
+    cli = json.load(fh)
 
 assert after["boot_count"] == before["boot_count"] + 1
 assert after["previous_boot_id"] == before["boot_id"]
 assert after["boot_id"] != before["boot_id"]
 assert after["recovered_sessions"] >= 1
 assert after["persistence"] == "StateDir"
+assert cli == after
 PY
 
 curl -fsS "http://127.0.0.1:${PORT}/sessions/${WORKER_SESSION_ID}/exec" \

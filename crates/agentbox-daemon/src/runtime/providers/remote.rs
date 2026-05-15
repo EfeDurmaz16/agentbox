@@ -1083,6 +1083,39 @@ pub struct RemoteAgentPodEvidenceStatusResponse {
     pub credentials: Vec<RemoteAgentPodCredentialStatus>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RemoteAgentPodWorkerSupervisionPersistence {
+    MemoryOnly,
+    StateDir,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteAgentPodWorkerStatusResponse {
+    pub boot_id: String,
+    pub boot_count: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous_boot_id: Option<String>,
+    pub started_at: DateTime<Utc>,
+    pub recovered_sessions: usize,
+    pub persistence: RemoteAgentPodWorkerSupervisionPersistence,
+}
+
+impl RemoteAgentPodWorkerStatusResponse {
+    pub fn validate(&self) -> Result<(), RuntimeError> {
+        if self.boot_id.trim().is_empty() {
+            return Err(RuntimeError::ManifestRejected(
+                "remote worker status response must include boot id".into(),
+            ));
+        }
+        if self.boot_count == 0 {
+            return Err(RuntimeError::ManifestRejected(
+                "remote worker status response must include a positive boot count".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
 impl RemoteAgentPodEvidenceStatusResponse {
     pub fn validate_for(
         &self,
@@ -1545,6 +1578,8 @@ pub trait RemoteAgentPodTransport: Send + Sync {
         request: RemoteAgentPodEvidenceStatusRequest,
     ) -> Result<RemoteAgentPodEvidenceStatusResponse, RuntimeError>;
 
+    async fn worker_status(&self) -> Result<RemoteAgentPodWorkerStatusResponse, RuntimeError>;
+
     async fn upload_evidence_stream_chunk(
         &self,
         request: RemoteAgentPodEvidenceStreamChunkRequest,
@@ -1812,6 +1847,30 @@ impl RemoteAgentPodTransport for HttpRemoteAgentPodTransport {
                 ))
             })?;
         response.validate_for(&request)?;
+        Ok(response)
+    }
+
+    async fn worker_status(&self) -> Result<RemoteAgentPodWorkerStatusResponse, RuntimeError> {
+        let response = self
+            .client
+            .get(self.route("worker/status"))
+            .send()
+            .await
+            .map_err(|err| {
+                RuntimeError::Unavailable(format!("remote worker status failed: {err}"))
+            })?
+            .error_for_status()
+            .map_err(|err| {
+                RuntimeError::Unavailable(format!("remote worker status rejected: {err}"))
+            })?
+            .json::<RemoteAgentPodWorkerStatusResponse>()
+            .await
+            .map_err(|err| {
+                RuntimeError::ManifestRejected(format!(
+                    "remote worker status response was invalid JSON: {err}"
+                ))
+            })?;
+        response.validate()?;
         Ok(response)
     }
 
@@ -2945,6 +3004,19 @@ mod tests {
                 }],
             };
             response.validate_for(&request)?;
+            Ok(response)
+        }
+
+        async fn worker_status(&self) -> Result<RemoteAgentPodWorkerStatusResponse, RuntimeError> {
+            let response = RemoteAgentPodWorkerStatusResponse {
+                boot_id: "boot-test".into(),
+                boot_count: 1,
+                previous_boot_id: None,
+                started_at: Utc::now(),
+                recovered_sessions: 0,
+                persistence: RemoteAgentPodWorkerSupervisionPersistence::MemoryOnly,
+            };
+            response.validate()?;
             Ok(response)
         }
 

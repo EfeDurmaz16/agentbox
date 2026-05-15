@@ -230,6 +230,11 @@ grep -F "omitted values are read from the local session when possible" \
   "$TMPDIR/remote-restart-help.txt" >/dev/null
 grep -F "Operator-visible restart reason" \
   "$TMPDIR/remote-restart-help.txt" >/dev/null
+"${CLI[@]}" remote-worker-status --help >"$TMPDIR/remote-worker-status-help.txt"
+grep -F "Query remote AgentPod worker supervision status" \
+  "$TMPDIR/remote-worker-status-help.txt" >/dev/null
+grep -F "omitted values can be read from --session" \
+  "$TMPDIR/remote-worker-status-help.txt" >/dev/null
 "${CLI[@]}" remote-approval-grant --help >"$TMPDIR/remote-approval-grant-help.txt"
 grep -F "Grant a pending remote AgentPod command approval" \
   "$TMPDIR/remote-approval-grant-help.txt" >/dev/null
