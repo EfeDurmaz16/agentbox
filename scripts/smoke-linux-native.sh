@@ -23,6 +23,11 @@ if ! cargo run -q -p agentbox-cli -- doctor --json |
   skip "Linux Landlock ABI is required for the Linux native AgentPod smoke"
 fi
 
+if ! cargo run -q -p agentbox-cli -- doctor --json |
+  jq -e '.checks[] | select(.name == "Linux cgroups v2" and .ok == true)' >/dev/null; then
+  skip "writable/delegated Linux cgroups v2 root is required for the Linux native AgentPod smoke"
+fi
+
 workspace="${AGENTBOX_LINUX_NATIVE_WORKSPACE:-$(mktemp -d)}"
 command_string="${AGENTBOX_LINUX_NATIVE_COMMAND:-/bin/true}"
 timeout_seconds="${AGENTBOX_LINUX_NATIVE_TIMEOUT_SECONDS:-30}"

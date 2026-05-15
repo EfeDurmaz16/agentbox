@@ -2260,7 +2260,7 @@ fn linux_native_doctor_checks() -> Vec<DoctorCheck> {
         ),
         doctor_advisory_check(
             "Linux cgroups v2",
-            linux_cgroup_v2_controllers_path().exists(),
+            linux_cgroup_v2_ready_for_attach(),
             linux_cgroup_v2_detail(),
             "boot with cgroup v2 enabled and delegate a writable cgroup root for AgentPod process attach",
         ),
@@ -2294,6 +2294,11 @@ fn linux_cgroup_v2_controllers_path() -> PathBuf {
     linux_cgroup_v2_root().join("cgroup.controllers")
 }
 
+fn linux_cgroup_v2_ready_for_attach() -> bool {
+    let root = linux_cgroup_v2_root();
+    linux_cgroup_v2_controllers_path().exists() && path_is_writable_dir(&root)
+}
+
 fn linux_cgroup_v2_detail() -> String {
     let root = linux_cgroup_v2_root();
     let controllers = root.join("cgroup.controllers");
@@ -2307,11 +2312,40 @@ fn linux_cgroup_v2_detail() -> String {
             }
         })
         .unwrap_or_else(|_| "controllers file not readable".to_string());
+    let writable_detail = if path_is_writable_dir(&root) {
+        "root writable: yes"
+    } else {
+        "root writable: no"
+    };
     format!(
-        "root: {}; {}; set AGENTBOX_LINUX_CGROUP_ROOT for delegated/test roots; live attach also requires write access to child cgroups",
+        "root: {}; {}; {}; set AGENTBOX_LINUX_CGROUP_ROOT for delegated/test roots; live attach also requires write access to child cgroups",
         root.display(),
-        controller_detail
+        controller_detail,
+        writable_detail
     )
+}
+
+fn path_is_writable_dir(path: &Path) -> bool {
+    if !path.is_dir() {
+        return false;
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+
+        let Ok(path) = std::ffi::CString::new(path.as_os_str().as_bytes()) else {
+            return false;
+        };
+        unsafe { libc::access(path.as_ptr(), libc::W_OK) == 0 }
+    }
+
+    #[cfg(not(unix))]
+    {
+        fs::metadata(path)
+            .map(|metadata| !metadata.permissions().readonly())
+            .unwrap_or(false)
+    }
 }
 
 fn linux_user_namespace_available() -> bool {
@@ -8121,6 +8155,7 @@ mod tests {
             .unwrap();
         assert!(cgroup_check.detail.contains("AGENTBOX_LINUX_CGROUP_ROOT"));
         assert!(cgroup_check.detail.contains("live attach"));
+        assert!(cgroup_check.detail.contains("root writable"));
         assert!(checks.iter().any(|check| check.name == "Linux seccomp"));
         assert!(checks
             .iter()
