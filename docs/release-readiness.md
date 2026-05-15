@@ -108,13 +108,13 @@ doctor report without mutating host state.
 
 ## Policy Boundaries
 
-- [ ] Host environment inheritance is rejected.
-- [ ] Host network mode is rejected.
-- [ ] Protected paths require explicit file grants.
-- [ ] Denied domains win before allowlists or approval grants.
-- [ ] Approval grants cannot bypass block-bucket decisions.
-- [ ] Expired grants are ignored.
-- [ ] Once grants are consumed.
+- [x] Host environment inheritance is rejected.
+- [x] Host network mode is rejected.
+- [x] Protected paths require explicit file grants.
+- [x] Denied domains win before allowlists or approval grants.
+- [x] Approval grants cannot bypass block-bucket decisions.
+- [x] Expired grants are ignored.
+- [x] Once grants are consumed.
 
 ## Evidence
 
