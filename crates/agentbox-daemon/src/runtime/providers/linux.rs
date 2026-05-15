@@ -1276,37 +1276,58 @@ fn configure_linux_child_security(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     use std::os::unix::process::CommandExt;
 
-    let seccomp_filter = seccomp
-        .map(compile_linux_seccomp_filter)
-        .transpose()
-        .map(Option::flatten)?;
-    let landlock_ruleset = landlock
-        .map(prepare_linux_landlock_ruleset)
-        .transpose()
-        .map(Option::flatten)?;
+    let child_security = LinuxPreparedChildSecurity::prepare(seccomp, landlock)?;
 
     // SAFETY: pre_exec runs after fork and before exec in the child. The closure only
     // calls prctl syscalls and constructs an io::Error from errno on failure, then
     // returns to std::process for exec/error handling.
     unsafe {
-        command.pre_exec(move || {
-            let result = libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
-            if result != 0 {
-                return Err(std::io::Error::last_os_error());
-            }
-            if let Some(ruleset) = &landlock_ruleset {
-                restrict_self_with_landlock(ruleset)
-                    .map_err(|_| std::io::Error::last_os_error())?;
-            }
-            if let Some(filter) = &seccomp_filter {
-                install_linux_seccomp_filter(filter)
-                    .map_err(|_| std::io::Error::last_os_error())?;
-            }
-            Ok(())
-        });
+        command.pre_exec(move || child_security.apply_in_child());
     }
 
     Ok(())
+}
+
+#[cfg(target_os = "linux")]
+struct LinuxPreparedChildSecurity {
+    seccomp_filter: Option<Vec<libc::sock_filter>>,
+    landlock_ruleset: Option<LinuxLandlockPreparedRuleset>,
+}
+
+#[cfg(target_os = "linux")]
+impl LinuxPreparedChildSecurity {
+    fn prepare(
+        seccomp: Option<&LinuxSeccompPlan>,
+        landlock: Option<&LinuxLandlockPlan>,
+    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        let seccomp_filter = seccomp
+            .map(compile_linux_seccomp_filter)
+            .transpose()
+            .map(Option::flatten)?;
+        let landlock_ruleset = landlock
+            .map(prepare_linux_landlock_ruleset)
+            .transpose()
+            .map(Option::flatten)?;
+
+        Ok(Self {
+            seccomp_filter,
+            landlock_ruleset,
+        })
+    }
+
+    fn apply_in_child(&self) -> std::io::Result<()> {
+        let result = unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) };
+        if result != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        if let Some(ruleset) = &self.landlock_ruleset {
+            restrict_self_with_landlock(ruleset).map_err(|_| std::io::Error::last_os_error())?;
+        }
+        if let Some(filter) = &self.seccomp_filter {
+            install_linux_seccomp_filter(filter).map_err(|_| std::io::Error::last_os_error())?;
+        }
+        Ok(())
+    }
 }
 
 #[cfg(target_os = "linux")]
