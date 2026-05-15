@@ -467,17 +467,17 @@ enum Commands {
     },
     /// Upload a verified evidence bundle directory to a remote AgentPod worker
     RemoteEvidenceUpload {
-        /// Remote worker endpoint, e.g. https://worker.example.com/agentpod
+        /// Remote worker endpoint, e.g. https://worker.example.com/agentpod; omitted values are read from the local session when possible
         #[arg(long)]
-        endpoint: String,
+        endpoint: Option<String>,
 
         /// Agentbox session id
         #[arg(long = "session")]
         session_id: String,
 
-        /// Worker-side session id
+        /// Worker-side session id; omitted values are read from the local session when possible
         #[arg(long = "worker-session")]
-        worker_session_id: String,
+        worker_session_id: Option<String>,
 
         /// Verified evidence bundle directory produced by `agentbox evidence --bundle`
         #[arg(long = "bundle-dir")]
@@ -5451,9 +5451,9 @@ fn remote_session_metadata_from_session(
 }
 
 async fn cmd_remote_evidence_upload(
-    endpoint: String,
+    endpoint: Option<String>,
     session_id: String,
-    worker_session_id: String,
+    worker_session_id: Option<String>,
     bundle_dir: PathBuf,
 ) {
     use agentbox_daemon::runtime::providers::remote::{
@@ -5461,6 +5461,8 @@ async fn cmd_remote_evidence_upload(
         RemoteAgentPodEvidenceMode, RemoteAgentPodEvidenceUploadRequest, RemoteAgentPodTransport,
     };
 
+    let (endpoint, worker_session_id) =
+        resolve_remote_session_metadata(&session_id, endpoint, worker_session_id);
     let payload =
         build_remote_evidence_bundle_upload_payload(&bundle_dir, &session_id, &worker_session_id)
             .unwrap_or_else(|e| {

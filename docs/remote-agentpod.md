@@ -119,15 +119,16 @@ worker:
 
 ```sh
 agentbox remote-evidence-upload \
-  --endpoint https://worker.example.com/agentpod \
   --session agentbox-session-id \
-  --worker-session worker-session-id \
   --bundle-dir ./agentbox-evidence
 ```
 
 The command verifies the local bundle directory, builds an
 `AgentboxEvidenceBundleUpload` envelope, posts the receipt metadata, uploads the
 bundle payload, and prints both validated worker acknowledgements.
+For remote-provider sessions, endpoint and worker-session metadata are read from
+the local runtime session; manual `--endpoint` and `--worker-session` overrides
+remain available.
 When `agentbox run --provider remote-agentpod` is destroyed through the daemon,
 the runtime also seals the final stopped-session evidence bundle after the local
 `runtime.destroy` audit event is written, then sends the same receipt and
