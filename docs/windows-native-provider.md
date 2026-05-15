@@ -125,8 +125,10 @@ Windows process/network/provider events
 
 Current repo status: the Windows native execution plan carries an observed-only
 ETW descriptor with job-name correlation, PID fallback, manifest label keys, and
-evidence schemas for process, network, and provider lifecycle events. It does
-not start an ETW session or claim enforcement.
+evidence schemas for process, network, and provider lifecycle events. It also
+models the planned ETW evidence export bundle files, redaction policy, spool
+path, hash-chain algorithm, and bundle-root linkage. It does not start an ETW
+session, export events, or claim enforcement.
 
 Initial ETW evidence should focus on:
 

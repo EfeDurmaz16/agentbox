@@ -7785,6 +7785,19 @@ mod tests {
                     .iter()
                     .any(|event| event == "windows.wfp.flow.block"));
                 assert_eq!(
+                    plan["etw"]["evidence_export"]["spool_guest_path"],
+                    r"C:\ProgramData\Agentbox\Evidence\etw"
+                );
+                assert!(plan["etw"]["evidence_export"]["bundle_files"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|file| file == "windows-etw-events.jsonl"));
+                assert!(plan["etw"]["evidence_export"]["export_claim"]
+                    .as_str()
+                    .unwrap()
+                    .contains("live ETW capture/export is not wired"));
+                assert_eq!(
                     plan["vm_boundary"]["cell_config"]["workspace_mount"]["review_required"],
                     true
                 );

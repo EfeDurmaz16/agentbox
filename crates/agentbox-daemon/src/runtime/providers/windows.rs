@@ -345,6 +345,7 @@ pub struct WindowsEtwObserverPlan {
     pub event_kinds: Vec<String>,
     pub correlation: WindowsEtwCorrelationPlan,
     pub event_schema: Vec<WindowsEtwEventSchema>,
+    pub evidence_export: WindowsEtwEvidenceExportPlan,
     pub enforcement: WindowsEtwEnforcementMode,
     pub evidence_claim: String,
     pub requires_etw: bool,
@@ -363,6 +364,24 @@ pub struct WindowsEtwEventSchema {
     pub event_type: String,
     pub provider: String,
     pub evidence_use: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WindowsEtwEvidenceExportPlan {
+    pub spool_guest_path: String,
+    pub bundle_files: Vec<String>,
+    pub redaction_policy: WindowsEtwRedactionPlan,
+    pub hash_chain_algorithm: String,
+    pub bundle_root_algorithm: String,
+    pub export_claim: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WindowsEtwRedactionPlan {
+    pub marker: String,
+    pub redact_command_env: bool,
+    pub redact_credential_paths: bool,
+    pub max_event_payload_bytes: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -415,6 +434,24 @@ impl WindowsEtwObserverPlan {
                         .into(),
                 },
             ],
+            evidence_export: WindowsEtwEvidenceExportPlan {
+                spool_guest_path: r"C:\ProgramData\Agentbox\Evidence\etw".into(),
+                bundle_files: vec![
+                    "windows-etw-events.jsonl".into(),
+                    "windows-etw-manifest.json".into(),
+                    "windows-etw-redaction.json".into(),
+                ],
+                redaction_policy: WindowsEtwRedactionPlan {
+                    marker: "<redacted>".into(),
+                    redact_command_env: true,
+                    redact_credential_paths: true,
+                    max_event_payload_bytes: 16 * 1024,
+                },
+                hash_chain_algorithm: "sha256-prev-hash-event-hash".into(),
+                bundle_root_algorithm: "agentbox-evidence-bundle-root-v1".into(),
+                export_claim: "planned ETW export bundle; live ETW capture/export is not wired"
+                    .into(),
+            },
             enforcement: WindowsEtwEnforcementMode::ObservedOnly,
             evidence_claim:
                 "ETW observer descriptor only; observed events are not enforcement proof".into(),
@@ -842,6 +879,25 @@ mod tests {
             .event_schema
             .iter()
             .any(|event| event.event_type == "windows.network.connect"));
+        assert_eq!(
+            plan.etw.evidence_export.spool_guest_path,
+            r"C:\ProgramData\Agentbox\Evidence\etw"
+        );
+        assert!(plan
+            .etw
+            .evidence_export
+            .bundle_files
+            .contains(&"windows-etw-events.jsonl".to_string()));
+        assert!(plan.etw.evidence_export.redaction_policy.redact_command_env);
+        assert_eq!(
+            plan.etw.evidence_export.hash_chain_algorithm,
+            "sha256-prev-hash-event-hash"
+        );
+        assert!(plan
+            .etw
+            .evidence_export
+            .export_claim
+            .contains("live ETW capture/export is not wired"));
         assert!(plan.etw.evidence_claim.contains("not enforcement proof"));
         assert_eq!(
             plan.vm_boundary.candidate_backends,
@@ -919,6 +975,15 @@ mod tests {
             event.event_type == "agentbox.provider.lifecycle"
                 && event.provider == "Agentbox-AgentPod"
         }));
+        assert!(plan
+            .evidence_export
+            .bundle_files
+            .contains(&"windows-etw-manifest.json".to_string()));
+        assert_eq!(plan.evidence_export.redaction_policy.marker, "<redacted>");
+        assert_eq!(
+            plan.evidence_export.bundle_root_algorithm,
+            "agentbox-evidence-bundle-root-v1"
+        );
         assert!(plan.requires_etw);
         assert!(plan.evidence_claim.contains("descriptor only"));
     }
