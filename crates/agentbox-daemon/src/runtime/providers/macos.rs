@@ -358,6 +358,42 @@ pub struct MacOsAgentPodExecutionPlan {
     pub security_claim: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MacOsAgentPodRunnerRequest {
+    pub schema_version: i64,
+    pub session_id: String,
+    pub command_argv: Vec<String>,
+    pub working_dir: Option<String>,
+    pub virtualization: MacOsVirtualizationCellPlan,
+    pub endpoint_security: MacOsEndpointSecurityPlan,
+    pub network_extension: MacOsNetworkExtensionPlan,
+    pub evidence_observer: MacOsEvidenceObserverPlan,
+    pub prerequisite_checks: Vec<MacOsNativePrerequisiteCheck>,
+    pub runner_phases: Vec<MacOsAgentPodRunnerPhase>,
+    pub required_entitlements: Vec<String>,
+}
+
+impl MacOsAgentPodRunnerRequest {
+    pub fn from_execution_plan(plan: &MacOsAgentPodExecutionPlan, command: &ExecCommand) -> Self {
+        Self {
+            schema_version: 1,
+            session_id: plan.session_id.clone(),
+            command_argv: plan.command_argv.clone(),
+            working_dir: command
+                .working_dir
+                .clone()
+                .or_else(|| Some(plan.virtualization.workspace_guest_path.clone())),
+            virtualization: plan.virtualization.clone(),
+            endpoint_security: plan.endpoint_security.clone(),
+            network_extension: plan.network_extension.clone(),
+            evidence_observer: plan.evidence_observer.clone(),
+            prerequisite_checks: plan.prerequisite_checks.clone(),
+            runner_phases: plan.runner_phases.clone(),
+            required_entitlements: plan.required_entitlements.clone(),
+        }
+    }
+}
+
 impl MacOsAgentPodExecutionPlan {
     pub fn from_minipod_spec(
         spec: &MinipodSpec,
@@ -931,6 +967,27 @@ mod tests {
             .iter()
             .any(|event| event.event_type == "macos.network.flow"));
         assert!(plan.security_claim.contains("execution is not wired"));
+    }
+
+    #[test]
+    fn macos_runner_request_is_derived_from_execution_plan() {
+        let spec = MinipodSpec::for_agent_task("hermes", "/tmp/agentbox-work");
+        let exec = command(&["/bin/true"]);
+        let plan = MacOsAgentPodExecutionPlan::from_minipod_spec(&spec, &exec).unwrap();
+
+        let request = MacOsAgentPodRunnerRequest::from_execution_plan(&plan, &exec);
+
+        assert_eq!(request.schema_version, 1);
+        assert_eq!(request.session_id, spec.id);
+        assert_eq!(request.command_argv, vec!["/bin/true"]);
+        assert_eq!(request.working_dir.as_deref(), Some("/workspace"));
+        assert_eq!(request.virtualization, plan.virtualization);
+        assert_eq!(request.endpoint_security, plan.endpoint_security);
+        assert_eq!(request.network_extension, plan.network_extension);
+        assert_eq!(request.evidence_observer, plan.evidence_observer);
+        assert_eq!(request.prerequisite_checks, plan.prerequisite_checks);
+        assert_eq!(request.runner_phases, plan.runner_phases);
+        assert_eq!(request.required_entitlements, plan.required_entitlements);
     }
 
     #[test]

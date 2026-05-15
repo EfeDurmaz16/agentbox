@@ -64,10 +64,13 @@ The sprint has moved past pure planning. The current working spine is:
 - Linux runner request files are owned lifecycle artifacts: they are cleaned on
   early returns and use path-safe, collision-resistant filenames for parallel
   exec attempts.
-- macOS AgentPod remains descriptor/plan compiler only, but the native plan now
+- macOS AgentPod remains unavailable for execution, but the native plan now
   exposes prerequisite checks and ordered runner phases for the future Apple
   Virtualization VM runner, Endpoint Security system extension, Network
-  Extension, host bridge, and evidence flow.
+  Extension, host bridge, and evidence flow. The daemon also has a typed VM
+  runner request schema plus a contract-only `agentbox-macos-vm-runner` binary
+  that validates requests and refuses execution honestly until VM lifecycle
+  wiring lands.
 - `agentbox doctor --json` and setup-plan filtering now surface macOS VM runner
   and extension readiness gaps as advisory checks instead of hiding them in
   prose.
@@ -77,21 +80,18 @@ The sprint has moved past pure planning. The current working spine is:
 
 Immediate next implementation queue:
 
-1. Start the `agentbox-macos-vm-runner` binary as a contract-only runner that
-   validates request JSON and refuses execution without a VM backend.
-2. Add a macOS VM runner request schema mirroring the native plan fields that a
-   real Apple Virtualization process will need.
-3. Add `agentbox doctor` probes for a sibling `agentbox-macos-vm-runner` binary,
-   not only PATH lookup.
-4. Split macOS system-extension readiness into install status, entitlement
+1. Split macOS system-extension readiness into install status, entitlement
    status, and approval status descriptors.
-5. Add Linux overlayfs apply as the next native execution primitive, still
+2. Wire the macOS native provider to write a VM runner request file and invoke
+   `agentbox-macos-vm-runner` behind `AGENTBOX_MACOS_NATIVE=1`, still expecting
+   an unavailable result until VM boot exists.
+3. Add Linux overlayfs apply as the next native execution primitive, still
    gated behind `AGENTBOX_LINUX_NATIVE=1`.
-6. Add Linux live smoke coverage for request cleanup and parallel exec where the
+4. Add Linux live smoke coverage for request cleanup and parallel exec where the
    host has delegated cgroups.
-7. Connect native runner phases to evidence events so plans and post-run
+5. Connect native runner phases to evidence events so plans and post-run
    receipts share the same vocabulary.
-8. Convert the next 10 implementation slices into GitHub issues with explicit
+6. Convert the next implementation slices into GitHub issues with explicit
    verification commands.
 
 ### Arc 1: Product Contract In Code

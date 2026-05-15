@@ -104,8 +104,11 @@ agentbox native-plan --provider agentpod-linux --deny-syscall kill --max-process
 
 The macOS plan compiler emits the VM cell, host bridge, Endpoint Security,
 Network Extension, entitlement, prerequisite, runner-phase, and evidence shape.
-It remains a plan compiler: provider execution is still unavailable until the
-Apple Virtualization runner, signed system extension, Network Extension
+The daemon also defines the typed macOS VM runner request payload and ships a
+contract-only `agentbox-macos-vm-runner` binary. That binary validates request
+JSON and exposes help/version output, but it refuses execution until the Apple
+Virtualization lifecycle is wired. Provider execution is still unavailable until
+the VM runner can boot cells, signed system extension, Network Extension
 lifecycle, and live enforcement tests exist.
 
 The Rust daemon also contains a prototype Linux executor function for that plan.
