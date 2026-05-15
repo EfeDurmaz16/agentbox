@@ -29,6 +29,7 @@ pub enum AgentPodPrimitive {
     UserNamespaces,
     MountNamespaces,
     PidNamespaces,
+    NoNewPrivs,
     CgroupsV2,
     Landlock,
     Seccomp,
@@ -51,6 +52,7 @@ impl AgentPodPrimitive {
             Self::UserNamespaces => "user-namespaces",
             Self::MountNamespaces => "mount-namespaces",
             Self::PidNamespaces => "pid-namespaces",
+            Self::NoNewPrivs => "no-new-privs",
             Self::CgroupsV2 => "cgroups-v2",
             Self::Landlock => "landlock",
             Self::Seccomp => "seccomp",
@@ -135,6 +137,7 @@ impl AgentPodProviderKind {
                 AgentPodPrimitive::UserNamespaces,
                 AgentPodPrimitive::MountNamespaces,
                 AgentPodPrimitive::PidNamespaces,
+                AgentPodPrimitive::NoNewPrivs,
                 AgentPodPrimitive::CgroupsV2,
                 AgentPodPrimitive::Landlock,
                 AgentPodPrimitive::Seccomp,
@@ -262,6 +265,9 @@ impl RuntimeProvider for AgentPodProvider {
                         }
                         AgentPodPrimitive::PidNamespaces => {
                             "gated unshare PID namespace composition; process supervision remains prototype"
+                        }
+                        AgentPodPrimitive::NoNewPrivs => {
+                            "gated PR_SET_NO_NEW_PRIVS child process flag before exec"
                         }
                         AgentPodPrimitive::CgroupsV2 => {
                             "gated cgroup v2 resource file writes, process attach, and cleanup"
@@ -635,6 +641,9 @@ mod tests {
             .contains(&AgentPodPrimitive::UserNamespaces));
         assert!(provider
             .planned_primitives()
+            .contains(&AgentPodPrimitive::NoNewPrivs));
+        assert!(provider
+            .planned_primitives()
             .contains(&AgentPodPrimitive::CgroupsV2));
         assert!(provider
             .planned_primitives()
@@ -653,6 +662,14 @@ mod tests {
             .unwrap();
         assert!(cgroups.enforcement_scope.contains("process attach"));
         assert!(cgroups.enforcement_scope.contains("cleanup"));
+
+        let no_new_privs = primitive_statuses
+            .iter()
+            .find(|status| status.primitive == "no-new-privs")
+            .unwrap();
+        assert!(no_new_privs
+            .enforcement_scope
+            .contains("PR_SET_NO_NEW_PRIVS"));
 
         let seccomp = primitive_statuses
             .iter()

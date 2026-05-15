@@ -55,7 +55,7 @@ AgentPods require them.
 |----------|---------------|-----------------|
 | `direct-host` | Low-risk guarded process mode | PATH shims, daemon policy, approval, audit |
 | `agentpod-macos` | macOS native/strong mode | Apple Virtualization.framework cell, Endpoint Security, Network Extension |
-| `agentpod-linux` | Linux native mode | namespaces, cgroups v2, overlayfs, seccomp, Landlock, nftables, optional eBPF |
+| `agentpod-linux` | Linux native mode | namespaces, no-new-privs, cgroups v2, overlayfs, seccomp, Landlock, nftables, optional eBPF |
 | `agentpod-windows` | Windows native mode | Job Objects, AppContainer, restricted tokens, WFP, ETW, optional Hyper-V |
 | `remote-agentpod` | Remote/disposable worker mode | same AgentPod contract over a remote bridge |
 | `podman-compat` | Compatibility and smoke backend | Podman containers; not the product center |
@@ -72,10 +72,10 @@ Provider status must stay honest:
 `agentpod-linux` now has a composed native execution plan in code. The plan
 combines rootless user namespace, mount namespace metadata, PID namespace,
 cgroup v2 resource writes, seccomp profile metadata, and Landlock ruleset
-metadata into one object. This is still a prototype primitive: live execution
-must be explicitly gated with `AGENTBOX_LINUX_NATIVE`, and it is not a complete
-sandbox claim until the loaders and provider lifecycle are wired and tested on
-Linux.
+metadata into one object. The gated executor also sets `PR_SET_NO_NEW_PRIVS`
+before exec. This is still a prototype primitive: live execution must be
+explicitly gated with `AGENTBOX_LINUX_NATIVE`, and it is not a complete sandbox
+claim until the loaders and provider lifecycle are wired and tested on Linux.
 
 The plan can be inspected without execution:
 

@@ -285,8 +285,8 @@ or prototype-gated until enforcement lands. `agentbox providers` separates
 planned provider capability metadata from active network enforcement flags, so
 Podman compatibility is not presented as domain or packet-level policy
 enforcement. Linux AgentPod work has started with user, mount, PID namespace,
-cgroups v2, seccomp profile, and Landlock filesystem primitives, plus a gated
-prototype executor. macOS AgentPod now has a native plan compiler for the Apple
+cgroups v2, no-new-privs, seccomp profile, and Landlock filesystem primitives,
+plus a gated prototype executor. macOS AgentPod now has a native plan compiler for the Apple
 Virtualization, Endpoint Security, Network Extension, entitlement, host bridge,
 and evidence surfaces, but provider execution remains unavailable until live
 runner and enforcement tests exist.
