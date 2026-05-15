@@ -931,6 +931,18 @@ fn find_shim_binary() -> Option<PathBuf> {
     which_in_path("agentbox-shim")
 }
 
+fn find_macos_vm_runner_binary() -> Option<PathBuf> {
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(parent) = exe.parent() {
+            let sibling = parent.join("agentbox-macos-vm-runner");
+            if sibling.is_file() {
+                return Some(sibling);
+            }
+        }
+    }
+    which_in_path("agentbox-macos-vm-runner")
+}
+
 // ---------------------------------------------------------------------------
 // Commands
 // ---------------------------------------------------------------------------
@@ -2234,10 +2246,12 @@ fn macos_native_doctor_checks() -> Vec<DoctorCheck> {
         ),
         doctor_advisory_check(
             "macOS VM runner binary",
-            which_in_path("agentbox-macos-vm-runner").is_some(),
-            which_in_path("agentbox-macos-vm-runner")
+            find_macos_vm_runner_binary().is_some(),
+            find_macos_vm_runner_binary()
                 .map(|path| path.display().to_string())
-                .unwrap_or_else(|| "agentbox-macos-vm-runner not found in PATH".to_string()),
+                .unwrap_or_else(|| {
+                    "agentbox-macos-vm-runner not found next to CLI or in PATH".to_string()
+                }),
             "build and sign the future Apple Virtualization VM runner",
         ),
         doctor_advisory_check(
@@ -8158,7 +8172,8 @@ mod tests {
         assert!(checks
             .iter()
             .any(|check| check.name == "macOS VM runner binary"
-                && check.detail.contains("agentbox-macos-vm-runner")));
+                && check.detail.contains("agentbox-macos-vm-runner")
+                && (check.ok || check.detail.contains("next to CLI"))));
         assert!(checks
             .iter()
             .any(|check| check.name == "Endpoint Security entitlement"));
