@@ -80,6 +80,8 @@ pub struct LinuxMountNamespacePlan {
     pub schema_version: i64,
     pub workspace_host_path: String,
     pub workspace_guest_path: String,
+    pub workspace_bind_mount_wired: bool,
+    pub workspace_mount_claim: String,
     pub overlayfs: Option<LinuxOverlayFsWorkspacePlan>,
     pub read_only_mounts: Vec<LinuxMountNamespaceMount>,
     pub propagation: String,
@@ -139,6 +141,10 @@ impl LinuxMountNamespacePlan {
             schema_version: 1,
             workspace_host_path: spec.filesystem.workspace_host_path.display().to_string(),
             workspace_guest_path: spec.filesystem.workspace_guest_path.clone(),
+            workspace_bind_mount_wired: false,
+            workspace_mount_claim:
+                "prototype executor maps guest workspace cwd to the host workspace; bind-mount setup inside the mount namespace is not wired"
+                    .to_string(),
             overlayfs,
             read_only_mounts,
             propagation: "private".to_string(),
@@ -1129,7 +1135,7 @@ impl LinuxAgentPodExecutionPlan {
             live_execution_enabled: linux_native_execution_enabled(),
             requires_linux: true,
             security_claim:
-                "prototype namespace/resource execution with cgroup v2 process attach; not a complete sandbox"
+                "prototype namespace/resource execution with cgroup v2 process attach; workspace bind-mount setup is not wired; not a complete sandbox"
                     .into(),
         })
     }
@@ -1861,6 +1867,8 @@ mod tests {
         assert_eq!(plan.schema_version, 1);
         assert_eq!(plan.workspace_host_path, "/tmp/agentbox-work");
         assert_eq!(plan.workspace_guest_path, "/workspace");
+        assert!(!plan.workspace_bind_mount_wired);
+        assert!(plan.workspace_mount_claim.contains("not wired"));
         assert_eq!(plan.propagation, "private");
         assert!(plan.requires_linux);
         assert_eq!(plan.read_only_mounts.len(), 1);
@@ -2453,6 +2461,9 @@ mod tests {
             .any(|window| window == ["--pid", "--fork"]));
         assert!(plan.security_claim.contains("prototype"));
         assert!(plan.security_claim.contains("cgroup v2 process attach"));
+        assert!(plan
+            .security_claim
+            .contains("bind-mount setup is not wired"));
         assert_eq!(plan.cgroup.cgroup_name, format!("agentbox-{}", spec.id));
         assert!(plan.landlock.default_deny);
         assert!(!plan.seccomp.requires_loader);

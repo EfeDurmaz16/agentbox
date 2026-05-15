@@ -77,7 +77,10 @@ before exec and can install a prototype BPF seccomp filter for supported
 syscall deny rules and a prototype write-oriented Landlock path-beneath
 filesystem ruleset. The Landlock loader currently handles write/create/remove
 access only so launcher binaries, dynamic loaders, and host libraries are not
-accidentally blocked before the real post-launch runner boundary exists. This is still a prototype primitive: live execution must be
+accidentally blocked before the real post-launch runner boundary exists. The
+executor currently maps the guest workspace working directory to the host
+workspace path; bind-mount setup inside the mount namespace is explicitly not
+wired yet. This is still a prototype primitive: live execution must be
 explicitly gated with `AGENTBOX_LINUX_NATIVE`, and it is not a complete sandbox
 claim until the remaining loaders and provider lifecycle are wired and tested on
 Linux.

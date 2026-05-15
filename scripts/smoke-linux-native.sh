@@ -44,7 +44,9 @@ cargo run -q -p agentbox-cli -- native-plan \
     .provider == "agentpod-linux"
     and .live_env_var == "AGENTBOX_LINUX_NATIVE"
     and .landlock.handled_access_mask == 434
-    and .security_claim == "prototype namespace/resource execution with cgroup v2 process attach; not a complete sandbox"
+    and .mount_namespace.workspace_bind_mount_wired == false
+    and (.mount_namespace.workspace_mount_claim | contains("not wired"))
+    and (.security_claim | contains("bind-mount setup is not wired"))
   ' >/dev/null
 
 (

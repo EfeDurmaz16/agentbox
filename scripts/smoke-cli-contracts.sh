@@ -179,7 +179,7 @@ validate_json "$TMPDIR/native-plan-auto.json" \
   --max-processes 64 \
   -- /bin/true >"$TMPDIR/native-plan-linux-seccomp.json"
 validate_json "$TMPDIR/native-plan-linux-seccomp.json" \
-  "data.get('provider') == 'agentpod-linux' and data.get('seccomp', {}).get('enabled') == True and data.get('seccomp', {}).get('syscall_rules', [])[0].get('syscall') == 'kill' and data.get('cgroup', {}).get('pids_max') == 64"
+  "data.get('provider') == 'agentpod-linux' and data.get('seccomp', {}).get('enabled') == True and data.get('seccomp', {}).get('syscall_rules', [])[0].get('syscall') == 'kill' and data.get('cgroup', {}).get('pids_max') == 64 and data.get('mount_namespace', {}).get('workspace_bind_mount_wired') == False and 'not wired' in data.get('mount_namespace', {}).get('workspace_mount_claim', '') and 'bind-mount setup is not wired' in data.get('security_claim', '')"
 
 log "checking high-risk provider recommendation truth"
 "${CLI[@]}" run --plan --risk high --json -- echo agentbox-contract >"$TMPDIR/run-plan-high.json"
