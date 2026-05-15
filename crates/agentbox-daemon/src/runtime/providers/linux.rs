@@ -668,6 +668,98 @@ impl LinuxNftablesPolicyDescriptor {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LinuxEbpfObservabilityPlan {
+    pub schema_version: i64,
+    pub session_id: String,
+    pub provider: String,
+    pub correlation: LinuxEbpfCorrelationPlan,
+    pub event_sources: Vec<LinuxEbpfEventSourcePlan>,
+    pub required_capabilities: Vec<String>,
+    pub required_maps: Vec<String>,
+    pub enforcement: LinuxEbpfEnforcementMode,
+    pub requires_loader: bool,
+    pub requires_linux: bool,
+    pub evidence_claim: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LinuxEbpfCorrelationPlan {
+    pub preferred_key: String,
+    pub cgroup_path: String,
+    pub pid_fallback: bool,
+    pub manifest_label_keys: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LinuxEbpfEventSourcePlan {
+    pub event_type: String,
+    pub source: String,
+    pub evidence_use: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LinuxEbpfEnforcementMode {
+    ObservedOnly,
+}
+
+pub struct LinuxEbpfObserverDescriptor;
+
+impl LinuxEbpfObserverDescriptor {
+    pub fn plan(spec: &MinipodSpec) -> Result<LinuxEbpfObservabilityPlan, RuntimeError> {
+        if spec.id.trim().is_empty() {
+            return Err(RuntimeError::ManifestRejected(
+                "eBPF observer session id cannot be empty".into(),
+            ));
+        }
+
+        Ok(LinuxEbpfObservabilityPlan {
+            schema_version: 1,
+            session_id: spec.id.clone(),
+            provider: "agentpod-linux".into(),
+            correlation: LinuxEbpfCorrelationPlan {
+                preferred_key: "cgroup_path".into(),
+                cgroup_path: format!("/sys/fs/cgroup/agentbox-{}", spec.id),
+                pid_fallback: true,
+                manifest_label_keys: sorted_label_keys(spec),
+            },
+            event_sources: vec![
+                LinuxEbpfEventSourcePlan {
+                    event_type: "linux.process.exec".into(),
+                    source: "tracepoint:sched:sched_process_exec".into(),
+                    evidence_use: "command lineage and binary path evidence".into(),
+                },
+                LinuxEbpfEventSourcePlan {
+                    event_type: "linux.process.exit".into(),
+                    source: "tracepoint:sched:sched_process_exit".into(),
+                    evidence_use: "process lifetime and exit correlation".into(),
+                },
+                LinuxEbpfEventSourcePlan {
+                    event_type: "linux.network.connect".into(),
+                    source: "cgroup/connect observer".into(),
+                    evidence_use: "destination metadata for network boundary evidence".into(),
+                },
+            ],
+            required_capabilities: vec!["CAP_BPF".into(), "CAP_PERFMON".into()],
+            required_maps: vec![
+                "agentbox_session_correlation".into(),
+                "agentbox_event_counters".into(),
+            ],
+            enforcement: LinuxEbpfEnforcementMode::ObservedOnly,
+            requires_loader: true,
+            requires_linux: true,
+            evidence_claim:
+                "eBPF observer descriptor only; observed events are not enforcement proof".into(),
+        })
+    }
+}
+
+fn sorted_label_keys(spec: &MinipodSpec) -> Vec<String> {
+    let mut keys: Vec<String> = spec.labels.keys().cloned().collect();
+    keys.sort();
+    keys
+}
+
 fn sanitize_nft_name(raw: &str) -> String {
     let sanitized: String = raw
         .chars()
@@ -718,6 +810,7 @@ pub struct LinuxAgentPodExecutionPlan {
     pub seccomp: LinuxSeccompPlan,
     pub landlock: LinuxLandlockPlan,
     pub nftables: LinuxNftablesPlan,
+    pub ebpf: LinuxEbpfObservabilityPlan,
     pub live_env_var: String,
     pub live_execution_enabled: bool,
     pub requires_linux: bool,
@@ -742,6 +835,7 @@ impl LinuxAgentPodExecutionPlan {
         let seccomp = LinuxSeccompProfileLoader::plan(&spec.seccomp)?;
         let landlock = LinuxLandlockRuleset::plan(spec)?;
         let nftables = LinuxNftablesPolicyDescriptor::plan(spec)?;
+        let ebpf = LinuxEbpfObserverDescriptor::plan(spec)?;
 
         let mut composed_argv = vec![
             "unshare".to_string(),
@@ -767,6 +861,7 @@ impl LinuxAgentPodExecutionPlan {
             seccomp,
             landlock,
             nftables,
+            ebpf,
             live_env_var: "AGENTBOX_LINUX_NATIVE".into(),
             live_execution_enabled: linux_native_execution_enabled(),
             requires_linux: true,
@@ -868,6 +963,7 @@ impl LinuxIsolationBenchmarkPlan {
         let seccomp = LinuxSeccompProfileLoader::plan(&spec.seccomp)?;
         let landlock = LinuxLandlockRuleset::plan(spec)?;
         let nftables = LinuxNftablesPolicyDescriptor::plan(spec)?;
+        let ebpf = LinuxEbpfObserverDescriptor::plan(spec)?;
 
         let mut user_mount_pid = vec![
             "unshare".to_string(),
@@ -954,6 +1050,15 @@ impl LinuxIsolationBenchmarkPlan {
                         .map(|rule| rule.selector.clone())
                         .collect(),
                     expected_boundary: "nftables egress policy descriptor only".into(),
+                },
+                LinuxIsolationBenchmarkLayer {
+                    name: "ebpf-observer-plan".into(),
+                    argv: ebpf
+                        .event_sources
+                        .iter()
+                        .map(|source| source.event_type.clone())
+                        .collect(),
+                    expected_boundary: "eBPF observability descriptor only".into(),
                 },
             ],
             live_env_var: "AGENTBOX_LINUX_BENCHMARK".into(),
@@ -1320,6 +1425,48 @@ mod tests {
         assert!(matches!(err, RuntimeError::ManifestRejected(_)));
     }
 
+    #[test]
+    fn ebpf_observer_plan_models_observed_only_evidence_sources() {
+        let mut spec = MinipodSpec::for_agent_task("hermes", "/tmp/agentbox-work");
+        spec.labels
+            .insert("policy.bundle".into(), "research-default".into());
+
+        let plan = LinuxEbpfObserverDescriptor::plan(&spec).unwrap();
+
+        assert_eq!(plan.schema_version, 1);
+        assert_eq!(plan.provider, "agentpod-linux");
+        assert_eq!(plan.session_id, spec.id);
+        assert_eq!(plan.correlation.preferred_key, "cgroup_path");
+        assert!(plan.correlation.cgroup_path.contains("agentbox-"));
+        assert!(plan.correlation.pid_fallback);
+        assert!(plan
+            .correlation
+            .manifest_label_keys
+            .contains(&"policy.bundle".to_string()));
+        assert!(plan
+            .event_sources
+            .iter()
+            .any(|source| source.event_type == "linux.process.exec"));
+        assert!(plan
+            .event_sources
+            .iter()
+            .any(|source| source.event_type == "linux.network.connect"));
+        assert!(plan.required_capabilities.contains(&"CAP_BPF".into()));
+        assert_eq!(plan.enforcement, LinuxEbpfEnforcementMode::ObservedOnly);
+        assert!(plan.requires_loader);
+        assert!(plan.evidence_claim.contains("not enforcement proof"));
+    }
+
+    #[test]
+    fn ebpf_observer_plan_rejects_empty_session_ids() {
+        let mut spec = MinipodSpec::for_agent_task("hermes", "/tmp/agentbox-work");
+        spec.id = " ".into();
+
+        let err = LinuxEbpfObserverDescriptor::plan(&spec).unwrap_err();
+
+        assert!(matches!(err, RuntimeError::ManifestRejected(_)));
+    }
+
     #[cfg(not(target_os = "linux"))]
     #[test]
     fn landlock_apply_is_explicitly_linux_only() {
@@ -1364,6 +1511,10 @@ mod tests {
         let plan = LinuxAgentPodExecutionPlan::from_minipod_spec(&spec, &command).unwrap();
         assert_eq!(plan.nftables.chain_name, "agentpod_egress");
         assert!(plan.nftables.requires_nftables);
+        assert_eq!(
+            plan.ebpf.enforcement,
+            LinuxEbpfEnforcementMode::ObservedOnly
+        );
     }
 
     #[test]
@@ -1418,6 +1569,7 @@ mod tests {
                 "seccomp-plan",
                 "landlock-plan",
                 "nftables-plan",
+                "ebpf-observer-plan",
             ]
         );
         assert_eq!(
@@ -1440,6 +1592,7 @@ mod tests {
             .argv
             .iter()
             .any(|arg| arg.contains("domain:")));
+        assert!(plan.layers[9].argv.contains(&"linux.process.exec".into()));
     }
 
     #[test]

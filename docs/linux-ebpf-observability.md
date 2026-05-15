@@ -96,7 +96,8 @@ The `enforcement` field must stay explicit:
 
 1. Keep `agentpod-linux` unavailable.
 2. Add a Linux-only `EbpfObserverPlan` model with program names, required
-   capabilities, map names, and event schemas.
+   capabilities, map names, and event schemas. The native execution plan now
+   carries this observed-only descriptor without adding a live loader.
 3. Add a userspace collector interface that can ingest events from a future eBPF
    loader without depending on the loader in the core runtime.
 4. Add session evidence export for observed process and network events.
