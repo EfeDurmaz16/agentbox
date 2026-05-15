@@ -132,9 +132,15 @@ assert data["cleanup_error"] is None
 PY
 
 mkdir -p "$TMPDIR/workspace"
-cargo run --locked -q -p agentbox-cli -- minipod-spec remote-smoke --risk medium --workspace "$TMPDIR/workspace" \
+printf remote-status-file-smoke >"$TMPDIR/status-file-token"
+cargo run --locked -q -p agentbox-cli -- minipod-spec remote-smoke \
+  --risk medium \
+  --workspace "$TMPDIR/workspace" \
+  --credential-env AGENTBOX_REMOTE_TOKEN=AGENTBOX_REMOTE_AGENTPOD_TOKEN \
+  --credential-file "remote_token=$TMPDIR/status-file-token:/workspace/.agentbox/credentials/remote-token" \
   >"$TMPDIR/spec.json"
-python3 - "$TMPDIR/spec.json" "$TMPDIR/handshake-ack.json" >"$TMPDIR/create-request.json" <<'PY'
+python3 - "$TMPDIR/spec.json" "$TMPDIR/handshake-ack.json" "$TMPDIR/status-file-token" >"$TMPDIR/create-request.json" <<'PY'
+import hashlib
 import json
 import sys
 from datetime import datetime, timezone
@@ -143,6 +149,8 @@ with open(sys.argv[1], "r", encoding="utf-8") as fh:
     spec = json.load(fh)
 with open(sys.argv[2], "r", encoding="utf-8") as fh:
     handshake_ack = json.load(fh)
+with open(sys.argv[3], "r", encoding="utf-8") as fh:
+    credential_contents = fh.read()
 
 now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 json.dump({
@@ -175,6 +183,14 @@ json.dump({
     },
     "handshake_ack": handshake_ack,
     "spec": spec,
+    "credential_files": [{
+        "name": "remote_token",
+        "guest_path": "/workspace/.agentbox/credentials/remote-token",
+        "sha256": hashlib.sha256(credential_contents.encode("utf-8")).hexdigest(),
+        "bytes": len(credential_contents.encode("utf-8")),
+        "contents_utf8": credential_contents,
+        "one_time": True,
+    }],
 }, sys.stdout)
 PY
 
@@ -184,6 +200,30 @@ curl -fsS "http://127.0.0.1:${PORT}/sessions" \
   >"$TMPDIR/create-response.json"
 SESSION_ID="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["session_id"])' "$TMPDIR/create-response.json")"
 WORKER_SESSION_ID="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["worker_session_id"])' "$TMPDIR/create-response.json")"
+
+curl -fsS "http://127.0.0.1:${PORT}/sessions/${WORKER_SESSION_ID}/evidence/status?session_id=${SESSION_ID}" \
+  >"$TMPDIR/create-status.json"
+
+python3 - "$TMPDIR/create-status.json" "$TMPDIR/status-file-token" <<'PY'
+import hashlib
+import json
+import sys
+
+with open(sys.argv[1], "r", encoding="utf-8") as fh:
+    data = json.load(fh)
+with open(sys.argv[2], "r", encoding="utf-8") as fh:
+    file_token = fh.read()
+
+credentials = {credential["name"]: credential for credential in data["credentials"]}
+assert credentials["AGENTBOX_REMOTE_TOKEN"]["kind"] == "EnvVar"
+assert "sha256" not in credentials["AGENTBOX_REMOTE_TOKEN"]
+assert credentials["remote_token"]["kind"] == "FileMount"
+assert credentials["remote_token"]["guest_path"] == "/workspace/.agentbox/credentials/remote-token"
+assert credentials["remote_token"]["sha256"] == hashlib.sha256(file_token.encode("utf-8")).hexdigest()
+assert credentials["remote_token"]["bytes"] == len(file_token.encode("utf-8"))
+assert credentials["remote_token"]["one_time"] is True
+assert file_token not in json.dumps(data)
+PY
 
 curl -fsS "http://127.0.0.1:${PORT}/sessions/${WORKER_SESSION_ID}/exec" \
   -H 'content-type: application/json' \
