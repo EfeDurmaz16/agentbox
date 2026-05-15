@@ -1069,18 +1069,15 @@ fn compile_linux_seccomp_filter(
     let audit_arch = linux_seccomp_audit_arch()
         .ok_or("seccomp BPF loader does not support this CPU architecture")?;
     let mut filter = vec![
-        libc::BPF_STMT((libc::BPF_LD | libc::BPF_W | libc::BPF_ABS) as u16, 4),
-        libc::BPF_JUMP(
-            (libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K) as u16,
+        bpf_stmt(libc::BPF_LD | libc::BPF_W | libc::BPF_ABS, 4),
+        bpf_jump(
+            libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K,
             audit_arch,
             1,
             0,
         ),
-        libc::BPF_STMT(
-            (libc::BPF_RET | libc::BPF_K) as u16,
-            libc::SECCOMP_RET_KILL_PROCESS,
-        ),
-        libc::BPF_STMT((libc::BPF_LD | libc::BPF_W | libc::BPF_ABS) as u16, 0),
+        bpf_stmt(libc::BPF_RET | libc::BPF_K, libc::SECCOMP_RET_KILL_PROCESS),
+        bpf_stmt(libc::BPF_LD | libc::BPF_W | libc::BPF_ABS, 0),
     ];
     for rule in &plan.syscall_rules {
         let syscall = linux_syscall_number(&rule.syscall).ok_or_else(|| {
@@ -1089,23 +1086,43 @@ fn compile_linux_seccomp_filter(
                 rule.syscall
             )
         })?;
-        filter.push(libc::BPF_JUMP(
-            (libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K) as u16,
+        filter.push(bpf_jump(
+            libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K,
             syscall,
             0,
             1,
         ));
-        filter.push(libc::BPF_STMT(
-            (libc::BPF_RET | libc::BPF_K) as u16,
+        filter.push(bpf_stmt(
+            libc::BPF_RET | libc::BPF_K,
             seccomp_action_to_bpf(&rule.action)?,
         ));
     }
-    filter.push(libc::BPF_STMT(
-        (libc::BPF_RET | libc::BPF_K) as u16,
+    filter.push(bpf_stmt(
+        libc::BPF_RET | libc::BPF_K,
         seccomp_action_to_bpf(&plan.default_action)?,
     ));
 
     Ok(Some(filter))
+}
+
+#[cfg(target_os = "linux")]
+fn bpf_stmt(code: u32, k: u32) -> libc::sock_filter {
+    libc::sock_filter {
+        code: code as u16,
+        jt: 0,
+        jf: 0,
+        k,
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn bpf_jump(code: u32, k: u32, jt: u8, jf: u8) -> libc::sock_filter {
+    libc::sock_filter {
+        code: code as u16,
+        jt,
+        jf,
+        k,
+    }
 }
 
 #[cfg(target_os = "linux")]
