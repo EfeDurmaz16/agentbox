@@ -843,6 +843,7 @@ fn cmd_setup(json: bool, dry_run: bool, provider: Option<String>) {
 
     let report = build_doctor_report();
     let plan = setup_plan_from_doctor(&report, provider_filter.as_deref());
+    let operator_commands = setup_operator_commands(&plan);
     let setup_report = SetupReport {
         schema_version: 1,
         platform: std::env::consts::OS.to_string(),
@@ -851,6 +852,7 @@ fn cmd_setup(json: bool, dry_run: bool, provider: Option<String>) {
         actions,
         config: config_summary,
         shims: shim_summary,
+        operator_commands,
         setup_plan: plan,
     };
 
@@ -880,6 +882,13 @@ fn cmd_setup(json: bool, dry_run: bool, provider: Option<String>) {
     println!();
     for action in &setup_report.actions {
         println!("{}: {}", action.status, action.detail);
+    }
+    if !setup_report.operator_commands.is_empty() {
+        println!();
+        println!("Operator commands:");
+        for command in &setup_report.operator_commands {
+            println!("  {command}");
+        }
     }
     println!();
     println!("Next:");
@@ -1294,6 +1303,7 @@ struct SetupReport {
     actions: Vec<SetupAction>,
     config: Option<SetupConfigSummary>,
     shims: Option<SetupShimSummary>,
+    operator_commands: Vec<String>,
     setup_plan: SetupPlan,
 }
 
@@ -1361,10 +1371,21 @@ fn setup_should_install_shims(provider: Option<&str>) -> bool {
     matches!(provider, None | Some("all") | Some("direct-host"))
 }
 
+fn setup_operator_commands(plan: &SetupPlan) -> Vec<String> {
+    let mut commands = plan
+        .steps
+        .iter()
+        .filter_map(|step| step.command.clone())
+        .collect::<Vec<_>>();
+    commands.sort();
+    commands.dedup();
+    commands
+}
+
 fn normalize_setup_provider_filter(provider: &str) -> String {
     let provider = provider.trim().to_ascii_lowercase();
     match provider.as_str() {
-        "" | "auto" => "all".to_string(),
+        "" | "auto" | "all" => "all".to_string(),
         "direct" | "host" | "direct-host" => "direct-host".to_string(),
         "podman" | "compat" => "podman".to_string(),
         "remote" | "remote-agentpod" => "remote-agentpod".to_string(),
@@ -6662,6 +6683,41 @@ mod tests {
         assert!(!setup_should_install_shims(Some("podman")));
         assert!(!setup_should_install_shims(Some("remote-agentpod")));
         assert!(!setup_should_install_shims(Some("agentpod-macos")));
+    }
+
+    #[test]
+    fn setup_operator_commands_are_stable_and_deduplicated() {
+        let report = doctor_report(vec![
+            doctor_check(
+                "daemon socket",
+                false,
+                "missing".into(),
+                "run `agentbox start`",
+            ),
+            doctor_check(
+                "daemon process",
+                false,
+                "missing".into(),
+                "run `agentbox start`",
+            ),
+            doctor_advisory_check(
+                "remote-agentpod endpoint",
+                false,
+                "missing".into(),
+                "set endpoint",
+            ),
+        ]);
+        let plan = setup_plan_from_doctor(&report, Some("all"));
+        let commands = setup_operator_commands(&plan);
+
+        assert_eq!(
+            commands,
+            vec![
+                "agentbox start".to_string(),
+                "export AGENTBOX_REMOTE_AGENTPOD_ENDPOINT=https://worker.example.com/agentpod"
+                    .to_string()
+            ]
+        );
     }
 
     #[test]
