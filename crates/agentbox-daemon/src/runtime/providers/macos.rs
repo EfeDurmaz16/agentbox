@@ -20,9 +20,38 @@ pub struct MacOsVirtualizationCellPlan {
     pub memory_bytes: u64,
     pub workspace_host_path: String,
     pub workspace_guest_path: String,
+    pub cell_config: MacOsVmCellConfigPlan,
     pub shared_directories: Vec<MacOsSharedDirectoryPlan>,
     pub host_bridge: MacOsHostBridgePlan,
     pub requires_apple_virtualization: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MacOsVmCellConfigPlan {
+    pub workspace_mount: MacOsWorkspaceMountPlan,
+    pub credential_channels: Vec<MacOsCredentialChannelPlan>,
+    pub bridge_socket_guest_path: String,
+    pub evidence_spool_guest_path: String,
+    pub shutdown_policy: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MacOsWorkspaceMountPlan {
+    pub host_path: String,
+    pub guest_path: String,
+    pub writable: bool,
+    pub review_required: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MacOsCredentialChannelPlan {
+    pub name: String,
+    pub kind: crate::runtime::types::CredentialGrantKind,
+    pub target: String,
+    pub delivery: String,
+    pub guest_path: Option<String>,
+    pub requires_approval: bool,
+    pub one_time: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -74,6 +103,31 @@ impl MacOsVirtualizationCellPlan {
             }
         }));
 
+        let workspace_mount = MacOsWorkspaceMountPlan {
+            host_path: spec.filesystem.workspace_host_path.display().to_string(),
+            guest_path: spec.filesystem.workspace_guest_path.clone(),
+            writable: true,
+            review_required: !matches!(
+                spec.workspace_mode,
+                crate::runtime::types::AgentPodWorkspaceMode::Direct
+            ),
+        };
+        let credential_channels = spec
+            .credentials
+            .grants
+            .iter()
+            .map(|grant| MacOsCredentialChannelPlan {
+                name: grant.name.clone(),
+                kind: grant.kind.clone(),
+                target: grant.target.clone(),
+                delivery: macos_credential_delivery(&grant.kind).to_string(),
+                guest_path: macos_credential_guest_path(&grant.kind, &grant.name),
+                requires_approval: grant.requires_approval,
+                one_time: grant.one_time,
+            })
+            .collect();
+        let bridge_socket_guest_path = "/run/agentbox/bridge.sock".to_string();
+
         Ok(Self {
             schema_version: 1,
             bundle_id: format!("dev.agentbox.agentpod.{}", spec.id),
@@ -82,15 +136,49 @@ impl MacOsVirtualizationCellPlan {
             memory_bytes: spec.resources.memory_bytes,
             workspace_host_path: spec.filesystem.workspace_host_path.display().to_string(),
             workspace_guest_path: spec.filesystem.workspace_guest_path.clone(),
+            cell_config: MacOsVmCellConfigPlan {
+                workspace_mount,
+                credential_channels,
+                bridge_socket_guest_path: bridge_socket_guest_path.clone(),
+                evidence_spool_guest_path: "/var/lib/agentbox/evidence".into(),
+                shutdown_policy: "destroy-vm-cell-and-seal-evidence".into(),
+            },
             shared_directories,
             host_bridge: MacOsHostBridgePlan {
                 transport: HostBridgeTransportKind::Vsock,
-                guest_socket_path: "/run/agentbox/bridge.sock".into(),
+                guest_socket_path: bridge_socket_guest_path,
                 policy_endpoint: "agentbox.policy.v1.Decide".into(),
                 evidence_endpoint: "agentbox.evidence.v1.Append".into(),
             },
             requires_apple_virtualization: true,
         })
+    }
+}
+
+fn macos_credential_delivery(kind: &crate::runtime::types::CredentialGrantKind) -> &'static str {
+    match kind {
+        crate::runtime::types::CredentialGrantKind::EnvVar => "host-bridge-env-injection",
+        crate::runtime::types::CredentialGrantKind::FileMount => "read-only-shared-directory",
+        crate::runtime::types::CredentialGrantKind::Socket => "host-bridge-socket-proxy",
+        crate::runtime::types::CredentialGrantKind::ProviderToken => {
+            "broker-mediated-provider-token"
+        }
+    }
+}
+
+fn macos_credential_guest_path(
+    kind: &crate::runtime::types::CredentialGrantKind,
+    name: &str,
+) -> Option<String> {
+    match kind {
+        crate::runtime::types::CredentialGrantKind::FileMount => {
+            Some(format!("/run/agentbox/credentials/{name}"))
+        }
+        crate::runtime::types::CredentialGrantKind::Socket => {
+            Some(format!("/run/agentbox/sockets/{name}.sock"))
+        }
+        crate::runtime::types::CredentialGrantKind::EnvVar
+        | crate::runtime::types::CredentialGrantKind::ProviderToken => None,
     }
 }
 
@@ -618,7 +706,7 @@ fn cpu_shares_to_vcpu(cpu_shares: u32) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runtime::types::{MountRule, ResourcePolicy};
+    use crate::runtime::types::{CredentialGrant, CredentialGrantKind, MountRule, ResourcePolicy};
     use std::collections::HashMap;
     use std::path::PathBuf;
 
@@ -645,6 +733,22 @@ mod tests {
             mode: MountMode::ReadOnly,
             kind: MountKind::ReadOnlyHost,
         });
+        spec.credentials.grants.push(CredentialGrant {
+            name: "AWS_PROFILE".into(),
+            kind: CredentialGrantKind::EnvVar,
+            target: "AWS_PROFILE".into(),
+            one_time: true,
+            requires_approval: true,
+            expires_at: None,
+        });
+        spec.credentials.grants.push(CredentialGrant {
+            name: "deploy_key".into(),
+            kind: CredentialGrantKind::FileMount,
+            target: "/tmp/deploy-key".into(),
+            one_time: true,
+            requires_approval: true,
+            expires_at: None,
+        });
 
         let plan = MacOsVirtualizationCellPlan::from_minipod_spec(&spec).unwrap();
 
@@ -655,6 +759,29 @@ mod tests {
         assert_eq!(plan.memory_bytes, 2_147_483_648);
         assert_eq!(plan.workspace_guest_path, "/workspace");
         assert_eq!(plan.host_bridge.transport, HostBridgeTransportKind::Vsock);
+        assert_eq!(
+            plan.cell_config.workspace_mount.host_path,
+            "/tmp/agentbox-work"
+        );
+        assert_eq!(
+            plan.cell_config.bridge_socket_guest_path,
+            plan.host_bridge.guest_socket_path
+        );
+        assert_eq!(
+            plan.cell_config.evidence_spool_guest_path,
+            "/var/lib/agentbox/evidence"
+        );
+        assert_eq!(plan.cell_config.credential_channels.len(), 2);
+        assert!(plan.cell_config.credential_channels.iter().any(|channel| {
+            channel.name == "AWS_PROFILE"
+                && channel.delivery == "host-bridge-env-injection"
+                && channel.guest_path.is_none()
+        }));
+        assert!(plan.cell_config.credential_channels.iter().any(|channel| {
+            channel.name == "deploy_key"
+                && channel.delivery == "read-only-shared-directory"
+                && channel.guest_path.as_deref() == Some("/run/agentbox/credentials/deploy_key")
+        }));
         assert!(plan.requires_apple_virtualization);
         assert_eq!(plan.shared_directories.len(), 2);
         assert!(!plan.shared_directories[0].read_only);
