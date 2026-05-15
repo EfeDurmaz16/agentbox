@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::fs;
 use std::io::{self, Write};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::thread;
 use std::time::Duration;
@@ -5265,17 +5265,39 @@ fn apply_workspace_mode(
         return;
     }
 
-    let overlay_base = overlay_dir.unwrap_or_else(|| {
-        agentbox_dir()
-            .join("overlays")
-            .join(spec.id.clone())
-            .join(mode.label())
-    });
+    let overlay_base = overlay_dir.unwrap_or_else(|| default_workspace_overlay_base(spec, &mode));
     let mut overlay = WorkspaceOverlayPolicy::review_required(Some(overlay_base));
     if mode == AgentPodWorkspaceMode::Ephemeral {
         overlay.mode = WorkspaceOverlayMode::DiscardOnDestroy;
     }
     spec.filesystem.workspace_overlay = overlay;
+}
+
+fn default_workspace_overlay_base(
+    spec: &agentbox_daemon::runtime::types::MinipodSpec,
+    mode: &agentbox_daemon::runtime::types::AgentPodWorkspaceMode,
+) -> PathBuf {
+    let preferred = agentbox_dir()
+        .join("overlays")
+        .join(spec.id.clone())
+        .join(mode.label());
+    let workspace = realish_cli_path(&spec.filesystem.workspace_host_path);
+    if !path_is_inside(&preferred, &workspace) {
+        return preferred;
+    }
+
+    let temp_dir = std::env::temp_dir();
+    let mut candidates = vec![temp_dir.join("agentbox-overlays")];
+    if let Some(parent) = temp_dir.parent() {
+        candidates.push(parent.join("agentbox-overlays"));
+    }
+    candidates.push(PathBuf::from("/tmp/agentbox-overlays"));
+
+    candidates
+        .into_iter()
+        .map(|root| root.join(spec.id.clone()).join(mode.label()))
+        .find(|candidate| !path_is_inside(candidate, &workspace))
+        .unwrap_or_else(|| preferred)
 }
 
 fn default_workspace_mode_for_risk(
@@ -5307,6 +5329,48 @@ fn parse_workspace_mode(raw: &str) -> agentbox_daemon::runtime::types::AgentPodW
             std::process::exit(1);
         }
     }
+}
+
+fn normalize_cli_path(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+
+    for component in path.components() {
+        match component {
+            Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+            Component::RootDir => normalized.push(component.as_os_str()),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            Component::Normal(part) => normalized.push(part),
+        }
+    }
+
+    normalized
+}
+
+fn realish_cli_path(path: &Path) -> PathBuf {
+    if let Ok(canonical) = path.canonicalize() {
+        return canonical;
+    }
+
+    let mut suffix = PathBuf::new();
+    let mut cursor = path;
+    while let Some(parent) = cursor.parent() {
+        if let Some(name) = cursor.file_name() {
+            suffix = PathBuf::from(name).join(suffix);
+        }
+        if let Ok(canonical_parent) = parent.canonicalize() {
+            return normalize_cli_path(&canonical_parent.join(suffix));
+        }
+        cursor = parent;
+    }
+
+    normalize_cli_path(path)
+}
+
+fn path_is_inside(path: &Path, parent: &Path) -> bool {
+    !parent.as_os_str().is_empty() && realish_cli_path(path).starts_with(parent)
 }
 
 fn load_task_policy_bundle(
@@ -7487,6 +7551,20 @@ mod tests {
             WorkspaceWritePolicy::Direct
         ));
         assert!(!high.filesystem.workspace_overlay.is_enabled());
+    }
+
+    #[test]
+    fn default_workspace_overlay_base_avoids_workspace_root() {
+        let mut spec = MinipodSpec::for_agent_task("codex", "/tmp/agentbox-work");
+        spec.id = "01overlaytest".into();
+        spec.filesystem.workspace_host_path = agentbox_dir();
+
+        let overlay_base =
+            default_workspace_overlay_base(&spec, &AgentPodWorkspaceMode::OverlayReview);
+
+        assert!(!normalize_cli_path(&overlay_base)
+            .starts_with(normalize_cli_path(&spec.filesystem.workspace_host_path)));
+        assert!(overlay_base.starts_with(std::env::temp_dir()));
     }
 
     #[test]

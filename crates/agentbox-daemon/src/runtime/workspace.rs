@@ -1,8 +1,11 @@
 use std::fmt;
 use std::fs;
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
+
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -30,6 +33,15 @@ pub enum WorkspaceOverlayError {
         overlay_path: PathBuf,
         workspace_path: PathBuf,
     },
+    WorkspaceSymlinkEscapes {
+        link_path: PathBuf,
+        target_path: PathBuf,
+        workspace_path: PathBuf,
+    },
+    WorkspaceHardlinkRejected {
+        path: PathBuf,
+        link_count: u64,
+    },
     Io(String),
 }
 
@@ -56,6 +68,23 @@ impl fmt::Display for WorkspaceOverlayError {
                 "workspace overlay path {} must not be inside workspace {}",
                 overlay_path.display(),
                 workspace_path.display()
+            ),
+            Self::WorkspaceSymlinkEscapes {
+                link_path,
+                target_path,
+                workspace_path,
+            } => write!(
+                f,
+                "workspace symlink {} points outside workspace {}: {}",
+                link_path.display(),
+                workspace_path.display(),
+                target_path.display()
+            ),
+            Self::WorkspaceHardlinkRejected { path, link_count } => write!(
+                f,
+                "workspace hardlink {} is not safe for projection (link count: {})",
+                path.display(),
+                link_count
             ),
             Self::Io(message) => write!(f, "{message}"),
         }
@@ -149,7 +178,11 @@ impl WorkspaceProjectionMaterializer {
 
         let lower_host_path = spec.filesystem.workspace_host_path.clone();
         ensure_empty_dir(&allocation.upper_host_path)?;
-        copy_tree(&lower_host_path, &allocation.upper_host_path)?;
+        copy_tree(
+            &lower_host_path,
+            &allocation.upper_host_path,
+            &lower_host_path,
+        )?;
 
         spec.labels.insert(
             "agentbox.workspace.lower".to_string(),
@@ -261,6 +294,7 @@ impl WorkspaceProjectionApplier {
             return Ok(None);
         };
 
+        reject_hardlinked_changed_files(&lower_host_path, &snapshot.changed_files)?;
         apply_patch_to_workspace(&lower_host_path, &patch)?;
 
         Ok(Some(WorkspaceProjectionApply {
@@ -489,7 +523,7 @@ fn ensure_empty_dir(path: &Path) -> Result<(), WorkspaceOverlayError> {
     Ok(())
 }
 
-fn copy_tree(src: &Path, dst: &Path) -> Result<(), WorkspaceOverlayError> {
+fn copy_tree(src: &Path, dst: &Path, workspace_root: &Path) -> Result<(), WorkspaceOverlayError> {
     for entry in fs::read_dir(src).map_err(|err| {
         WorkspaceOverlayError::Io(format!(
             "failed to read workspace path {}: {err}",
@@ -503,13 +537,27 @@ fn copy_tree(src: &Path, dst: &Path) -> Result<(), WorkspaceOverlayError> {
             ))
         })?;
         let source_path = entry.path();
+        if should_skip_projected_workspace_entry(&source_path) {
+            continue;
+        }
         let target_path = dst.join(entry.file_name());
-        copy_entry(&source_path, &target_path)?;
+        copy_entry(&source_path, &target_path, workspace_root)?;
     }
     Ok(())
 }
 
-fn copy_entry(src: &Path, dst: &Path) -> Result<(), WorkspaceOverlayError> {
+fn should_skip_projected_workspace_entry(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+
+    matches!(
+        name,
+        "target" | "node_modules" | ".next" | ".turbo" | ".svelte-kit" | "dist" | "build"
+    )
+}
+
+fn copy_entry(src: &Path, dst: &Path, workspace_root: &Path) -> Result<(), WorkspaceOverlayError> {
     let metadata = fs::symlink_metadata(src).map_err(|err| {
         WorkspaceOverlayError::Io(format!(
             "failed to inspect workspace entry {}: {err}",
@@ -518,6 +566,7 @@ fn copy_entry(src: &Path, dst: &Path) -> Result<(), WorkspaceOverlayError> {
     })?;
 
     if metadata.file_type().is_symlink() {
+        reject_symlink_escape(src, workspace_root)?;
         copy_symlink(src, dst)?;
         return Ok(());
     }
@@ -529,7 +578,7 @@ fn copy_entry(src: &Path, dst: &Path) -> Result<(), WorkspaceOverlayError> {
                 dst.display()
             ))
         })?;
-        copy_tree(src, dst)?;
+        copy_tree(src, dst, workspace_root)?;
         return Ok(());
     }
 
@@ -541,6 +590,88 @@ fn copy_entry(src: &Path, dst: &Path) -> Result<(), WorkspaceOverlayError> {
         ))
     })?;
     Ok(())
+}
+
+fn reject_symlink_escape(
+    link_path: &Path,
+    workspace_root: &Path,
+) -> Result<(), WorkspaceOverlayError> {
+    let target = fs::read_link(link_path).map_err(|err| {
+        WorkspaceOverlayError::Io(format!(
+            "failed to read workspace symlink {}: {err}",
+            link_path.display()
+        ))
+    })?;
+    let workspace_root = normalize_path(workspace_root);
+    let resolved = if target.is_absolute() {
+        normalize_path(&target)
+    } else {
+        let parent = link_path.parent().unwrap_or_else(|| Path::new(""));
+        normalize_path(&parent.join(&target))
+    };
+
+    if !resolved.starts_with(&workspace_root) {
+        return Err(WorkspaceOverlayError::WorkspaceSymlinkEscapes {
+            link_path: link_path.to_path_buf(),
+            target_path: resolved,
+            workspace_path: workspace_root,
+        });
+    }
+
+    Ok(())
+}
+
+#[cfg(unix)]
+fn reject_hardlinked_changed_files(
+    workspace: &Path,
+    changed_files: &[String],
+) -> Result<(), WorkspaceOverlayError> {
+    for changed_file in changed_files {
+        let path = workspace.join(changed_file);
+        let Ok(metadata) = fs::symlink_metadata(&path) else {
+            continue;
+        };
+        reject_hardlink(&path, &metadata)?;
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn reject_hardlink(path: &Path, metadata: &fs::Metadata) -> Result<(), WorkspaceOverlayError> {
+    let link_count = metadata.nlink();
+    if metadata.is_file() && link_count > 1 {
+        return Err(WorkspaceOverlayError::WorkspaceHardlinkRejected {
+            path: path.to_path_buf(),
+            link_count,
+        });
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn reject_hardlinked_changed_files(
+    _workspace: &Path,
+    _changed_files: &[String],
+) -> Result<(), WorkspaceOverlayError> {
+    Ok(())
+}
+
+fn normalize_path(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+
+    for component in path.components() {
+        match component {
+            Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+            Component::RootDir => normalized.push(component.as_os_str()),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            Component::Normal(part) => normalized.push(part),
+        }
+    }
+
+    normalized
 }
 
 #[cfg(unix)]
@@ -898,6 +1029,39 @@ mod tests {
     }
 
     #[test]
+    fn projection_materializer_skips_generated_workspace_directories() {
+        let workspace = unique_dir("projection-generated-workspace");
+        let overlay = unique_dir("projection-generated-overlay");
+        let _ = fs::remove_dir_all(&workspace);
+        let _ = fs::remove_dir_all(&overlay);
+        fs::create_dir_all(workspace.join("src")).unwrap();
+        fs::create_dir_all(workspace.join("target").join("debug")).unwrap();
+        fs::write(workspace.join("src").join("main.rs"), "fn main() {}\n").unwrap();
+        fs::write(
+            workspace.join("target").join("debug").join("cache"),
+            "cache\n",
+        )
+        .unwrap();
+        let mut spec = MinipodSpec::for_agent_task("hermes", &workspace);
+        spec.workspace_mode = AgentPodWorkspaceMode::OverlayReview;
+        spec.filesystem.workspace_overlay =
+            WorkspaceOverlayPolicy::review_required(Some(overlay.clone()));
+
+        let projection = WorkspaceProjectionMaterializer::materialize(&mut spec)
+            .unwrap()
+            .expect("workspace should be projected");
+
+        assert!(projection
+            .projected_host_path
+            .join("src")
+            .join("main.rs")
+            .exists());
+        assert!(!projection.projected_host_path.join("target").exists());
+        let _ = fs::remove_dir_all(&workspace);
+        let _ = fs::remove_dir_all(&overlay);
+    }
+
+    #[test]
     fn projection_materializer_rejects_non_empty_upper_layer() {
         let workspace = unique_dir("projection-nonempty-workspace");
         let overlay = unique_dir("projection-nonempty-overlay");
@@ -918,6 +1082,67 @@ mod tests {
             err,
             WorkspaceOverlayError::OverlayUpperNotEmpty(_)
         ));
+        let _ = fs::remove_dir_all(&workspace);
+        let _ = fs::remove_dir_all(&overlay);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn projection_materializer_rejects_symlink_escape() {
+        let workspace = unique_dir("projection-symlink-escape-workspace");
+        let outside = unique_dir("projection-symlink-escape-outside");
+        let overlay = unique_dir("projection-symlink-escape-overlay");
+        let _ = fs::remove_dir_all(&workspace);
+        let _ = fs::remove_dir_all(&outside);
+        let _ = fs::remove_dir_all(&overlay);
+        fs::create_dir_all(&workspace).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("secret.txt"), "outside\n").unwrap();
+        std::os::unix::fs::symlink(outside.join("secret.txt"), workspace.join("secret-link"))
+            .unwrap();
+        let mut spec = MinipodSpec::for_agent_task("hermes", &workspace);
+        spec.workspace_mode = AgentPodWorkspaceMode::OverlayReview;
+        spec.filesystem.workspace_overlay =
+            WorkspaceOverlayPolicy::review_required(Some(overlay.clone()));
+
+        let err = WorkspaceProjectionMaterializer::materialize(&mut spec).unwrap_err();
+
+        assert!(matches!(
+            err,
+            WorkspaceOverlayError::WorkspaceSymlinkEscapes { .. }
+        ));
+        assert_eq!(
+            fs::read_to_string(outside.join("secret.txt")).unwrap(),
+            "outside\n"
+        );
+        let _ = fs::remove_dir_all(&workspace);
+        let _ = fs::remove_dir_all(&outside);
+        let _ = fs::remove_dir_all(&overlay);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn projection_materializer_preserves_internal_symlink() {
+        let workspace = unique_dir("projection-internal-symlink-workspace");
+        let overlay = unique_dir("projection-internal-symlink-overlay");
+        let _ = fs::remove_dir_all(&workspace);
+        let _ = fs::remove_dir_all(&overlay);
+        fs::create_dir_all(workspace.join("docs")).unwrap();
+        fs::write(workspace.join("docs").join("guide.md"), "inside\n").unwrap();
+        std::os::unix::fs::symlink("docs/guide.md", workspace.join("guide-link")).unwrap();
+        let mut spec = MinipodSpec::for_agent_task("hermes", &workspace);
+        spec.workspace_mode = AgentPodWorkspaceMode::OverlayReview;
+        spec.filesystem.workspace_overlay =
+            WorkspaceOverlayPolicy::review_required(Some(overlay.clone()));
+
+        let projection = WorkspaceProjectionMaterializer::materialize(&mut spec)
+            .unwrap()
+            .expect("workspace should be projected");
+
+        assert_eq!(
+            fs::read_link(projection.projected_host_path.join("guide-link")).unwrap(),
+            PathBuf::from("docs/guide.md")
+        );
         let _ = fs::remove_dir_all(&workspace);
         let _ = fs::remove_dir_all(&overlay);
     }
@@ -1021,6 +1246,67 @@ mod tests {
         );
         assert!(applied.projected_host_path.exists());
         let _ = fs::remove_dir_all(&workspace);
+        let _ = fs::remove_dir_all(&overlay);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn projection_applier_rejects_hardlinked_changed_files() {
+        let workspace = unique_dir("apply-hardlink-escape-workspace");
+        let outside = unique_dir("apply-hardlink-escape-outside");
+        let overlay = unique_dir("apply-hardlink-escape-overlay");
+        let _ = fs::remove_dir_all(&workspace);
+        let _ = fs::remove_dir_all(&outside);
+        let _ = fs::remove_dir_all(&overlay);
+        fs::create_dir_all(&workspace).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        run_git(&workspace, &["init"]);
+        run_git(
+            &workspace,
+            &["config", "user.email", "agentbox@example.test"],
+        );
+        run_git(&workspace, &["config", "user.name", "Agentbox Test"]);
+        fs::write(outside.join("shared.txt"), "outside\n").unwrap();
+        fs::hard_link(outside.join("shared.txt"), workspace.join("shared.txt")).unwrap();
+        run_git(&workspace, &["add", "shared.txt"]);
+        run_git(&workspace, &["commit", "-m", "initial"]);
+        let mut spec = MinipodSpec::for_agent_task("hermes", &workspace);
+        spec.workspace_mode = AgentPodWorkspaceMode::OverlayReview;
+        spec.filesystem.workspace_overlay =
+            WorkspaceOverlayPolicy::review_required(Some(overlay.clone()));
+        let projection = WorkspaceProjectionMaterializer::materialize(&mut spec)
+            .unwrap()
+            .expect("workspace should be projected");
+        fs::write(
+            projection.projected_host_path.join("shared.txt"),
+            "outside\nchanged\n",
+        )
+        .unwrap();
+        let session = RuntimeSession {
+            id: "01agentboxsession".into(),
+            name: spec.name.clone(),
+            provider: "podman".into(),
+            platform: "linux-vm".into(),
+            status: RuntimeStatus::Stopped,
+            spec,
+            approval_grants: vec![],
+            transcripts: vec![],
+            started_at: Utc::now(),
+            stopped_at: Some(Utc::now()),
+        };
+
+        let err = WorkspaceProjectionApplier::apply(&session).unwrap_err();
+
+        assert!(matches!(
+            err,
+            WorkspaceOverlayError::WorkspaceHardlinkRejected { .. }
+        ));
+        assert_eq!(
+            fs::read_to_string(outside.join("shared.txt")).unwrap(),
+            "outside\n"
+        );
+        let _ = fs::remove_dir_all(&workspace);
+        let _ = fs::remove_dir_all(&outside);
         let _ = fs::remove_dir_all(&overlay);
     }
 
