@@ -3037,6 +3037,14 @@ async fn cmd_run(options: RunOptions) {
                         eprint!("{}", result.stderr);
                     }
                     println!("--- exit code: {} ---", result.exit_code);
+                    let review_commands = review_commands_for_session(&session);
+                    if !review_commands.is_empty() {
+                        println!();
+                        println!("Review commands:");
+                        for command in review_commands {
+                            println!("  {}", command);
+                        }
+                    }
 
                     // Cleanup prompt
                     eprint!("Destroy minipod {}? [Y/n] ", session.name);
