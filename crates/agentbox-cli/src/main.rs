@@ -6255,11 +6255,6 @@ fn cmd_native_plan(
     risk: String,
     command: Vec<String>,
 ) {
-    use agentbox_daemon::runtime::providers::linux::LinuxAgentPodExecutionPlan;
-    use agentbox_daemon::runtime::providers::macos::MacOsAgentPodExecutionPlan;
-    use agentbox_daemon::runtime::providers::windows::WindowsAgentPodExecutionPlan;
-    use agentbox_daemon::runtime::types::{ExecCommand, MinipodSpec};
-
     let provider = resolve_native_plan_provider(&provider);
 
     if !matches!(
@@ -6284,11 +6279,39 @@ fn cmd_native_plan(
             std::process::exit(1);
         })
     });
+    let plan = build_native_plan_json(&provider, workspace, agent_profile, risk, command)
+        .unwrap_or_else(|e| {
+            eprintln!("error: failed to build native AgentPod plan: {}", e);
+            std::process::exit(1);
+        });
+
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&plan).expect("failed to serialize native AgentPod plan")
+    );
+}
+
+fn build_native_plan_json(
+    provider: &str,
+    workspace: PathBuf,
+    agent_profile: String,
+    risk: String,
+    command: Vec<String>,
+) -> Result<serde_json::Value, String> {
+    use agentbox_daemon::runtime::providers::linux::LinuxAgentPodExecutionPlan;
+    use agentbox_daemon::runtime::providers::macos::MacOsAgentPodExecutionPlan;
+    use agentbox_daemon::runtime::providers::windows::WindowsAgentPodExecutionPlan;
+    use agentbox_daemon::runtime::types::{ExecCommand, MinipodSpec};
+
+    if command.is_empty() {
+        return Err("native plan command cannot be empty".into());
+    }
+
     let agent_name = command.first().cloned().unwrap_or_else(|| "agent".into());
     let mut spec = MinipodSpec::for_agent_task_with_profile(agent_name, &workspace, agent_profile);
     spec.risk = parse_agentpod_risk(&risk);
     spec.labels
-        .insert("agentbox.provider".into(), provider.clone());
+        .insert("agentbox.provider".into(), provider.to_string());
 
     let exec = ExecCommand {
         argv: command,
@@ -6296,35 +6319,27 @@ fn cmd_native_plan(
         env: HashMap::new(),
         timeout_seconds: None,
     };
-    let plan = match provider.as_str() {
-        "agentpod-linux" => serde_json::to_value(
-            LinuxAgentPodExecutionPlan::from_minipod_spec(&spec, &exec).unwrap_or_else(|e| {
-                eprintln!("error: failed to build Linux native AgentPod plan: {}", e);
-                std::process::exit(1);
-            }),
-        )
-        .expect("failed to serialize Linux native AgentPod plan"),
-        "agentpod-macos" => serde_json::to_value(
-            MacOsAgentPodExecutionPlan::from_minipod_spec(&spec, &exec).unwrap_or_else(|e| {
-                eprintln!("error: failed to build macOS native AgentPod plan: {}", e);
-                std::process::exit(1);
-            }),
-        )
-        .expect("failed to serialize macOS native AgentPod plan"),
-        "agentpod-windows" => serde_json::to_value(
-            WindowsAgentPodExecutionPlan::from_minipod_spec(&spec, &exec).unwrap_or_else(|e| {
-                eprintln!("error: failed to build Windows native AgentPod plan: {}", e);
-                std::process::exit(1);
-            }),
-        )
-        .expect("failed to serialize Windows native AgentPod plan"),
-        _ => unreachable!("provider was validated above"),
-    };
 
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&plan).expect("failed to serialize native AgentPod plan")
-    );
+    match provider {
+        "agentpod-linux" => serde_json::to_value(
+            LinuxAgentPodExecutionPlan::from_minipod_spec(&spec, &exec)
+                .map_err(|e| format!("failed to build Linux native AgentPod plan: {e}"))?,
+        )
+        .map_err(|e| format!("failed to serialize Linux native AgentPod plan: {e}")),
+        "agentpod-macos" => serde_json::to_value(
+            MacOsAgentPodExecutionPlan::from_minipod_spec(&spec, &exec)
+                .map_err(|e| format!("failed to build macOS native AgentPod plan: {e}"))?,
+        )
+        .map_err(|e| format!("failed to serialize macOS native AgentPod plan: {e}")),
+        "agentpod-windows" => serde_json::to_value(
+            WindowsAgentPodExecutionPlan::from_minipod_spec(&spec, &exec)
+                .map_err(|e| format!("failed to build Windows native AgentPod plan: {e}"))?,
+        )
+        .map_err(|e| format!("failed to serialize Windows native AgentPod plan: {e}")),
+        _ => Err(format!(
+            "native plan provider `{provider}` is not supported yet"
+        )),
+    }
 }
 
 fn resolve_native_plan_provider(provider: &str) -> String {
@@ -7317,6 +7332,58 @@ mod tests {
             resolve_native_plan_provider("agentpod-windows"),
             "agentpod-windows"
         );
+    }
+
+    #[test]
+    fn native_plan_json_contract_covers_all_platform_providers() {
+        let workspace = PathBuf::from("/tmp/agentbox-native-plan-test");
+
+        for (provider, required_field, claim_fragment) in [
+            ("agentpod-linux", "user_namespace", "prototype"),
+            (
+                "agentpod-macos",
+                "endpoint_security",
+                "execution is not wired",
+            ),
+            ("agentpod-windows", "job_object", "execution is not wired"),
+        ] {
+            let plan = build_native_plan_json(
+                provider,
+                workspace.clone(),
+                "general".into(),
+                "high".into(),
+                vec!["echo".into(), "demo".into()],
+            )
+            .unwrap();
+
+            assert_eq!(plan["schema_version"], 1);
+            assert_eq!(plan["provider"], provider);
+            assert_eq!(plan["command_argv"][0], "echo");
+            assert!(plan[required_field].is_object());
+            assert!(plan["live_execution_enabled"].is_boolean());
+            assert!(
+                plan["security_claim"]
+                    .as_str()
+                    .unwrap()
+                    .contains(claim_fragment),
+                "{}",
+                plan["security_claim"]
+            );
+        }
+    }
+
+    #[test]
+    fn native_plan_json_rejects_empty_commands() {
+        let err = build_native_plan_json(
+            "agentpod-macos",
+            PathBuf::from("/tmp/agentbox-native-plan-test"),
+            "general".into(),
+            "medium".into(),
+            vec![],
+        )
+        .unwrap_err();
+
+        assert!(err.contains("native plan command cannot be empty"));
     }
 
     #[test]
