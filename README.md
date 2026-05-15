@@ -343,6 +343,8 @@ agentbox minipod-spec --policy-bundle ./task-policy.json
 agentbox run <command>   # Run agent in a guarded local minipod
 agentbox pods            # List running compatibility-backend minipods
 agentbox stop-pod <id>   # Remove a minipod session
+agentbox credentials <session>          # List explicit credential grants
+agentbox credential-revoke <session> <name>  # Revoke a session credential grant
 ```
 
 ## Policy Engine

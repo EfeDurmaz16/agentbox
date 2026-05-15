@@ -50,6 +50,18 @@ grep -F "metadata endpoint" "$TMPDIR/network-explain-metadata.txt" >/dev/null
 grep -F "bucket:   approve" "$TMPDIR/network-explain-private.txt" >/dev/null
 grep -F "private network destination" "$TMPDIR/network-explain-private.txt" >/dev/null
 
+log "checking credential broker command surface"
+"${CLI[@]}" credentials --help >"$TMPDIR/credentials-help.txt"
+grep -F "List credential grants for an AgentPod session" \
+  "$TMPDIR/credentials-help.txt" >/dev/null
+grep -F "Emit JSON" "$TMPDIR/credentials-help.txt" >/dev/null
+"${CLI[@]}" credential-revoke --help >"$TMPDIR/credential-revoke-help.txt"
+grep -F "Revoke a credential grant from an AgentPod session" \
+  "$TMPDIR/credential-revoke-help.txt" >/dev/null
+"${CLI[@]}" evidence --help >"$TMPDIR/evidence-help.txt"
+grep -F "Export only session credential grants/events as JSONL" \
+  "$TMPDIR/evidence-help.txt" >/dev/null
+
 log "checking doctor JSON truth"
 set +e
 "${CLI[@]}" doctor --json >"$TMPDIR/doctor.json"
