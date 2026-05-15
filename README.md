@@ -186,6 +186,10 @@ agentbox setup --dry-run --provider direct-host --json
 agentbox clean && agentbox start
 export PATH="$HOME/.agentbox/shims:$PATH"
 agentbox doctor
+
+# Inspect provider bridge readiness and claim boundaries
+agentbox bridge-health
+agentbox bridge-health --json
 ```
 
 ```bash
@@ -366,6 +370,7 @@ agentbox why             # Explain the last block/deny
 agentbox policy          # Show current policy posture
 agentbox doctor          # Local readiness check for daemon, shims, audit, and providers
 agentbox setup-plan      # Show the next local setup actions without changing host state
+agentbox bridge-health   # Inspect provider bridge readiness and claim boundaries
 agentbox setup-plan --provider remote-agentpod
 agentbox setup --dry-run --provider remote-agentpod --json
 agentbox setup --dry-run --provider remote-agentpod --endpoint https://agentpod.example.com/run --json
