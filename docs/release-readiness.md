@@ -104,7 +104,7 @@ doctor report without mutating host state.
       absent.
 - [x] Linux benchmark and native primitive scripts skip honestly on non-Linux
       hosts.
-- [ ] Windows and macOS native provider docs match provider status.
+- [x] Windows and macOS native provider docs match provider status.
 
 ## Policy Boundaries
 
