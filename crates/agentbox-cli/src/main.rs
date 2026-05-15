@@ -962,7 +962,11 @@ fn cmd_setup(
 
     let report = build_doctor_report();
     let plan = setup_plan_from_doctor(&report, provider_filter.as_deref());
-    let operator_commands = setup_operator_commands(&plan, remote_endpoint.as_deref());
+    let operator_commands = setup_operator_commands(
+        &plan,
+        provider_filter.as_deref(),
+        remote_endpoint.as_deref(),
+    );
     let wizard_steps = setup_wizard_steps(
         &plan,
         &operator_commands,
@@ -1588,12 +1592,20 @@ fn setup_remote_endpoint(provider: Option<&str>, endpoint: Option<&str>) -> Opti
     Some(endpoint.to_string())
 }
 
-fn setup_operator_commands(plan: &SetupPlan, remote_endpoint: Option<&str>) -> Vec<String> {
+fn setup_operator_commands(
+    plan: &SetupPlan,
+    provider: Option<&str>,
+    remote_endpoint: Option<&str>,
+) -> Vec<String> {
     let mut commands = plan
         .steps
         .iter()
         .filter_map(|step| step.command.clone())
         .collect::<Vec<_>>();
+    commands.push(match provider.unwrap_or("all") {
+        "all" => "agentbox bridge-health".to_string(),
+        provider => format!("agentbox bridge-health --provider {provider}"),
+    });
     if let Some(endpoint) = remote_endpoint {
         commands
             .retain(|command| !command.starts_with("export AGENTBOX_REMOTE_AGENTPOD_ENDPOINT="));
@@ -7968,11 +7980,12 @@ mod tests {
             ),
         ]);
         let plan = setup_plan_from_doctor(&report, Some("all"));
-        let commands = setup_operator_commands(&plan, None);
+        let commands = setup_operator_commands(&plan, Some("all"), None);
 
         assert_eq!(
             commands,
             vec![
+                "agentbox bridge-health".to_string(),
                 "agentbox start".to_string(),
                 "export AGENTBOX_REMOTE_AGENTPOD_ENDPOINT=https://worker.example.com/agentpod"
                     .to_string()
@@ -7989,11 +8002,16 @@ mod tests {
             "set endpoint",
         )]);
         let plan = setup_plan_from_doctor(&report, Some("remote-agentpod"));
-        let commands = setup_operator_commands(&plan, Some("https://agentpod.example.com/run"));
+        let commands = setup_operator_commands(
+            &plan,
+            Some("remote-agentpod"),
+            Some("https://agentpod.example.com/run"),
+        );
 
         assert_eq!(
             commands,
             vec![
+                "agentbox bridge-health --provider remote-agentpod".to_string(),
                 "agentbox remote-handshake --endpoint https://agentpod.example.com/run".to_string(),
                 "export AGENTBOX_REMOTE_AGENTPOD_ENDPOINT=https://agentpod.example.com/run"
                     .to_string()
