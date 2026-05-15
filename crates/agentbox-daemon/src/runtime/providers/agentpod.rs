@@ -248,22 +248,61 @@ impl RuntimeProvider for AgentPodProvider {
     }
 
     fn boundary_primitive_statuses(&self) -> Vec<BoundaryPrimitiveStatus> {
+        if matches!(self.kind, AgentPodProviderKind::Linux) {
+            return self
+                .planned_primitives()
+                .iter()
+                .map(|primitive| {
+                    let enforcement_scope = match primitive {
+                        AgentPodPrimitive::UserNamespaces => {
+                            "gated unshare user namespace composition; not a complete sandbox"
+                        }
+                        AgentPodPrimitive::MountNamespaces => {
+                            "gated unshare mount namespace composition plus workspace mount plan; overlayfs apply is incomplete"
+                        }
+                        AgentPodPrimitive::PidNamespaces => {
+                            "gated unshare PID namespace composition; process supervision remains prototype"
+                        }
+                        AgentPodPrimitive::CgroupsV2 => {
+                            "gated cgroup v2 resource file writes, process attach, and cleanup"
+                        }
+                        AgentPodPrimitive::Landlock => {
+                            "Landlock ruleset descriptor only; ruleset loader is not wired"
+                        }
+                        AgentPodPrimitive::Seccomp => {
+                            "seccomp OCI profile rendering only; libseccomp loader is not wired"
+                        }
+                        AgentPodPrimitive::EBpf => {
+                            "eBPF observability descriptor only; probe loading is not wired"
+                        }
+                        AgentPodPrimitive::Nftables => {
+                            "nftables egress descriptor only; packet/domain enforcement is not wired"
+                        }
+                        _ => "not part of the Linux AgentPod provider",
+                    };
+                    BoundaryPrimitiveStatus {
+                        primitive: primitive.label(),
+                        status: ProviderImplementationStatus::PrototypePrimitive,
+                        active: false,
+                        requires_gate: Some("AGENTBOX_LINUX_NATIVE=1"),
+                        enforcement_scope,
+                    }
+                })
+                .collect();
+        }
+
         let (status, requires_gate, enforcement_scope) = match self.kind {
             AgentPodProviderKind::MacOs => (
                 ProviderImplementationStatus::DescriptorOnly,
                 Some("AGENTBOX_MACOS_NATIVE=1"),
                 "plan compiler only; VM runner, system extension, and network extension are not wired",
             ),
-            AgentPodProviderKind::Linux => (
-                ProviderImplementationStatus::PrototypePrimitive,
-                Some("AGENTBOX_LINUX_NATIVE=1"),
-                "prototype primitive plan and gated local executor; not a complete sandbox",
-            ),
             AgentPodProviderKind::Windows => (
                 ProviderImplementationStatus::DescriptorOnly,
                 Some("AGENTBOX_WINDOWS_NATIVE=1"),
                 "plan compiler only; Job Object/AppContainer/WFP/ETW execution is not wired",
             ),
+            AgentPodProviderKind::Linux => unreachable!("Linux handled above"),
         };
 
         self.planned_primitives()
@@ -606,5 +645,27 @@ mod tests {
         assert!(provider
             .planned_primitives()
             .contains(&AgentPodPrimitive::EBpf));
+
+        let primitive_statuses = provider.boundary_primitive_statuses();
+        let cgroups = primitive_statuses
+            .iter()
+            .find(|status| status.primitive == "cgroups-v2")
+            .unwrap();
+        assert!(cgroups.enforcement_scope.contains("process attach"));
+        assert!(cgroups.enforcement_scope.contains("cleanup"));
+
+        let seccomp = primitive_statuses
+            .iter()
+            .find(|status| status.primitive == "seccomp")
+            .unwrap();
+        assert!(seccomp.enforcement_scope.contains("loader is not wired"));
+
+        let nftables = primitive_statuses
+            .iter()
+            .find(|status| status.primitive == "nftables")
+            .unwrap();
+        assert!(nftables
+            .enforcement_scope
+            .contains("packet/domain enforcement is not wired"));
     }
 }
