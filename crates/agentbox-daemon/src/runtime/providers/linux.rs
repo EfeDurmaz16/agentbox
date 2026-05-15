@@ -570,6 +570,11 @@ const LANDLOCK_ABI_V1_FS_ACCESS_MASK: u64 = LANDLOCK_ACCESS_FS_EXECUTE
     | LANDLOCK_ACCESS_FS_REMOVE_FILE
     | LANDLOCK_ACCESS_FS_MAKE_DIR
     | LANDLOCK_ACCESS_FS_MAKE_REG;
+const LANDLOCK_PROTOTYPE_HANDLED_FS_ACCESS_MASK: u64 = LANDLOCK_ACCESS_FS_WRITE_FILE
+    | LANDLOCK_ACCESS_FS_REMOVE_DIR
+    | LANDLOCK_ACCESS_FS_REMOVE_FILE
+    | LANDLOCK_ACCESS_FS_MAKE_DIR
+    | LANDLOCK_ACCESS_FS_MAKE_REG;
 
 impl LinuxLandlockAccess {
     fn access_mask(&self) -> u64 {
@@ -675,7 +680,8 @@ fn landlock_access_mask(access: &[LinuxLandlockAccess]) -> u64 {
 }
 
 fn landlock_handled_access_mask(rules: &[LinuxLandlockRule]) -> u64 {
-    rules.iter().fold(0, |mask, rule| mask | rule.access_mask) & LANDLOCK_ABI_V1_FS_ACCESS_MASK
+    rules.iter().fold(0, |mask, rule| mask | rule.access_mask)
+        & LANDLOCK_PROTOTYPE_HANDLED_FS_ACCESS_MASK
 }
 
 #[cfg(target_os = "linux")]
@@ -1721,6 +1727,52 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    fn linux_landlock_filter_denies_child_writes_outside_workspace() {
+        if let Err(err) = linux_landlock_abi_version() {
+            eprintln!("skipping Landlock child proof: {err}");
+            return;
+        }
+
+        let root = std::env::temp_dir().join(format!(
+            "agentbox-landlock-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let workspace = root.join("workspace");
+        let outside = root.join("outside");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+
+        let spec = MinipodSpec::for_agent_task("hermes", &workspace);
+        let plan = LinuxLandlockRuleset::plan(&spec).unwrap();
+        let mut command = std::process::Command::new("sh");
+        command
+            .arg("-c")
+            .arg("printf ok > \"$WORKSPACE/allowed\"; printf no > \"$OUTSIDE/denied\"")
+            .env("WORKSPACE", &workspace)
+            .env("OUTSIDE", &outside)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        configure_linux_child_security(&mut command, None, Some(&plan)).unwrap();
+
+        let child = command.spawn().unwrap();
+        let output = wait_for_child_output(child, Some(5)).unwrap();
+
+        assert!(!output.status.success());
+        assert_eq!(
+            std::fs::read_to_string(workspace.join("allowed")).unwrap(),
+            "ok"
+        );
+        assert!(!outside.join("denied").exists());
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
     fn seccomp_filter_rejects_unsupported_syscall_names_before_spawn() {
         let profile = SeccompProfile::deny_syscalls(&["definitely_not_a_syscall"], "test");
         let plan = LinuxSeccompProfileLoader::plan(&profile).unwrap();
@@ -2108,7 +2160,15 @@ mod tests {
         assert!(!plan.rules[1]
             .access
             .contains(&LinuxLandlockAccess::WriteFile));
-        assert_eq!(plan.handled_access_mask, LANDLOCK_ABI_V1_FS_ACCESS_MASK);
+        assert_eq!(
+            plan.handled_access_mask,
+            LANDLOCK_PROTOTYPE_HANDLED_FS_ACCESS_MASK
+        );
+        assert_eq!(
+            plan.handled_access_mask & LANDLOCK_ACCESS_FS_EXECUTE,
+            0,
+            "prototype loader must not handle exec until it can run after the launcher starts"
+        );
     }
 
     #[test]
