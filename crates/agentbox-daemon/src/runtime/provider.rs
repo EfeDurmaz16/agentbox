@@ -123,6 +123,10 @@ pub trait RuntimeProvider: Send + Sync {
         &[]
     }
 
+    fn boundary_primitives(&self) -> Vec<&'static str> {
+        vec![]
+    }
+
     async fn is_available(&self) -> bool;
 
     async fn create(&self, spec: &MinipodSpec) -> Result<RuntimeSession, RuntimeError>;

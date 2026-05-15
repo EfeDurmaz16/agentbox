@@ -39,6 +39,28 @@ pub enum AgentPodPrimitive {
     Etw,
 }
 
+impl AgentPodPrimitive {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::AppleVirtualization => "apple-virtualization",
+            Self::EndpointSecurity => "endpoint-security",
+            Self::NetworkExtension => "network-extension",
+            Self::UserNamespaces => "user-namespaces",
+            Self::MountNamespaces => "mount-namespaces",
+            Self::PidNamespaces => "pid-namespaces",
+            Self::CgroupsV2 => "cgroups-v2",
+            Self::Landlock => "landlock",
+            Self::Seccomp => "seccomp",
+            Self::EBpf => "ebpf",
+            Self::Nftables => "nftables",
+            Self::JobObjects => "job-objects",
+            Self::AppContainer => "appcontainer",
+            Self::Wfp => "wfp",
+            Self::Etw => "etw",
+        }
+    }
+}
+
 impl AgentPodProviderKind {
     pub fn current_platform_candidate() -> Self {
         if cfg!(target_os = "macos") {
@@ -211,6 +233,13 @@ impl RuntimeProvider for AgentPodProvider {
         self.kind.bridge_transport_kinds()
     }
 
+    fn boundary_primitives(&self) -> Vec<&'static str> {
+        self.planned_primitives()
+            .iter()
+            .map(AgentPodPrimitive::label)
+            .collect()
+    }
+
     async fn is_available(&self) -> bool {
         self.linux_prototype_available()
     }
@@ -379,6 +408,14 @@ mod tests {
         assert!(macos
             .bridge_transport_kinds()
             .contains(&HostBridgeTransportKind::Vsock));
+        assert_eq!(
+            macos.boundary_primitives(),
+            vec![
+                "apple-virtualization",
+                "endpoint-security",
+                "network-extension"
+            ]
+        );
     }
 
     #[tokio::test]
@@ -405,6 +442,8 @@ mod tests {
             provider.network_enforcement_capabilities().is_empty(),
             "unavailable AgentPod descriptors must not claim active network enforcement"
         );
+        assert!(provider.boundary_primitives().contains(&"user-namespaces"));
+        assert!(provider.boundary_primitives().contains(&"seccomp"));
     }
 
     #[tokio::test]

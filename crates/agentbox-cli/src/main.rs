@@ -4330,6 +4330,7 @@ fn cmd_providers(json: bool) {
         "status": "shipped",
         "bridge": "unix-socket",
         "network": "command-mediation",
+        "boundary_primitives": ["path-shim", "unix-socket", "sqlite-audit"],
         "capabilities": ["shim", "policy", "approval", "audit"],
     })];
 
@@ -4353,6 +4354,7 @@ fn cmd_providers(json: bool) {
             "status": format_provider_status(provider.implementation_status()),
             "bridge": format_bridge_transports(provider.bridge_transport_kinds()),
             "network": format_network_enforcement(provider.network_enforcement_capabilities()),
+            "boundary_primitives": provider.boundary_primitives(),
             "capabilities": provider
                 .capabilities()
                 .iter()
@@ -4378,6 +4380,7 @@ fn cmd_providers(json: bool) {
         "status": podman_status,
         "bridge": "unix-socket",
         "network": "none",
+        "boundary_primitives": ["podman-container", "guest-shim"],
         "capabilities": ["container isolation", "shim bridge"],
     }));
 

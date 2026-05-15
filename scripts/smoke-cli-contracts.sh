@@ -32,7 +32,7 @@ PY
 log "checking provider truth JSON"
 "${CLI[@]}" providers --json >"$TMPDIR/providers.json"
 validate_json "$TMPDIR/providers.json" \
-  "any(p.get('provider') == 'podman' for p in data) and any(p.get('provider') == 'remote-agentpod' and p.get('status') == 'experimental' for p in data)"
+  "any(p.get('provider') == 'podman' for p in data) and any(p.get('provider') == 'remote-agentpod' and p.get('status') == 'experimental' for p in data) and any(p.get('provider') == 'agentpod-windows' and 'job-objects' in p.get('boundary_primitives', []) and 'wfp' in p.get('boundary_primitives', []) for p in data) and any(p.get('provider') == 'agentpod-linux' and 'user-namespaces' in p.get('boundary_primitives', []) and 'seccomp' in p.get('boundary_primitives', []) for p in data)"
 
 log "checking AgentPod run plan JSON"
 "${CLI[@]}" run --plan --json -- echo agentbox-contract >"$TMPDIR/run-plan.json"
