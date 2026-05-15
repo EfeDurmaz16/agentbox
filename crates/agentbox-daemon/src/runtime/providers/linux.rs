@@ -971,6 +971,9 @@ impl LinuxAgentPodPrototypeExecutor {
         if let Some(working_dir) = &command.working_dir {
             process.current_dir(working_dir);
         }
+        process
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
         for (key, value) in &command.env {
             process.env(key, value);
         }
@@ -988,15 +991,14 @@ impl LinuxAgentPodPrototypeExecutor {
                 cgroup_root.display()
             )));
         }
-        let output = child.wait_with_output().map_err(|err| {
-            RuntimeError::ExecFailed(format!("Linux AgentPod prototype wait failed: {err}"))
-        })?;
+        let output_result = wait_for_child_output(child, command.timeout_seconds);
         LinuxCgroupV2Limiter::cleanup(cgroup_root, &plan.cgroup).map_err(|err| {
             RuntimeError::ExecFailed(format!(
                 "Linux AgentPod cgroup v2 cleanup failed at {}: {err}",
                 cgroup_root.display()
             ))
         })?;
+        let output = output_result?;
 
         Ok(CommandResult {
             exit_code: output.status.code().unwrap_or(-1),
@@ -1015,6 +1017,68 @@ impl LinuxAgentPodPrototypeExecutor {
             "Linux AgentPod prototype execution is only available on Linux".into(),
         ))
     }
+}
+
+#[cfg(target_os = "linux")]
+fn wait_for_child_output(
+    mut child: std::process::Child,
+    timeout_seconds: Option<u64>,
+) -> Result<std::process::Output, RuntimeError> {
+    use std::io::Read;
+
+    let mut stdout = child.stdout.take().ok_or_else(|| {
+        RuntimeError::Internal("Linux AgentPod child stdout pipe was not captured".into())
+    })?;
+    let mut stderr = child.stderr.take().ok_or_else(|| {
+        RuntimeError::Internal("Linux AgentPod child stderr pipe was not captured".into())
+    })?;
+    let stdout_reader = std::thread::spawn(move || {
+        let mut buffer = Vec::new();
+        stdout.read_to_end(&mut buffer).map(|_| buffer)
+    });
+    let stderr_reader = std::thread::spawn(move || {
+        let mut buffer = Vec::new();
+        stderr.read_to_end(&mut buffer).map(|_| buffer)
+    });
+
+    let deadline = timeout_seconds
+        .map(|seconds| std::time::Instant::now() + std::time::Duration::from_secs(seconds));
+    let status = loop {
+        if let Some(status) = child.try_wait().map_err(|err| {
+            RuntimeError::ExecFailed(format!("Linux AgentPod prototype wait failed: {err}"))
+        })? {
+            break status;
+        }
+        if let Some(deadline) = deadline {
+            if std::time::Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = stdout_reader.join();
+                let _ = stderr_reader.join();
+                return Err(RuntimeError::Timeout(timeout_seconds.unwrap_or_default()));
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    };
+
+    let stdout = stdout_reader
+        .join()
+        .map_err(|_| RuntimeError::Internal("Linux AgentPod stdout reader panicked".into()))?
+        .map_err(|err| {
+            RuntimeError::ExecFailed(format!("Linux AgentPod stdout capture failed: {err}"))
+        })?;
+    let stderr = stderr_reader
+        .join()
+        .map_err(|_| RuntimeError::Internal("Linux AgentPod stderr reader panicked".into()))?
+        .map_err(|err| {
+            RuntimeError::ExecFailed(format!("Linux AgentPod stderr capture failed: {err}"))
+        })?;
+
+    Ok(std::process::Output {
+        status,
+        stdout,
+        stderr,
+    })
 }
 
 impl LinuxIsolationBenchmarkPlan {
@@ -1191,6 +1255,40 @@ mod tests {
             env: HashMap::from([("AGENTBOX_TEST".into(), "1".into())]),
             timeout_seconds: None,
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_child_output_waiter_captures_stdout_and_stderr() {
+        let child = std::process::Command::new("sh")
+            .arg("-c")
+            .arg("printf out; printf err >&2")
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+
+        let output = wait_for_child_output(child, Some(5)).unwrap();
+
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "out");
+        assert_eq!(String::from_utf8_lossy(&output.stderr), "err");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_child_output_waiter_kills_process_on_timeout() {
+        let child = std::process::Command::new("sh")
+            .arg("-c")
+            .arg("sleep 2")
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+
+        let err = wait_for_child_output(child, Some(0)).unwrap_err();
+
+        assert!(matches!(err, RuntimeError::Timeout(0)));
     }
 
     #[test]
