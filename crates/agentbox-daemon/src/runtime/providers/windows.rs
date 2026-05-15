@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::runtime::provider::RuntimeError;
-use crate::runtime::types::MinipodSpec;
+use crate::runtime::types::{ExecCommand, MinipodSpec, NetworkMode};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WindowsJobObjectPlan {
@@ -69,6 +69,181 @@ impl WindowsJobObjectPlan {
 pub struct WindowsJobObjectLimit {
     pub name: String,
     pub value: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WindowsAppContainerPlan {
+    pub schema_version: i64,
+    pub package_family_name: String,
+    pub workspace_host_path: String,
+    pub workspace_guest_path: String,
+    pub protected_paths: Vec<String>,
+    pub deny_home_by_default: bool,
+    pub requires_profile_creation: bool,
+}
+
+impl WindowsAppContainerPlan {
+    pub fn from_minipod_spec(spec: &MinipodSpec) -> Result<Self, RuntimeError> {
+        if spec.filesystem.workspace_host_path.as_os_str().is_empty() {
+            return Err(RuntimeError::ManifestRejected(
+                "Windows AppContainer workspace host path cannot be empty".into(),
+            ));
+        }
+
+        Ok(Self {
+            schema_version: 1,
+            package_family_name: format!("Agentbox.AgentPod.{}", spec.id),
+            workspace_host_path: spec.filesystem.workspace_host_path.display().to_string(),
+            workspace_guest_path: spec.filesystem.workspace_guest_path.clone(),
+            protected_paths: spec
+                .filesystem
+                .protected_paths
+                .iter()
+                .map(|path| path.path.display().to_string())
+                .collect(),
+            deny_home_by_default: spec.filesystem.deny_home_by_default,
+            requires_profile_creation: true,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WindowsWfpBoundaryPlan {
+    pub schema_version: i64,
+    pub mode: NetworkMode,
+    pub allowed_domains: Vec<String>,
+    pub denied_domains: Vec<String>,
+    pub allow_localhost: bool,
+    pub enforcement_claim: String,
+    pub requires_wfp: bool,
+}
+
+impl WindowsWfpBoundaryPlan {
+    pub fn from_minipod_spec(spec: &MinipodSpec) -> Self {
+        Self {
+            schema_version: 1,
+            mode: spec.network.mode.clone(),
+            allowed_domains: spec.network.allowed_domains.clone(),
+            denied_domains: spec.network.denied_domains.clone(),
+            allow_localhost: spec.network.allow_localhost,
+            enforcement_claim: "planned WFP observability/enforcement; no packet denial proof yet"
+                .into(),
+            requires_wfp: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WindowsEtwObserverPlan {
+    pub schema_version: i64,
+    pub provider_name: String,
+    pub session_name: String,
+    pub event_kinds: Vec<String>,
+    pub requires_etw: bool,
+}
+
+impl WindowsEtwObserverPlan {
+    pub fn from_minipod_spec(spec: &MinipodSpec) -> Self {
+        Self {
+            schema_version: 1,
+            provider_name: "Agentbox-AgentPod".into(),
+            session_name: format!("agentbox-agentpod-{}", spec.id),
+            event_kinds: vec![
+                "process.start".into(),
+                "process.exit".into(),
+                "job.assign".into(),
+                "job.terminate".into(),
+                "network.connect".into(),
+                "provider.lifecycle".into(),
+            ],
+            requires_etw: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WindowsVmBoundaryPlan {
+    pub schema_version: i64,
+    pub candidate_backends: Vec<String>,
+    pub required_for_risk: Vec<String>,
+    pub execution_claim: String,
+}
+
+impl WindowsVmBoundaryPlan {
+    pub fn from_minipod_spec(spec: &MinipodSpec) -> Self {
+        Self {
+            schema_version: 1,
+            candidate_backends: vec!["windows-sandbox".into(), "hyper-v".into()],
+            required_for_risk: if matches!(
+                spec.risk,
+                crate::runtime::types::AgentPodRiskLevel::High
+                    | crate::runtime::types::AgentPodRiskLevel::VeryHigh
+            ) {
+                vec![spec.risk.label().to_string()]
+            } else {
+                vec![]
+            },
+            execution_claim: "planned higher-strength boundary; lifecycle is not wired".into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WindowsAgentPodExecutionPlan {
+    pub schema_version: i64,
+    pub provider: String,
+    pub session_id: String,
+    pub command_argv: Vec<String>,
+    pub job_object: WindowsJobObjectPlan,
+    pub app_container: WindowsAppContainerPlan,
+    pub wfp: WindowsWfpBoundaryPlan,
+    pub etw: WindowsEtwObserverPlan,
+    pub vm_boundary: WindowsVmBoundaryPlan,
+    pub live_env_var: String,
+    pub live_execution_enabled: bool,
+    pub requires_windows: bool,
+    pub security_claim: String,
+}
+
+impl WindowsAgentPodExecutionPlan {
+    pub fn from_minipod_spec(
+        spec: &MinipodSpec,
+        command: &ExecCommand,
+    ) -> Result<Self, RuntimeError> {
+        if command.argv.is_empty() {
+            return Err(RuntimeError::ManifestRejected(
+                "Windows AgentPod execution command cannot be empty".into(),
+            ));
+        }
+
+        Ok(Self {
+            schema_version: 1,
+            provider: "agentpod-windows".into(),
+            session_id: spec.id.clone(),
+            command_argv: command.argv.clone(),
+            job_object: WindowsJobObjectPlan::from_minipod_spec(spec)?,
+            app_container: WindowsAppContainerPlan::from_minipod_spec(spec)?,
+            wfp: WindowsWfpBoundaryPlan::from_minipod_spec(spec),
+            etw: WindowsEtwObserverPlan::from_minipod_spec(spec),
+            vm_boundary: WindowsVmBoundaryPlan::from_minipod_spec(spec),
+            live_env_var: "AGENTBOX_WINDOWS_NATIVE".into(),
+            live_execution_enabled: windows_native_execution_enabled(),
+            requires_windows: true,
+            security_claim:
+                "Job Object/AppContainer/WFP/ETW/VM boundary plan; execution is not wired".into(),
+        })
+    }
+
+    pub fn runnable_on_current_host(&self) -> bool {
+        cfg!(target_os = "windows") && self.live_execution_enabled
+    }
+}
+
+pub fn windows_native_execution_enabled() -> bool {
+    matches!(
+        std::env::var("AGENTBOX_WINDOWS_NATIVE").as_deref(),
+        Ok("1") | Ok("true") | Ok("yes")
+    )
 }
 
 pub struct WindowsJobObjectController;
@@ -149,6 +324,57 @@ mod tests {
         let err = WindowsJobObjectController::plan(&spec).unwrap_err();
 
         assert!(matches!(err, RuntimeError::ManifestRejected(_)));
+    }
+
+    #[test]
+    fn agentpod_execution_plan_composes_windows_native_boundaries() {
+        let spec = MinipodSpec::for_agent_task("codex", "C:\\agentbox\\work");
+        let command = ExecCommand {
+            argv: vec!["codex".into(), "exec".into()],
+            working_dir: Some("C:\\agentbox\\work".into()),
+            env: Default::default(),
+            timeout_seconds: None,
+        };
+
+        let plan = WindowsAgentPodExecutionPlan::from_minipod_spec(&spec, &command).unwrap();
+
+        assert_eq!(plan.schema_version, 1);
+        assert_eq!(plan.provider, "agentpod-windows");
+        assert_eq!(plan.session_id, spec.id);
+        assert_eq!(plan.command_argv, vec!["codex", "exec"]);
+        assert_eq!(plan.live_env_var, "AGENTBOX_WINDOWS_NATIVE");
+        assert!(plan.requires_windows);
+        assert!(!plan.live_execution_enabled);
+        assert!(plan.security_claim.contains("execution is not wired"));
+        assert!(plan.job_object.kill_on_close);
+        assert!(plan.app_container.requires_profile_creation);
+        assert!(plan.wfp.requires_wfp);
+        assert!(plan
+            .wfp
+            .enforcement_claim
+            .contains("no packet denial proof"));
+        assert!(plan.etw.requires_etw);
+        assert!(plan.etw.event_kinds.contains(&"process.start".into()));
+        assert_eq!(
+            plan.vm_boundary.candidate_backends,
+            vec!["windows-sandbox".to_string(), "hyper-v".to_string()]
+        );
+        assert!(!plan.runnable_on_current_host());
+    }
+
+    #[test]
+    fn agentpod_execution_plan_rejects_empty_commands() {
+        let spec = MinipodSpec::for_agent_task("codex", "C:\\agentbox\\work");
+        let command = ExecCommand {
+            argv: vec![],
+            working_dir: Some("C:\\agentbox\\work".into()),
+            env: Default::default(),
+            timeout_seconds: None,
+        };
+
+        let err = WindowsAgentPodExecutionPlan::from_minipod_spec(&spec, &command).unwrap_err();
+
+        assert!(err.to_string().contains("cannot be empty"));
     }
 
     #[cfg(not(target_os = "windows"))]

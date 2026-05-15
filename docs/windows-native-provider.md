@@ -43,7 +43,9 @@ credible process lifecycle boundary without requiring kernel drivers.
 
 Current repo status: Agentbox models a Windows Job Object plan/controller and
 keeps the live Win32 apply path unavailable until Windows-only tests prove
-behavior.
+behavior. `agentbox native-plan --provider agentpod-windows -- <cmd>` now emits
+the full intended execution-cell contract across Job Objects, AppContainer, WFP,
+ETW, and Windows Sandbox/Hyper-V fallback metadata without running anything.
 
 Target behavior:
 

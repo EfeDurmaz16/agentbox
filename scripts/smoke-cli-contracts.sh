@@ -52,6 +52,14 @@ AGENTBOX_MACOS_NATIVE= "${CLI[@]}" native-plan \
 validate_json "$TMPDIR/native-plan-macos.json" \
   "data.get('schema_version') == 1 and data.get('provider') == 'agentpod-macos' and data.get('virtualization', {}).get('requires_apple_virtualization') == True and data.get('endpoint_security', {}).get('requires_system_extension') == True and data.get('network_extension', {}).get('requires_network_extension') == True and data.get('live_env_var') == 'AGENTBOX_MACOS_NATIVE' and data.get('live_execution_enabled') == False and 'execution is not wired' in data.get('security_claim', '')"
 
+log "checking Windows native plan compiler truth"
+AGENTBOX_WINDOWS_NATIVE= "${CLI[@]}" native-plan \
+  --provider agentpod-windows \
+  --workspace "$TMPDIR" \
+  -- codex exec >"$TMPDIR/native-plan-windows.json"
+validate_json "$TMPDIR/native-plan-windows.json" \
+  "data.get('schema_version') == 1 and data.get('provider') == 'agentpod-windows' and data.get('job_object', {}).get('kill_on_close') == True and data.get('app_container', {}).get('requires_profile_creation') == True and data.get('wfp', {}).get('requires_wfp') == True and data.get('etw', {}).get('requires_etw') == True and 'windows-sandbox' in data.get('vm_boundary', {}).get('candidate_backends', []) and data.get('live_env_var') == 'AGENTBOX_WINDOWS_NATIVE' and data.get('live_execution_enabled') == False and 'execution is not wired' in data.get('security_claim', '')"
+
 log "checking remote descriptor JSON"
 "${CLI[@]}" remote-descriptor \
   --endpoint https://worker.example.com/agentpod \

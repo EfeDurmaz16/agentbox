@@ -535,7 +535,7 @@ enum Commands {
     },
     /// Generate a native provider execution plan without running it
     NativePlan {
-        /// Native provider: agentpod-linux or agentpod-macos
+        /// Native provider: agentpod-linux, agentpod-macos, or agentpod-windows
         #[arg(long = "provider", default_value = "agentpod-linux")]
         provider: String,
 
@@ -4990,14 +4990,18 @@ fn cmd_native_plan(
 ) {
     use agentbox_daemon::runtime::providers::linux::LinuxAgentPodExecutionPlan;
     use agentbox_daemon::runtime::providers::macos::MacOsAgentPodExecutionPlan;
+    use agentbox_daemon::runtime::providers::windows::WindowsAgentPodExecutionPlan;
     use agentbox_daemon::runtime::types::{ExecCommand, MinipodSpec};
 
-    if !matches!(provider.as_str(), "agentpod-linux" | "agentpod-macos") {
+    if !matches!(
+        provider.as_str(),
+        "agentpod-linux" | "agentpod-macos" | "agentpod-windows"
+    ) {
         eprintln!(
             "error: native plan provider `{}` is not supported yet",
             provider
         );
-        eprintln!("hint: supported values: agentpod-linux, agentpod-macos");
+        eprintln!("hint: supported values: agentpod-linux, agentpod-macos, agentpod-windows");
         std::process::exit(1);
     }
     if command.is_empty() {
@@ -5038,6 +5042,13 @@ fn cmd_native_plan(
             }),
         )
         .expect("failed to serialize macOS native AgentPod plan"),
+        "agentpod-windows" => serde_json::to_value(
+            WindowsAgentPodExecutionPlan::from_minipod_spec(&spec, &exec).unwrap_or_else(|e| {
+                eprintln!("error: failed to build Windows native AgentPod plan: {}", e);
+                std::process::exit(1);
+            }),
+        )
+        .expect("failed to serialize Windows native AgentPod plan"),
         _ => unreachable!("provider was validated above"),
     };
 
