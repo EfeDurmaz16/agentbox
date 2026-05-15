@@ -127,6 +127,9 @@ code without installing a system extension:
   requested access such as read/write/delete, and observation time.
 - decisions carry allow/approve/block, reason, optional evidence reference, and
   decision time.
+- native execution plans carry an observed-only evidence observer descriptor
+  with VM bundle correlation, PID fallback, and event schemas for process, file,
+  Network Extension flow, and provider lifecycle evidence.
 - exec and file requests can be mapped into existing host bridge
   `CommandMediation` and `FileGrant` requests, so the future privileged macOS
   client can reuse the same policy/evidence boundary instead of inventing a

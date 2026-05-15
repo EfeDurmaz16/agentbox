@@ -159,6 +159,83 @@ impl MacOsNetworkExtensionPlan {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MacOsEvidenceObserverPlan {
+    pub schema_version: i64,
+    pub session_id: String,
+    pub correlation: MacOsEvidenceCorrelationPlan,
+    pub event_schema: Vec<MacOsEvidenceEventSchema>,
+    pub enforcement: MacOsEvidenceEnforcementMode,
+    pub evidence_claim: String,
+    pub requires_endpoint_security: bool,
+    pub requires_network_extension: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MacOsEvidenceCorrelationPlan {
+    pub preferred_key: String,
+    pub vm_bundle_id: String,
+    pub process_id_fallback: bool,
+    pub manifest_label_keys: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MacOsEvidenceEventSchema {
+    pub event_type: String,
+    pub source: String,
+    pub evidence_use: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MacOsEvidenceEnforcementMode {
+    ObservedOnly,
+}
+
+impl MacOsEvidenceObserverPlan {
+    pub fn from_minipod_spec(spec: &MinipodSpec) -> Self {
+        let mut manifest_label_keys: Vec<String> = spec.labels.keys().cloned().collect();
+        manifest_label_keys.sort();
+        Self {
+            schema_version: 1,
+            session_id: spec.id.clone(),
+            correlation: MacOsEvidenceCorrelationPlan {
+                preferred_key: "vm_bundle_id".into(),
+                vm_bundle_id: format!("dev.agentbox.agentpod.{}", spec.id),
+                process_id_fallback: true,
+                manifest_label_keys,
+            },
+            event_schema: vec![
+                MacOsEvidenceEventSchema {
+                    event_type: "macos.process.exec".into(),
+                    source: "EndpointSecurity:AUTH_EXEC".into(),
+                    evidence_use: "command lineage, argv, and signing identity evidence".into(),
+                },
+                MacOsEvidenceEventSchema {
+                    event_type: "macos.file.open".into(),
+                    source: "EndpointSecurity:AUTH_OPEN".into(),
+                    evidence_use: "protected path read/write intent evidence".into(),
+                },
+                MacOsEvidenceEventSchema {
+                    event_type: "macos.network.flow".into(),
+                    source: "NetworkExtension:outbound-flow".into(),
+                    evidence_use: "destination metadata for network boundary evidence".into(),
+                },
+                MacOsEvidenceEventSchema {
+                    event_type: "agentbox.provider.lifecycle".into(),
+                    source: "AgentboxHostBridge".into(),
+                    evidence_use: "VM lifecycle and host bridge decision evidence".into(),
+                },
+            ],
+            enforcement: MacOsEvidenceEnforcementMode::ObservedOnly,
+            evidence_claim:
+                "macOS evidence observer descriptor only; observed events are not enforcement proof"
+                    .into(),
+            requires_endpoint_security: true,
+            requires_network_extension: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MacOsAgentPodExecutionPlan {
     pub schema_version: i64,
     pub provider: String,
@@ -167,6 +244,7 @@ pub struct MacOsAgentPodExecutionPlan {
     pub virtualization: MacOsVirtualizationCellPlan,
     pub endpoint_security: MacOsEndpointSecurityPlan,
     pub network_extension: MacOsNetworkExtensionPlan,
+    pub evidence_observer: MacOsEvidenceObserverPlan,
     pub required_entitlements: Vec<String>,
     pub live_env_var: String,
     pub live_execution_enabled: bool,
@@ -193,6 +271,7 @@ impl MacOsAgentPodExecutionPlan {
             virtualization: MacOsVirtualizationCellPlan::from_minipod_spec(spec)?,
             endpoint_security: MacOsEndpointSecurityPlan::from_minipod_spec(spec),
             network_extension: MacOsNetworkExtensionPlan::from_minipod_spec(spec),
+            evidence_observer: MacOsEvidenceObserverPlan::from_minipod_spec(spec),
             required_entitlements: vec![
                 "com.apple.security.virtualization".into(),
                 "com.apple.developer.endpoint-security.client".into(),
@@ -599,7 +678,50 @@ mod tests {
             .contains(&"com.apple.security.virtualization".into()));
         assert!(plan.endpoint_security.requires_system_extension);
         assert!(plan.network_extension.requires_network_extension);
+        assert_eq!(
+            plan.evidence_observer.enforcement,
+            MacOsEvidenceEnforcementMode::ObservedOnly
+        );
+        assert!(plan
+            .evidence_observer
+            .event_schema
+            .iter()
+            .any(|event| event.event_type == "macos.network.flow"));
         assert!(plan.security_claim.contains("execution is not wired"));
+    }
+
+    #[test]
+    fn macos_evidence_observer_plan_carries_session_correlation_and_event_schema() {
+        let mut spec = MinipodSpec::for_agent_task("hermes", "/tmp/agentbox-work");
+        spec.labels
+            .insert("policy.bundle".into(), "research-default".into());
+
+        let plan = MacOsEvidenceObserverPlan::from_minipod_spec(&spec);
+
+        assert_eq!(plan.schema_version, 1);
+        assert_eq!(plan.session_id, spec.id);
+        assert_eq!(plan.correlation.preferred_key, "vm_bundle_id");
+        assert_eq!(
+            plan.correlation.vm_bundle_id,
+            format!("dev.agentbox.agentpod.{}", spec.id)
+        );
+        assert!(plan.correlation.process_id_fallback);
+        assert!(plan
+            .correlation
+            .manifest_label_keys
+            .contains(&"policy.bundle".to_string()));
+        assert_eq!(plan.enforcement, MacOsEvidenceEnforcementMode::ObservedOnly);
+        assert!(plan
+            .event_schema
+            .iter()
+            .any(|event| event.event_type == "macos.process.exec"));
+        assert!(plan
+            .event_schema
+            .iter()
+            .any(|event| event.source == "NetworkExtension:outbound-flow"));
+        assert!(plan.requires_endpoint_security);
+        assert!(plan.requires_network_extension);
+        assert!(plan.evidence_claim.contains("not enforcement proof"));
     }
 
     #[test]
