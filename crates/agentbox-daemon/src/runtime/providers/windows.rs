@@ -231,22 +231,106 @@ impl WindowsAppContainerPlan {
 pub struct WindowsWfpBoundaryPlan {
     pub schema_version: i64,
     pub mode: NetworkMode,
+    pub default_policy: WindowsWfpDefaultPolicy,
     pub allowed_domains: Vec<String>,
     pub denied_domains: Vec<String>,
     pub allow_localhost: bool,
+    pub planned_rules: Vec<WindowsWfpRulePlan>,
+    pub evidence_events: Vec<String>,
+    pub domain_rules_require_resolver: bool,
     pub enforcement_claim: String,
     pub requires_wfp: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WindowsWfpDefaultPolicy {
+    Block,
+    PermitWithGuardrails,
+    RequireApproval,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WindowsWfpRulePlan {
+    pub action: WindowsWfpRuleAction,
+    pub layer: String,
+    pub selector: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WindowsWfpRuleAction {
+    Permit,
+    Block,
+    ApprovalRequired,
+    Observe,
+}
+
 impl WindowsWfpBoundaryPlan {
     pub fn from_minipod_spec(spec: &MinipodSpec) -> Self {
+        let mut planned_rules = Vec::new();
+        if spec.network.allow_localhost {
+            planned_rules.push(WindowsWfpRulePlan {
+                action: WindowsWfpRuleAction::Permit,
+                layer: "ALE_AUTH_CONNECT".into(),
+                selector: "loopback:127.0.0.0/8,::1".into(),
+                reason: "manifest allows loopback service access".into(),
+            });
+        } else {
+            planned_rules.push(WindowsWfpRulePlan {
+                action: WindowsWfpRuleAction::Block,
+                layer: "ALE_AUTH_CONNECT".into(),
+                selector: "loopback:127.0.0.0/8,::1".into(),
+                reason: "manifest disables loopback service access".into(),
+            });
+        }
+        planned_rules.push(WindowsWfpRulePlan {
+            action: WindowsWfpRuleAction::ApprovalRequired,
+            layer: "ALE_AUTH_CONNECT".into(),
+            selector: "private-lan:10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,fc00::/7".into(),
+            reason: "private/LAN destinations require explicit mediation".into(),
+        });
+        for domain in &spec.network.denied_domains {
+            planned_rules.push(WindowsWfpRulePlan {
+                action: WindowsWfpRuleAction::Block,
+                layer: "ALE_AUTH_CONNECT".into(),
+                selector: format!("domain:{domain}"),
+                reason: "manifest domain denylist; requires resolver or callout mapping".into(),
+            });
+        }
+        for domain in &spec.network.allowed_domains {
+            planned_rules.push(WindowsWfpRulePlan {
+                action: WindowsWfpRuleAction::Permit,
+                layer: "ALE_AUTH_CONNECT".into(),
+                selector: format!("domain:{domain}"),
+                reason: "manifest domain allowlist; requires resolver or callout mapping".into(),
+            });
+        }
+
+        let default_policy = match spec.network.mode {
+            NetworkMode::None | NetworkMode::DenyByDefault | NetworkMode::AllowListed => {
+                WindowsWfpDefaultPolicy::Block
+            }
+            NetworkMode::ApprovalOnFirstContact => WindowsWfpDefaultPolicy::RequireApproval,
+            NetworkMode::OpenWithGuardrails | NetworkMode::Host => {
+                WindowsWfpDefaultPolicy::PermitWithGuardrails
+            }
+        };
+
         Self {
             schema_version: 1,
             mode: spec.network.mode.clone(),
+            default_policy,
             allowed_domains: spec.network.allowed_domains.clone(),
             denied_domains: spec.network.denied_domains.clone(),
             allow_localhost: spec.network.allow_localhost,
-            enforcement_claim: "planned WFP observability/enforcement; no packet denial proof yet"
+            planned_rules,
+            evidence_events: vec![
+                "windows.wfp.flow.permit".into(),
+                "windows.wfp.flow.block".into(),
+                "windows.wfp.flow.approval_required".into(),
+            ],
+            domain_rules_require_resolver: true,
+            enforcement_claim: "WFP policy descriptor only; no packet/domain denial proof is wired"
                 .into(),
             requires_wfp: true,
         }
@@ -717,10 +801,31 @@ mod tests {
             .iter()
             .all(|rule| rule.default_access == "deny-without-explicit-grant"));
         assert!(plan.wfp.requires_wfp);
+        assert_eq!(
+            plan.wfp.default_policy,
+            WindowsWfpDefaultPolicy::PermitWithGuardrails
+        );
+        assert!(plan.wfp.domain_rules_require_resolver);
+        assert!(plan
+            .wfp
+            .planned_rules
+            .iter()
+            .any(|rule| rule.action == WindowsWfpRuleAction::ApprovalRequired
+                && rule.selector.contains("private-lan")));
+        assert!(plan
+            .wfp
+            .planned_rules
+            .iter()
+            .any(|rule| rule.action == WindowsWfpRuleAction::Block
+                && rule.selector.contains("169.254.169.254")));
+        assert!(plan
+            .wfp
+            .evidence_events
+            .contains(&"windows.wfp.flow.block".to_string()));
         assert!(plan
             .wfp
             .enforcement_claim
-            .contains("no packet denial proof"));
+            .contains("no packet/domain denial proof"));
         assert!(plan.etw.requires_etw);
         assert!(plan.etw.event_kinds.contains(&"process.start".into()));
         assert_eq!(plan.etw.correlation.preferred_key, "job_name");

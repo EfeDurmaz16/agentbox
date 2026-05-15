@@ -7774,6 +7774,16 @@ mod tests {
                         .unwrap()
                         .contains("live ACL proof is not wired")
                 );
+                assert!(plan["wfp"]["planned_rules"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|rule| rule["selector"].as_str().unwrap().contains("private-lan")));
+                assert!(plan["wfp"]["evidence_events"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|event| event == "windows.wfp.flow.block"));
                 assert_eq!(
                     plan["vm_boundary"]["cell_config"]["workspace_mount"]["review_required"],
                     true

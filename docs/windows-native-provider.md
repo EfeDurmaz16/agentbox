@@ -107,6 +107,11 @@ claim WFP enforcement until a live test proves that a denied destination is
 actually blocked for the target AgentPod process and that unrelated host traffic
 is not affected.
 
+Current repo status: the WFP descriptor compiles network policy into planned
+rule classes for loopback, private/LAN mediation, manifest domain allow/deny
+entries, and WFP evidence event names. It remains a policy descriptor only; no
+packet or domain denial proof is wired.
+
 ## ETW Evidence
 
 ETW should be the Windows equivalent of Linux eBPF observability:
