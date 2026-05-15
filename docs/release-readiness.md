@@ -97,9 +97,9 @@ doctor report without mutating host state.
       future ES/NE entitlement readiness honestly.
 - [x] Native AgentPod providers remain unavailable until live enforcement lands,
       except explicitly gated Linux prototype runs.
-- [ ] Podman compatibility is marked experimental or unavailable honestly.
-- [ ] Podman live smoke is run only on hosts where Podman is installed.
-- [ ] `scripts/smoke-podman-bridge.sh` proves daemon socket visibility and shim
+- [x] Podman compatibility is marked experimental or unavailable honestly.
+- [x] Podman live smoke is run only on hosts where Podman is installed.
+- [x] `scripts/smoke-podman-bridge.sh` proves daemon socket visibility and shim
       execution inside a Podman minipod, or skips with code 77 when Podman is
       absent.
 - [x] Linux benchmark and native primitive scripts skip honestly on non-Linux
