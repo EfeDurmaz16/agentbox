@@ -687,8 +687,12 @@ impl AgentPolicyProfile {
 fn cloud_metadata_domains() -> Vec<String> {
     vec![
         "169.254.169.254".into(),
+        "169.254.170.2".into(),
+        "100.100.100.200".into(),
         "metadata.google.internal".into(),
+        "metadata".into(),
         "metadata.aws.internal".into(),
+        "fd00:ec2::254".into(),
     ]
 }
 
@@ -1309,6 +1313,18 @@ mod tests {
             .network
             .denied_domains
             .contains(&"169.254.169.254".into()));
+        assert!(coding
+            .network
+            .denied_domains
+            .contains(&"169.254.170.2".into()));
+        assert!(coding
+            .network
+            .denied_domains
+            .contains(&"100.100.100.200".into()));
+        assert!(coding
+            .network
+            .denied_domains
+            .contains(&"fd00:ec2::254".into()));
         assert_eq!(
             research.labels.get("agentbox.policy_profile"),
             Some(&"research".into())
