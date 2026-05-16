@@ -79,13 +79,15 @@ filesystem ruleset. The Landlock loader currently handles write/create/remove
 access only so launcher binaries, dynamic loaders, and host libraries are not
 accidentally blocked before the broader read/execute policy is ready. The
 executor invokes `agentbox-linux-runner` inside `unshare`; the runner bind-mounts
-the host workspace at the guest workspace path, then applies Landlock/seccomp,
-then execs the requested argv. The Linux native plan exposes ordered `runner_phases` so the
-namespace, workspace bind, Landlock, seccomp, and exec stages can be reviewed
-separately; workspace bind, Landlock, and seccomp are prototype phases. This is still a prototype primitive: live execution must be
-explicitly gated with `AGENTBOX_LINUX_NATIVE`, and it is not a complete sandbox
-claim until the remaining loaders and provider lifecycle are wired and tested on
-Linux.
+the host workspace at the guest workspace path for direct workspace mode, or
+mounts an overlayfs review workspace when the manifest carries upper/work
+paths. It then applies Landlock/seccomp and execs the requested argv. The Linux
+native plan exposes ordered `runner_phases` so the namespace, workspace bind,
+overlayfs, Landlock, seccomp, and exec stages can be reviewed separately;
+workspace bind, overlayfs, Landlock, and seccomp are prototype phases. This is
+still a prototype primitive: live execution must be explicitly gated with
+`AGENTBOX_LINUX_NATIVE`, and it is not a complete sandbox claim until the
+remaining loaders and provider lifecycle are wired and tested on Linux.
 
 The plan can be inspected without execution:
 

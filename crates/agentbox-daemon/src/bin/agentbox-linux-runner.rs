@@ -1,6 +1,6 @@
 use agentbox_daemon::runtime::providers::linux::{
     LinuxAgentPodRunnerRequest, LinuxLandlockRule, LinuxLandlockRuleset, LinuxMountNamespacePlan,
-    LinuxSeccompProfileLoader,
+    LinuxOverlayFsWorkspacePlan, LinuxSeccompProfileLoader,
 };
 use std::path::{Path, PathBuf};
 
@@ -69,8 +69,29 @@ fn validate_request(
     {
         return Err("runner workspace guest path cannot be empty".into());
     }
-    if request.mount_namespace.overlayfs.is_some() {
-        return Err("runner overlayfs workspace mounts are not wired yet".into());
+    if let Some(overlayfs) = &request.mount_namespace.overlayfs {
+        validate_overlayfs(overlayfs)?;
+    }
+    Ok(())
+}
+
+fn validate_overlayfs(
+    overlayfs: &LinuxOverlayFsWorkspacePlan,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    if overlayfs.lower_host_path.trim().is_empty() {
+        return Err("runner overlayfs lower path cannot be empty".into());
+    }
+    if overlayfs.upper_host_path.trim().is_empty() {
+        return Err("runner overlayfs upper path cannot be empty".into());
+    }
+    if overlayfs.work_host_path.trim().is_empty() {
+        return Err("runner overlayfs work path cannot be empty".into());
+    }
+    if overlayfs.merged_guest_path.trim().is_empty() {
+        return Err("runner overlayfs merged guest path cannot be empty".into());
+    }
+    if overlayfs.upper_host_path == overlayfs.work_host_path {
+        return Err("runner overlayfs upper and work paths must differ".into());
     }
     Ok(())
 }
@@ -100,11 +121,15 @@ fn landlock_with_guest_workspace_alias(
 fn apply_mounts(
     plan: &LinuxMountNamespacePlan,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    bind_mount(
-        Path::new(&plan.workspace_host_path),
-        Path::new(&plan.workspace_guest_path),
-        false,
-    )?;
+    if let Some(overlayfs) = &plan.overlayfs {
+        mount_overlay_workspace(overlayfs)?;
+    } else {
+        bind_mount(
+            Path::new(&plan.workspace_host_path),
+            Path::new(&plan.workspace_guest_path),
+            false,
+        )?;
+    }
     for mount in &plan.read_only_mounts {
         bind_mount(
             Path::new(&mount.host_path),
@@ -120,6 +145,46 @@ fn apply_mounts(
     _plan: &LinuxMountNamespacePlan,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     Err("agentbox-linux-runner is only available on Linux".into())
+}
+
+#[cfg(target_os = "linux")]
+fn mount_overlay_workspace(
+    overlayfs: &LinuxOverlayFsWorkspacePlan,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    use std::os::unix::ffi::OsStrExt;
+
+    std::fs::create_dir_all(&overlayfs.upper_host_path)?;
+    std::fs::create_dir_all(&overlayfs.work_host_path)?;
+    std::fs::create_dir_all(&overlayfs.merged_guest_path)?;
+
+    let target = std::ffi::CString::new(
+        Path::new(&overlayfs.merged_guest_path)
+            .as_os_str()
+            .as_bytes(),
+    )?;
+    let fstype = std::ffi::CString::new("overlay")?;
+    let options = std::ffi::CString::new(overlay_mount_options(overlayfs))?;
+    let result = unsafe {
+        libc::mount(
+            fstype.as_ptr(),
+            target.as_ptr(),
+            fstype.as_ptr(),
+            0,
+            options.as_ptr().cast::<libc::c_void>(),
+        )
+    };
+    if result != 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    Ok(())
+}
+
+#[cfg(any(test, target_os = "linux"))]
+fn overlay_mount_options(overlayfs: &LinuxOverlayFsWorkspacePlan) -> String {
+    format!(
+        "lowerdir={},upperdir={},workdir={}",
+        overlayfs.lower_host_path, overlayfs.upper_host_path, overlayfs.work_host_path
+    )
 }
 
 #[cfg(target_os = "linux")]
@@ -190,12 +255,11 @@ fn exec_request(
 mod tests {
     use super::*;
     use agentbox_daemon::runtime::providers::linux::{
-        LinuxLandlockAccess, LinuxMountNamespaceMount,
+        LinuxLandlockAccess, LinuxMountNamespaceMount, LinuxOverlayFsWorkspacePlan,
     };
 
-    #[test]
-    fn landlock_alias_adds_guest_workspace_rule() {
-        let request = LinuxAgentPodRunnerRequest {
+    fn request() -> LinuxAgentPodRunnerRequest {
+        LinuxAgentPodRunnerRequest {
             mount_namespace: LinuxMountNamespacePlan {
                 schema_version: 1,
                 workspace_host_path: "/tmp/agentbox-work".into(),
@@ -232,12 +296,55 @@ mod tests {
             },
             command_argv: vec!["/bin/true".into()],
             working_dir: Some("/workspace".into()),
-        };
+        }
+    }
+
+    #[test]
+    fn landlock_alias_adds_guest_workspace_rule() {
+        let request = request();
 
         let plan = landlock_with_guest_workspace_alias(&request);
 
         assert!(plan.rules.iter().any(|rule| {
             rule.path == "/workspace" && rule.reason == "guest workspace bind-mount alias"
         }));
+    }
+
+    #[test]
+    fn validates_overlayfs_workspace_request() {
+        let mut request = request();
+        request.mount_namespace.overlayfs = Some(LinuxOverlayFsWorkspacePlan {
+            lower_host_path: "/tmp/agentbox-work".into(),
+            upper_host_path: "/tmp/agentbox-overlay/upper".into(),
+            work_host_path: "/tmp/agentbox-overlay/work".into(),
+            merged_guest_path: "/workspace".into(),
+            mode: agentbox_daemon::runtime::types::WorkspaceOverlayMode::ReviewRequired,
+            review_required: true,
+            requires_overlayfs: true,
+        });
+
+        validate_request(&request).unwrap();
+        assert_eq!(
+            overlay_mount_options(request.mount_namespace.overlayfs.as_ref().unwrap()),
+            "lowerdir=/tmp/agentbox-work,upperdir=/tmp/agentbox-overlay/upper,workdir=/tmp/agentbox-overlay/work"
+        );
+    }
+
+    #[test]
+    fn rejects_overlayfs_request_with_same_upper_and_work_paths() {
+        let mut request = request();
+        request.mount_namespace.overlayfs = Some(LinuxOverlayFsWorkspacePlan {
+            lower_host_path: "/tmp/agentbox-work".into(),
+            upper_host_path: "/tmp/agentbox-overlay/same".into(),
+            work_host_path: "/tmp/agentbox-overlay/same".into(),
+            merged_guest_path: "/workspace".into(),
+            mode: agentbox_daemon::runtime::types::WorkspaceOverlayMode::ReviewRequired,
+            review_required: true,
+            requires_overlayfs: true,
+        });
+
+        let err = validate_request(&request).unwrap_err();
+
+        assert!(err.to_string().contains("upper and work paths must differ"));
     }
 }

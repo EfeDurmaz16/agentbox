@@ -261,7 +261,7 @@ impl RuntimeProvider for AgentPodProvider {
                             "gated unshare user namespace composition; not a complete sandbox"
                         }
                         AgentPodPrimitive::MountNamespaces => {
-                            "gated unshare mount namespace composition plus workspace mount plan; overlayfs apply is incomplete"
+                            "gated unshare mount namespace composition with runner-managed bind mounts and prototype overlayfs workspace apply"
                         }
                         AgentPodPrimitive::PidNamespaces => {
                             "gated unshare PID namespace composition; process supervision remains prototype"

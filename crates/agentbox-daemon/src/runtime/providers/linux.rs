@@ -137,14 +137,26 @@ impl LinuxMountNamespacePlan {
             })
             .flatten();
 
+        let (workspace_bind_mount_wired, workspace_mount_claim) = if overlayfs.is_some() {
+            (
+                true,
+                "agentbox-linux-runner mounts the review workspace with overlayfs inside the mount namespace before applying Landlock/seccomp"
+                    .to_string(),
+            )
+        } else {
+            (
+                true,
+                "agentbox-linux-runner bind-mounts the host workspace inside the mount namespace before applying Landlock/seccomp"
+                    .to_string(),
+            )
+        };
+
         Self {
             schema_version: 1,
             workspace_host_path: spec.filesystem.workspace_host_path.display().to_string(),
             workspace_guest_path: spec.filesystem.workspace_guest_path.clone(),
-            workspace_bind_mount_wired: true,
-            workspace_mount_claim:
-                "agentbox-linux-runner bind-mounts the host workspace inside the mount namespace before applying Landlock/seccomp"
-                    .to_string(),
+            workspace_bind_mount_wired,
+            workspace_mount_claim,
             overlayfs,
             read_only_mounts,
             propagation: "private".to_string(),
@@ -1156,7 +1168,7 @@ impl LinuxAgentPodExecutionPlan {
             live_execution_enabled: linux_native_execution_enabled(),
             requires_linux: true,
             security_claim:
-                "prototype namespace/resource execution with runner-managed workspace bind mount and cgroup v2 process attach; not a complete sandbox"
+                "prototype namespace/resource execution with runner-managed workspace mount and cgroup v2 process attach; not a complete sandbox"
                     .into(),
         })
     }
@@ -1206,6 +1218,26 @@ fn linux_agentpod_runner_phases(
             }
             .into(),
             claim: mount_namespace.workspace_mount_claim.clone(),
+        },
+        LinuxAgentPodRunnerPhase {
+            name: "apply-overlayfs".into(),
+            status: if mount_namespace.overlayfs.is_some() {
+                "prototype"
+            } else {
+                "inactive"
+            }
+            .into(),
+            claim: if let Some(overlayfs) = &mount_namespace.overlayfs {
+                format!(
+                    "mount overlayfs lower={} upper={} work={} merged={}",
+                    overlayfs.lower_host_path,
+                    overlayfs.upper_host_path,
+                    overlayfs.work_host_path,
+                    overlayfs.merged_guest_path
+                )
+            } else {
+                "no workspace overlay requested".into()
+            },
         },
         LinuxAgentPodRunnerPhase {
             name: "apply-landlock".into(),
@@ -2676,6 +2708,7 @@ mod tests {
             vec![
                 ("enter-user-mount-pid-namespaces", "prototype"),
                 ("bind-workspace", "prototype"),
+                ("apply-overlayfs", "inactive"),
                 ("apply-landlock", "prototype"),
                 ("apply-seccomp", "inactive"),
                 ("exec-command", "prototype"),
@@ -2699,10 +2732,46 @@ mod tests {
         assert!(plan.security_claim.contains("cgroup v2 process attach"));
         assert!(plan
             .security_claim
-            .contains("runner-managed workspace bind mount"));
+            .contains("runner-managed workspace mount"));
         assert_eq!(plan.cgroup.cgroup_name, format!("agentbox-{}", spec.id));
         assert!(plan.landlock.default_deny);
         assert!(!plan.seccomp.requires_loader);
+    }
+
+    #[test]
+    fn agentpod_execution_plan_wires_linux_overlayfs_phase() {
+        let mut spec = MinipodSpec::for_agent_task("hermes", "/tmp/agentbox-work");
+        spec.filesystem.workspace_overlay =
+            crate::runtime::types::WorkspaceOverlayPolicy::review_required(Some(
+                "/tmp/agentbox-overlay/session-1".into(),
+            ));
+        let command = command(&["/bin/true"]);
+
+        let plan = LinuxAgentPodExecutionPlan::from_minipod_spec(&spec, &command).unwrap();
+
+        let overlayfs = plan.mount_namespace.overlayfs.as_ref().unwrap();
+        assert_eq!(overlayfs.lower_host_path, "/tmp/agentbox-work");
+        assert_eq!(
+            overlayfs.upper_host_path,
+            "/tmp/agentbox-overlay/session-1/upper"
+        );
+        assert_eq!(
+            overlayfs.work_host_path,
+            "/tmp/agentbox-overlay/session-1/work"
+        );
+        assert_eq!(overlayfs.merged_guest_path, "/workspace");
+        assert!(overlayfs.review_required);
+        assert!(plan
+            .mount_namespace
+            .workspace_mount_claim
+            .contains("overlayfs"));
+        assert!(plan.runner_phases.iter().any(|phase| {
+            phase.name == "apply-overlayfs"
+                && phase.status == "prototype"
+                && phase
+                    .claim
+                    .contains("upper=/tmp/agentbox-overlay/session-1/upper")
+        }));
     }
 
     #[test]
