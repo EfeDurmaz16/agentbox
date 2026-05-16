@@ -1948,9 +1948,11 @@ fn setup_provider_check_names(provider: &str) -> &'static [&'static str] {
             "Apple Virtualization",
             "macOS VM runner binary",
             "Endpoint Security entitlement",
-            "macOS system extension",
+            "Endpoint Security extension install",
+            "Endpoint Security extension approval",
             "Network Extension entitlement",
-            "macOS network extension",
+            "Network Extension install",
+            "Network Extension approval",
         ],
         "agentpod-linux" => &[
             "Linux native plan",
@@ -2008,9 +2010,11 @@ fn setup_step_title(check_name: &str) -> &'static str {
         "Apple Virtualization" => "Enable VM-backed macOS planning prerequisites",
         "macOS VM runner binary" => "Build the macOS VM runner",
         "Endpoint Security entitlement" => "Prepare macOS Endpoint Security signing",
-        "macOS system extension" => "Install the macOS Endpoint Security extension",
+        "Endpoint Security extension install" => "Install the macOS Endpoint Security extension",
+        "Endpoint Security extension approval" => "Approve the macOS Endpoint Security extension",
         "Network Extension entitlement" => "Prepare macOS Network Extension signing",
-        "macOS network extension" => "Install the macOS Network Extension",
+        "Network Extension install" => "Install the macOS Network Extension",
+        "Network Extension approval" => "Approve the macOS Network Extension",
         "Linux user namespace" => "Enable Linux user namespaces",
         "Linux cgroups v2" => "Enable Linux cgroups v2",
         "Linux seccomp" => "Enable Linux seccomp",
@@ -2261,10 +2265,16 @@ fn macos_native_doctor_checks() -> Vec<DoctorCheck> {
             "sign the future system extension with the Endpoint Security entitlement",
         ),
         doctor_advisory_check(
-            "macOS system extension",
+            "Endpoint Security extension install",
             false,
-            "signed Endpoint Security system extension lifecycle is not wired".to_string(),
+            "signed Endpoint Security system extension install check is not wired".to_string(),
             "install and approve the future Agentbox Endpoint Security system extension",
+        ),
+        doctor_advisory_check(
+            "Endpoint Security extension approval",
+            false,
+            "Endpoint Security user approval check is not wired".to_string(),
+            "approve the future Agentbox Endpoint Security system extension in System Settings",
         ),
         doctor_advisory_check(
             "Network Extension entitlement",
@@ -2275,10 +2285,16 @@ fn macos_native_doctor_checks() -> Vec<DoctorCheck> {
             "sign the future network extension with the required Network Extension entitlement",
         ),
         doctor_advisory_check(
-            "macOS network extension",
+            "Network Extension install",
             false,
-            "signed Network Extension lifecycle is not wired".to_string(),
+            "signed Network Extension install check is not wired".to_string(),
             "install and approve the future Agentbox Network Extension",
+        ),
+        doctor_advisory_check(
+            "Network Extension approval",
+            false,
+            "Network Extension user approval check is not wired".to_string(),
+            "approve the future Agentbox Network Extension in System Settings",
         ),
     ]
 }
@@ -8179,15 +8195,23 @@ mod tests {
             .any(|check| check.name == "Endpoint Security entitlement"));
         assert!(checks
             .iter()
-            .any(|check| check.name == "macOS system extension"
-                && check.detail.contains("not wired")));
+            .any(|check| check.name == "Endpoint Security extension install"
+                && check.detail.contains("install check")));
+        assert!(checks
+            .iter()
+            .any(|check| check.name == "Endpoint Security extension approval"
+                && check.detail.contains("approval check")));
         assert!(checks
             .iter()
             .any(|check| check.name == "Network Extension entitlement"));
         assert!(checks
             .iter()
-            .any(|check| check.name == "macOS network extension"
-                && check.detail.contains("not wired")));
+            .any(|check| check.name == "Network Extension install"
+                && check.detail.contains("install check")));
+        assert!(checks
+            .iter()
+            .any(|check| check.name == "Network Extension approval"
+                && check.detail.contains("approval check")));
         assert!(checks
             .iter()
             .filter(|check| check.name.contains("entitlement"))
