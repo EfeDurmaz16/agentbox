@@ -164,14 +164,18 @@ agentbox remote-evidence-status \
 The command prints the validated worker response, including session status,
 restart policy metadata, heartbeat timestamp, kill-switch state, evidence-sealed
 state, evidence metadata receipts, pending approvals, stream state, and stored
-bundle payload references. With `--agentpod-receipt`, it also queries the same
+bundle payload references. It also includes an `event_stream` descriptor that
+names the lifecycle stream, evidence stream prefix, polling paths, ordering
+semantics, replay semantics, and the explicit claim boundary that this is not a
+live bidirectional event bus. With `--agentpod-receipt`, it also queries the same
 session lifecycle journal and prints an AgentPod-style operator receipt with
 remote enforcement status, lifecycle events, evidence-sealed state, bundle
 references, stream references, and unsupported credential modes. This is a
 receipt parity surface; it does not claim that the remote worker is a complete
 sandbox. `remote-events` prints the persisted lifecycle event journal for the
-session, including allocation, command start/finish, evidence seal, restart, and
-destroy events with monotonically increasing sequence
+session plus the same typed event stream descriptor, including allocation,
+command start/finish, evidence seal, restart, and destroy events with
+monotonically increasing sequence
 numbers.
 
 If the worker reports a stopped or failed session, the operator can explicitly
@@ -420,8 +424,10 @@ The stream route accepts ordered, session-bound UTF-8 evidence chunks with a
 per-chunk SHA-256, explicit offset, and final-chunk marker. The worker rejects
 out-of-order chunks, rejects writes after a stream is sealed, and reports the
 final stream SHA-256 in the acknowledgement and status response. This is the
-first executable append-only stream contract; it is still not a full live event
-bus or bidirectional approval channel.
+first executable append-only evidence stream contract. Status and lifecycle
+responses expose a typed `event_stream` descriptor for the current polling
+contract, but it is still not a full live event bus or bidirectional approval
+channel.
 Worker routes that mutate session state fail the request if the configured
 state file cannot be serialized, prepared, or written; they do not acknowledge
 state-changing operations as durable when persistence fails.
@@ -446,10 +452,11 @@ Ordered evidence stream chunks and command-scope pending approval resolution
 also exist at the worker contract layer. Remote evidence status can also produce
 an AgentPod-style receipt summary that joins worker status with lifecycle events,
 sealed evidence state, bundle references, stream references, and explicitly
-unsupported credential modes. Typed approval prompt descriptors now exist, but
-rich interactive approval UI is not wired. Socket and provider-token credential
-handoff, full evidence event streaming, supervised worker restarts, and
-merge/conflict UX beyond overwrite protection remain future
+unsupported credential modes. Typed event stream descriptors and approval prompt
+descriptors now exist, but rich interactive approval UI and live bidirectional
+event transport are not wired. Socket and provider-token credential handoff,
+full evidence event streaming, supervised worker restarts, and merge/conflict UX
+beyond overwrite protection remain future
 work.
 
 `scripts/smoke-remote-worker.sh` starts this worker on a random loopback port,

@@ -8761,12 +8761,13 @@ async fn main() {
 mod tests {
     use super::*;
     use agentbox_daemon::runtime::providers::remote::{
-        RemoteAgentPodEvidenceReceiptStatus, RemoteAgentPodEvidenceStatusResponse,
-        RemoteAgentPodEvidenceStreamStatus, RemoteAgentPodLifecycleEvent,
-        RemoteAgentPodLifecycleEventRecord, RemoteAgentPodLifecycleEventsResponse,
-        RemoteAgentPodRestartPolicy, RemoteAgentPodRestartStrategy,
-        RemoteAgentPodStoredEvidenceBundleStatus, RemoteAgentPodWorkspaceBundle,
-        RemoteAgentPodWorkspaceExportResponse, RemoteAgentPodWorkspaceFile,
+        RemoteAgentPodEventStreamDescriptor, RemoteAgentPodEvidenceReceiptStatus,
+        RemoteAgentPodEvidenceStatusResponse, RemoteAgentPodEvidenceStreamStatus,
+        RemoteAgentPodLifecycleEvent, RemoteAgentPodLifecycleEventRecord,
+        RemoteAgentPodLifecycleEventsResponse, RemoteAgentPodRestartPolicy,
+        RemoteAgentPodRestartStrategy, RemoteAgentPodStoredEvidenceBundleStatus,
+        RemoteAgentPodWorkspaceBundle, RemoteAgentPodWorkspaceExportResponse,
+        RemoteAgentPodWorkspaceFile,
     };
     use agentbox_daemon::runtime::types::{
         AgentPodNativeReceiptSummary, AgentPodRiskLevel, AgentPodRunnerPhaseReceipt,
@@ -9717,6 +9718,7 @@ mod tests {
         let status = RemoteAgentPodEvidenceStatusResponse {
             session_id: "local-session".into(),
             worker_session_id: "worker-session".into(),
+            event_stream: RemoteAgentPodEventStreamDescriptor::default(),
             status: RuntimeStatus::Running,
             commands_started: 2,
             commands_finished: 2,
@@ -9762,6 +9764,7 @@ mod tests {
         let events = RemoteAgentPodLifecycleEventsResponse {
             session_id: "local-session".into(),
             worker_session_id: "worker-session".into(),
+            event_stream: RemoteAgentPodEventStreamDescriptor::default(),
             events: vec![
                 RemoteAgentPodLifecycleEventRecord {
                     sequence: 1,

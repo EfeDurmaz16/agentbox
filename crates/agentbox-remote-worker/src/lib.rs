@@ -9,11 +9,11 @@ use agentbox_daemon::runtime::providers::remote::{
     RemoteAgentPodApprovalGrantResponse, RemoteAgentPodApprovalPrompt,
     RemoteAgentPodCreateSessionRequest, RemoteAgentPodCreateSessionResponse,
     RemoteAgentPodCredentialStatus, RemoteAgentPodDestroySessionRequest,
-    RemoteAgentPodDestroySessionResponse, RemoteAgentPodEvidenceStreamChunkRequest,
-    RemoteAgentPodEvidenceStreamChunkResponse, RemoteAgentPodEvidenceStreamStatus,
-    RemoteAgentPodEvidenceUploadRequest, RemoteAgentPodEvidenceUploadResponse,
-    RemoteAgentPodExecRequest, RemoteAgentPodExecResponse, RemoteAgentPodHandshakeAck,
-    RemoteAgentPodHandshakeDescriptor, RemoteAgentPodLifecycleEvent,
+    RemoteAgentPodDestroySessionResponse, RemoteAgentPodEventStreamDescriptor,
+    RemoteAgentPodEvidenceStreamChunkRequest, RemoteAgentPodEvidenceStreamChunkResponse,
+    RemoteAgentPodEvidenceStreamStatus, RemoteAgentPodEvidenceUploadRequest,
+    RemoteAgentPodEvidenceUploadResponse, RemoteAgentPodExecRequest, RemoteAgentPodExecResponse,
+    RemoteAgentPodHandshakeAck, RemoteAgentPodHandshakeDescriptor, RemoteAgentPodLifecycleEvent,
     RemoteAgentPodLifecycleEventRecord, RemoteAgentPodLifecycleEventsResponse,
     RemoteAgentPodPendingApprovalStatus, RemoteAgentPodRestartPolicy,
     RemoteAgentPodRestartSessionRequest, RemoteAgentPodRestartSessionResponse,
@@ -382,6 +382,7 @@ struct WorkerEvidenceStatusQuery {
 struct WorkerEvidenceStatusResponse {
     session_id: String,
     worker_session_id: String,
+    event_stream: RemoteAgentPodEventStreamDescriptor,
     status: RuntimeStatus,
     commands_started: u64,
     commands_finished: u64,
@@ -1932,6 +1933,7 @@ async fn evidence_status(
     Ok(Json(WorkerEvidenceStatusResponse {
         session_id: session.session_id.clone(),
         worker_session_id: worker_session_id.clone(),
+        event_stream: worker_event_stream_descriptor(&session.session_id, &worker_session_id),
         status: session.status.clone(),
         commands_started: session.commands_started,
         commands_finished: session.commands_finished,
@@ -2006,6 +2008,7 @@ async fn lifecycle_events(
     }
     Ok(Json(RemoteAgentPodLifecycleEventsResponse {
         session_id: session.session_id.clone(),
+        event_stream: worker_event_stream_descriptor(&session.session_id, &worker_session_id),
         worker_session_id,
         events: session.lifecycle_events.clone(),
     }))
@@ -2698,6 +2701,28 @@ fn worker_pending_approval_status(
         reason: approval.reason.clone(),
         prompt: worker_pending_approval_prompt(session_id, worker_session_id, approval),
         created_at: approval.created_at,
+    }
+}
+
+fn worker_event_stream_descriptor(
+    session_id: &str,
+    worker_session_id: &str,
+) -> RemoteAgentPodEventStreamDescriptor {
+    RemoteAgentPodEventStreamDescriptor {
+        schema_version: 1,
+        delivery: "http-polling-contract".into(),
+        lifecycle_stream_id: format!("lifecycle:{session_id}:{worker_session_id}"),
+        evidence_stream_prefix: format!("evidence:{session_id}:{worker_session_id}:"),
+        lifecycle_events_path: format!(
+            "/sessions/{worker_session_id}/events?session_id={session_id}"
+        ),
+        evidence_status_path: format!(
+            "/sessions/{worker_session_id}/evidence/status?session_id={session_id}"
+        ),
+        evidence_chunk_path: format!("/sessions/{worker_session_id}/evidence/stream"),
+        ordering: "monotonic lifecycle sequence; per-stream evidence sequence".into(),
+        replay: "full journal/status replay over polling endpoints".into(),
+        claim_boundary: "descriptor only; not a live bidirectional event bus".into(),
     }
 }
 
@@ -4647,6 +4672,15 @@ mod tests {
 
         assert_eq!(response.session_id, "session-1");
         assert_eq!(response.worker_session_id, "worker-session-1");
+        assert_eq!(response.event_stream.delivery, "http-polling-contract");
+        assert!(response
+            .event_stream
+            .lifecycle_stream_id
+            .contains("worker-session-1"));
+        assert!(response
+            .event_stream
+            .claim_boundary
+            .contains("not a live bidirectional event bus"));
         assert_eq!(response.status, RuntimeStatus::Running);
         assert_eq!(response.commands_started, 2);
         assert_eq!(response.commands_finished, 1);

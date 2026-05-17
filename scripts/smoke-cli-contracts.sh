@@ -225,7 +225,7 @@ log "checking remote descriptor JSON"
   --auth signed-challenge \
   --evidence bundle-upload >"$TMPDIR/remote-descriptor.json"
 validate_json "$TMPDIR/remote-descriptor.json" \
-  "data.get('provider') == 'remote-agentpod' and data.get('endpoint') == 'https://worker.example.com/agentpod' and data.get('auth_kind') == 'SignedChallenge' and data.get('evidence_mode') == 'BundleUpload' and data.get('secret_material_included') == False and data.get('lifecycle', {}).get('heartbeat_interval_seconds') == 30 and data.get('lifecycle', {}).get('restart_policy', {}).get('strategy') == 'OnFailure'"
+  "data.get('provider') == 'remote-agentpod' and data.get('endpoint') == 'https://worker.example.com/agentpod' and data.get('auth_kind') == 'SignedChallenge' and data.get('evidence_mode') == 'BundleUpload' and data.get('secret_material_included') == False and data.get('lifecycle', {}).get('heartbeat_interval_seconds') == 30 and data.get('lifecycle', {}).get('restart_policy', {}).get('strategy') == 'OnFailure' and data.get('event_stream', {}).get('delivery') == 'http-polling-contract' and data.get('event_stream', {}).get('evidence_chunk_path') == '/sessions/<worker-session>/evidence/stream' and 'not a live bidirectional event bus' in data.get('event_stream', {}).get('claim_boundary', '')"
 
 log "checking remote handshake JSON"
 "${CLI[@]}" remote-handshake \

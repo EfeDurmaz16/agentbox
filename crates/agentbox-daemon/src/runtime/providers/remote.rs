@@ -1069,6 +1069,8 @@ pub struct RemoteAgentPodStoredEvidenceBundleStatus {
 pub struct RemoteAgentPodEvidenceStatusResponse {
     pub session_id: String,
     pub worker_session_id: String,
+    #[serde(default)]
+    pub event_stream: RemoteAgentPodEventStreamDescriptor,
     pub status: RuntimeStatus,
     #[serde(default)]
     pub commands_started: u64,
@@ -1100,6 +1102,68 @@ pub struct RemoteAgentPodEvidenceStatusResponse {
     pub credentials: Vec<RemoteAgentPodCredentialStatus>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub supervision: Option<RemoteAgentPodWorkerStatusResponse>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteAgentPodEventStreamDescriptor {
+    pub schema_version: i64,
+    pub delivery: String,
+    pub lifecycle_stream_id: String,
+    pub evidence_stream_prefix: String,
+    pub lifecycle_events_path: String,
+    pub evidence_status_path: String,
+    pub evidence_chunk_path: String,
+    pub ordering: String,
+    pub replay: String,
+    pub claim_boundary: String,
+}
+
+impl Default for RemoteAgentPodEventStreamDescriptor {
+    fn default() -> Self {
+        Self {
+            schema_version: 1,
+            delivery: "http-polling-contract".into(),
+            lifecycle_stream_id: "lifecycle:<session>:<worker-session>".into(),
+            evidence_stream_prefix: "evidence:<session>:<worker-session>:".into(),
+            lifecycle_events_path: "/sessions/<worker-session>/events?session_id=<session>".into(),
+            evidence_status_path: "/sessions/<worker-session>/evidence/status?session_id=<session>"
+                .into(),
+            evidence_chunk_path: "/sessions/<worker-session>/evidence/stream".into(),
+            ordering: "monotonic lifecycle sequence; per-stream evidence sequence".into(),
+            replay: "full journal/status replay over polling endpoints".into(),
+            claim_boundary: "descriptor only; not a live bidirectional event bus".into(),
+        }
+    }
+}
+
+impl RemoteAgentPodEventStreamDescriptor {
+    pub fn validate(&self) -> Result<(), RuntimeError> {
+        if self.schema_version != 1
+            || self.delivery.trim().is_empty()
+            || self.lifecycle_stream_id.trim().is_empty()
+            || self.evidence_stream_prefix.trim().is_empty()
+            || self.lifecycle_events_path.trim().is_empty()
+            || self.evidence_status_path.trim().is_empty()
+            || self.evidence_chunk_path.trim().is_empty()
+            || self.ordering.trim().is_empty()
+            || self.replay.trim().is_empty()
+        {
+            return Err(RuntimeError::ManifestRejected(
+                "remote event stream descriptor must include schema v1 delivery, ids, paths, ordering, and replay semantics".into(),
+            ));
+        }
+        if self.delivery != "http-polling-contract"
+            || !self
+                .claim_boundary
+                .contains("not a live bidirectional event bus")
+        {
+            return Err(RuntimeError::ManifestRejected(
+                "remote event stream descriptor must honestly describe polling-only delivery"
+                    .into(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1152,6 +1216,8 @@ impl RemoteAgentPodLifecycleEventsRequest {
 pub struct RemoteAgentPodLifecycleEventsResponse {
     pub session_id: String,
     pub worker_session_id: String,
+    #[serde(default)]
+    pub event_stream: RemoteAgentPodEventStreamDescriptor,
     pub events: Vec<RemoteAgentPodLifecycleEventRecord>,
 }
 
@@ -1168,6 +1234,7 @@ impl RemoteAgentPodLifecycleEventsResponse {
                 "remote lifecycle events response session ids do not match request".into(),
             ));
         }
+        self.event_stream.validate()?;
         let mut previous = 0;
         for event in &self.events {
             event.validate()?;
@@ -1244,6 +1311,7 @@ impl RemoteAgentPodEvidenceStatusResponse {
                 "remote evidence status heartbeat interval must be greater than zero".into(),
             ));
         }
+        self.event_stream.validate()?;
         self.restart_policy.validate()?;
         for receipt in &self.evidence_receipts {
             validate_sha256_hex(
@@ -2154,6 +2222,8 @@ pub struct RemoteAgentPodTransportDescriptor {
     pub kill_switch_required: bool,
     pub secret_material_included: bool,
     pub lifecycle: RemoteAgentPodLifecycleDescriptor,
+    #[serde(default)]
+    pub event_stream: RemoteAgentPodEventStreamDescriptor,
     pub created_at: DateTime<Utc>,
 }
 
@@ -2167,6 +2237,8 @@ impl RemoteAgentPodTransportDescriptor {
         validate_remote_endpoint(&endpoint)?;
         let lifecycle = RemoteAgentPodLifecycleDescriptor::default();
         lifecycle.validate()?;
+        let event_stream = RemoteAgentPodEventStreamDescriptor::default();
+        event_stream.validate()?;
         Ok(Self {
             schema_version: 1,
             provider: "remote-agentpod".to_string(),
@@ -2176,6 +2248,7 @@ impl RemoteAgentPodTransportDescriptor {
             kill_switch_required: true,
             secret_material_included: false,
             lifecycle,
+            event_stream,
             created_at: Utc::now(),
         })
     }
@@ -3123,6 +3196,7 @@ mod tests {
             let response = RemoteAgentPodEvidenceStatusResponse {
                 session_id: request.session_id.clone(),
                 worker_session_id: request.worker_session_id.clone(),
+                event_stream: RemoteAgentPodEventStreamDescriptor::default(),
                 status: RuntimeStatus::Running,
                 commands_started: 1,
                 commands_finished: 1,
@@ -3196,6 +3270,7 @@ mod tests {
             let response = RemoteAgentPodLifecycleEventsResponse {
                 session_id: request.session_id.clone(),
                 worker_session_id: request.worker_session_id.clone(),
+                event_stream: RemoteAgentPodEventStreamDescriptor::default(),
                 events: vec![
                     RemoteAgentPodLifecycleEventRecord {
                         sequence: 1,
@@ -3555,6 +3630,11 @@ mod tests {
             .required_events
             .contains(&RemoteAgentPodLifecycleEvent::KillSwitchAck));
         assert!(descriptor.lifecycle.kill_switch_required);
+        assert_eq!(descriptor.event_stream.delivery, "http-polling-contract");
+        assert!(descriptor
+            .event_stream
+            .claim_boundary
+            .contains("not a live bidirectional event bus"));
     }
 
     #[test]
@@ -4200,6 +4280,7 @@ mod tests {
         let response = RemoteAgentPodEvidenceStatusResponse {
             session_id: "session-1".into(),
             worker_session_id: "worker-session-1".into(),
+            event_stream: RemoteAgentPodEventStreamDescriptor::default(),
             status: RuntimeStatus::Running,
             commands_started: 1,
             commands_finished: 1,
@@ -4290,6 +4371,19 @@ mod tests {
     }
 
     #[test]
+    fn remote_event_stream_descriptor_requires_polling_boundary() {
+        let descriptor = RemoteAgentPodEventStreamDescriptor {
+            delivery: "websocket".into(),
+            claim_boundary: "live bidirectional event bus is ready".into(),
+            ..RemoteAgentPodEventStreamDescriptor::default()
+        };
+
+        let err = descriptor.validate().unwrap_err();
+
+        assert!(err.to_string().contains("polling-only delivery"));
+    }
+
+    #[test]
     fn remote_evidence_status_response_rejects_empty_storage_ack() {
         let request = RemoteAgentPodEvidenceStatusRequest {
             session_id: "session-1".into(),
@@ -4298,6 +4392,7 @@ mod tests {
         let response = RemoteAgentPodEvidenceStatusResponse {
             session_id: "session-1".into(),
             worker_session_id: "worker-session-1".into(),
+            event_stream: RemoteAgentPodEventStreamDescriptor::default(),
             status: RuntimeStatus::Running,
             commands_started: 0,
             commands_finished: 0,
