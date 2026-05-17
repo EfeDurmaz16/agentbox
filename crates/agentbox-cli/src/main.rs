@@ -477,6 +477,16 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
+    /// Report active, prototype, descriptor-only, and missing provider primitives
+    ProviderGaps {
+        /// Emit JSON
+        #[arg(long)]
+        json: bool,
+
+        /// Limit gap output to one provider
+        #[arg(long)]
+        provider: Option<String>,
+    },
     /// Inspect provider host-bridge capability health without starting a session
     BridgeHealth {
         /// Emit JSON
@@ -6132,6 +6142,133 @@ fn cmd_providers(json: bool) {
     }
 }
 
+fn provider_gap_rows(provider_filter: Option<&str>) -> Vec<serde_json::Value> {
+    let mut rows = provider_status_rows()
+        .into_iter()
+        .filter(|row| {
+            provider_filter.is_none_or(|filter| {
+                row.get("provider").and_then(serde_json::Value::as_str) == Some(filter)
+            })
+        })
+        .map(|row| {
+            let primitive_statuses = row
+                .get("boundary_primitive_statuses")
+                .and_then(serde_json::Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            let primitive_names_by = |predicate: &dyn Fn(&serde_json::Value) -> bool| {
+                primitive_statuses
+                    .iter()
+                    .filter(|primitive| predicate(primitive))
+                    .filter_map(|primitive| primitive.get("primitive")?.as_str())
+                    .map(str::to_string)
+                    .collect::<Vec<_>>()
+            };
+            let active = primitive_names_by(&|primitive| {
+                primitive
+                    .get("active")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false)
+            });
+            let prototype = primitive_names_by(&|primitive| {
+                primitive.get("status").and_then(serde_json::Value::as_str) == Some("prototype")
+            });
+            let descriptor_only = primitive_names_by(&|primitive| {
+                primitive.get("status").and_then(serde_json::Value::as_str)
+                    == Some("descriptor-only")
+            });
+            let missing = primitive_names_by(&|primitive| {
+                matches!(
+                    primitive.get("status").and_then(serde_json::Value::as_str),
+                    Some("unavailable" | "missing")
+                )
+            });
+            let gated = primitive_statuses
+                .iter()
+                .filter_map(|primitive| {
+                    let gate = primitive
+                        .get("requires_gate")
+                        .and_then(serde_json::Value::as_str)?;
+                    let name = primitive.get("primitive")?.as_str()?;
+                    Some(serde_json::json!({
+                        "primitive": name,
+                        "requires_gate": gate,
+                    }))
+                })
+                .collect::<Vec<_>>();
+
+            serde_json::json!({
+                "provider": row.get("provider").cloned().unwrap_or(serde_json::Value::Null),
+                "status": row.get("status").cloned().unwrap_or(serde_json::Value::Null),
+                "active": active,
+                "prototype": prototype,
+                "descriptor_only": descriptor_only,
+                "missing": missing,
+                "gated": gated,
+                "doctor_check": row.get("doctor_check").cloned().unwrap_or(serde_json::Value::Null),
+                "verification_command": row.get("verification_command").cloned().unwrap_or(serde_json::Value::Null),
+            })
+        })
+        .collect::<Vec<_>>();
+    rows.sort_by(|left, right| {
+        left["provider"]
+            .as_str()
+            .unwrap_or_default()
+            .cmp(right["provider"].as_str().unwrap_or_default())
+    });
+    rows
+}
+
+fn cmd_provider_gaps(json: bool, provider_filter: Option<String>) {
+    let rows = provider_gap_rows(provider_filter.as_deref());
+    if provider_filter.is_some() && rows.is_empty() {
+        let provider = provider_filter.as_deref().unwrap_or_default();
+        eprintln!("error: unknown provider `{provider}`");
+        eprintln!(
+            "hint: expected direct-host, podman, agentpod-macos, agentpod-linux, agentpod-windows, or remote-agentpod"
+        );
+        std::process::exit(1);
+    }
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&rows).expect("failed to serialize provider gaps")
+        );
+        return;
+    }
+
+    println!(
+        "{:<18} {:<18} {:<28} {:<28} {:<28} MISSING",
+        "PROVIDER", "STATUS", "ACTIVE", "PROTOTYPE", "DESCRIPTOR-ONLY"
+    );
+    println!("{}", "-".repeat(136));
+    for row in rows {
+        println!(
+            "{:<18} {:<18} {:<28} {:<28} {:<28} {}",
+            row["provider"].as_str().unwrap_or_default(),
+            row["status"].as_str().unwrap_or_default(),
+            json_string_array(&row["active"]).join(", "),
+            json_string_array(&row["prototype"]).join(", "),
+            json_string_array(&row["descriptor_only"]).join(", "),
+            json_string_array(&row["missing"]).join(", ")
+        );
+    }
+}
+
+fn json_string_array(value: &serde_json::Value) -> Vec<String> {
+    value
+        .as_array()
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn cmd_bridge_health(json: bool, provider_filter: Option<String>) {
     let mut rows = provider_status_rows()
         .into_iter()
@@ -8093,6 +8230,7 @@ async fn main() {
             max_processes,
         }),
         Commands::Providers { json } => cmd_providers(json),
+        Commands::ProviderGaps { json, provider } => cmd_provider_gaps(json, provider),
         Commands::BridgeHealth { json, provider } => cmd_bridge_health(json, provider),
         Commands::RemoteDescriptor {
             endpoint,
@@ -8564,6 +8702,25 @@ mod tests {
                 "active": false
             })),
             "supported"
+        );
+    }
+
+    #[test]
+    fn provider_gap_rows_classify_primitives_without_new_claims() {
+        let rows = provider_gap_rows(Some("agentpod-linux"));
+        assert_eq!(rows.len(), 1);
+        let linux = &rows[0];
+
+        assert_eq!(linux["provider"], serde_json::json!("agentpod-linux"));
+        assert!(json_string_array(&linux["prototype"]).contains(&"seccomp".to_string()));
+        assert!(json_string_array(&linux["prototype"]).contains(&"landlock".to_string()));
+        assert!(json_string_array(&linux["prototype"]).contains(&"nftables".to_string()));
+        assert!(linux["gated"].as_array().unwrap().iter().any(|gate| {
+            gate["primitive"] == "seccomp" && gate["requires_gate"] == "AGENTBOX_LINUX_NATIVE=1"
+        }));
+        assert_eq!(
+            linux["verification_command"],
+            serde_json::json!("agentbox native-plan --provider agentpod-linux -- <cmd>")
         );
     }
 
