@@ -90,6 +90,9 @@ overlayfs, Landlock, and seccomp are prototype phases. This is still a
 prototype primitive: live execution must be explicitly gated with
 `AGENTBOX_LINUX_NATIVE`, and it is not a complete sandbox claim until the
 remaining loaders and provider lifecycle are wired and tested on Linux.
+Session evidence bundles for AgentPod providers include an optional native
+receipt summary that lists the provider, observed runner phase evidence,
+enforcement status, skipped planned primitives, and evidence references.
 
 The plan can be inspected without execution:
 

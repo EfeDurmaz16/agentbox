@@ -904,8 +904,29 @@ pub struct SessionEvidenceBundle {
     pub transcripts: Vec<CommandTranscript>,
     #[serde(default)]
     pub integration_descriptors: Vec<EvidenceIntegrationDescriptor>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agentpod_receipt: Option<AgentPodNativeReceiptSummary>,
     pub replay: SessionReplayMetadata,
     pub generated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentPodNativeReceiptSummary {
+    pub schema_version: i64,
+    pub provider: String,
+    pub enforcement_status: String,
+    pub runner_phases: Vec<AgentPodRunnerPhaseReceipt>,
+    pub enforced_phases: Vec<String>,
+    pub skipped_planned_primitives: Vec<String>,
+    pub evidence_refs: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentPodRunnerPhaseReceipt {
+    pub phase: String,
+    pub status: String,
+    pub event_name: String,
+    pub evidence_ref: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -998,6 +1019,7 @@ impl SessionEvidenceBundle {
         let replay = SessionReplayMetadata::from_session_events(session, events);
         let evidence_refs = evidence_refs_for_events(events);
         let integration_descriptors = evidence_integration_descriptors(&evidence_refs);
+        let agentpod_receipt = agentpod_native_receipt_summary(session, events);
         let now = Utc::now();
 
         Self {
@@ -1030,10 +1052,91 @@ impl SessionEvidenceBundle {
             credential_events,
             transcripts: session.transcripts.clone(),
             integration_descriptors,
+            agentpod_receipt,
             replay,
             generated_at: Utc::now(),
         }
     }
+}
+
+fn agentpod_native_receipt_summary(
+    session: &RuntimeSession,
+    events: &[AuditEvent],
+) -> Option<AgentPodNativeReceiptSummary> {
+    if !session.provider.starts_with("agentpod-") {
+        return None;
+    }
+
+    let runner_phases: Vec<_> = events
+        .iter()
+        .filter(|event| event.bucket == "native-runner")
+        .filter_map(agentpod_runner_phase_receipt_from_event)
+        .collect();
+    let mut enforced_phases: Vec<String> = runner_phases
+        .iter()
+        .filter(|phase| matches!(phase.status.as_str(), "prototype" | "shipped" | "active"))
+        .map(|phase| phase.phase.clone())
+        .collect();
+    enforced_phases.sort();
+    enforced_phases.dedup();
+
+    let mut skipped_planned_primitives = Vec::new();
+    if session.provider == "agentpod-linux" {
+        skipped_planned_primitives.extend([
+            "complete libseccomp profile loading".to_string(),
+            "complete Landlock ABI coverage".to_string(),
+            "nftables packet/domain enforcement".to_string(),
+            "cross-host overlayfs live proof".to_string(),
+        ]);
+    }
+    for phase in &runner_phases {
+        if matches!(phase.status.as_str(), "inactive" | "planned" | "descriptor") {
+            skipped_planned_primitives.push(format!("{} phase {}", phase.phase, phase.status));
+        }
+    }
+    skipped_planned_primitives.sort();
+    skipped_planned_primitives.dedup();
+
+    let evidence_refs = runner_phases
+        .iter()
+        .filter_map(|phase| phase.evidence_ref.clone())
+        .collect();
+
+    Some(AgentPodNativeReceiptSummary {
+        schema_version: 1,
+        provider: session.provider.clone(),
+        enforcement_status: if runner_phases.is_empty() {
+            "descriptor-only-or-unobserved".to_string()
+        } else {
+            "prototype-native-runner-evidence".to_string()
+        },
+        runner_phases,
+        enforced_phases,
+        skipped_planned_primitives,
+        evidence_refs,
+    })
+}
+
+fn agentpod_runner_phase_receipt_from_event(
+    event: &AuditEvent,
+) -> Option<AgentPodRunnerPhaseReceipt> {
+    let mut command_parts = event.command.split_whitespace();
+    let event_name = command_parts.next()?;
+    if !event_name.starts_with("agentpod.") || !event_name.contains(".runner.") {
+        return None;
+    }
+    let phase_from_command = command_parts.next()?;
+    let (phase, status) = event.decision.rsplit_once(':')?;
+    Some(AgentPodRunnerPhaseReceipt {
+        phase: if phase.is_empty() {
+            phase_from_command.to_string()
+        } else {
+            phase.to_string()
+        },
+        status: status.to_string(),
+        event_name: event_name.to_string(),
+        evidence_ref: event.event_hash.clone(),
+    })
 }
 
 fn evidence_refs_for_events(events: &[AuditEvent]) -> Vec<String> {
@@ -1744,6 +1847,66 @@ mod tests {
         assert_eq!(bundle.replay.steps[0].sequence, 1);
         assert_eq!(bundle.replay.steps[1].policy_bucket, "approve");
         assert_eq!(bundle.manifest.agent.name, "openclaw");
+    }
+
+    #[test]
+    fn agentpod_receipt_summary_lists_phase_events_and_skipped_primitives() {
+        let spec = MinipodSpec::for_agent_task("openclaw", "/tmp/agentbox-work");
+        let session = RuntimeSession::new(
+            spec.name.clone(),
+            "agentpod-linux".into(),
+            "linux".into(),
+            spec,
+        );
+        let mut namespace_event = AuditEvent::new(
+            1,
+            Some("openclaw".into()),
+            format!(
+                "agentpod.linux.runner.namespaces.entered enter-user-mount-pid-namespaces {}",
+                session.id
+            ),
+            "/tmp/agentbox-work".into(),
+            "native-runner".into(),
+            "enter-user-mount-pid-namespaces:prototype".into(),
+            None,
+            Some("agentpod-linux".into()),
+        );
+        namespace_event.event_hash = Some("hash-namespace".into());
+        let mut seccomp_event = AuditEvent::new(
+            1,
+            Some("openclaw".into()),
+            format!(
+                "agentpod.linux.runner.seccomp.applied apply-seccomp {}",
+                session.id
+            ),
+            "/tmp/agentbox-work".into(),
+            "native-runner".into(),
+            "apply-seccomp:prototype".into(),
+            None,
+            Some("agentpod-linux".into()),
+        );
+        seccomp_event.event_hash = Some("hash-seccomp".into());
+
+        let bundle =
+            SessionEvidenceBundle::from_session_events(&session, &[namespace_event, seccomp_event]);
+        let receipt = bundle
+            .agentpod_receipt
+            .expect("agentpod-linux bundles should include a native receipt");
+
+        assert_eq!(receipt.schema_version, 1);
+        assert_eq!(receipt.provider, "agentpod-linux");
+        assert_eq!(
+            receipt.enforcement_status,
+            "prototype-native-runner-evidence"
+        );
+        assert_eq!(receipt.runner_phases.len(), 2);
+        assert!(receipt
+            .enforced_phases
+            .contains(&"apply-seccomp".to_string()));
+        assert!(receipt.evidence_refs.contains(&"hash-seccomp".to_string()));
+        assert!(receipt
+            .skipped_planned_primitives
+            .contains(&"nftables packet/domain enforcement".to_string()));
     }
 
     #[test]
