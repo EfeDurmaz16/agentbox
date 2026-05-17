@@ -385,6 +385,10 @@ enum Commands {
         /// Write a session evidence bundle directory instead of printing JSON
         #[arg(long = "bundle")]
         bundle_dir: Option<PathBuf>,
+
+        /// Show only the AgentPod native receipt summary from a session or bundle
+        #[arg(long = "agentpod-receipt")]
+        agentpod_receipt: bool,
     },
     /// Generate a governed minipod manifest for an agent task
     MinipodSpec {
@@ -4423,12 +4427,27 @@ fn cmd_evidence(
     credentials: bool,
     network: bool,
     bundle_dir: Option<PathBuf>,
+    agentpod_receipt: bool,
 ) {
     if bundle_dir.is_some() && (credentials || network) {
         eprintln!("error: --bundle cannot be combined with --credentials or --network");
         std::process::exit(1);
     }
+    if agentpod_receipt && (credentials || network || verify) {
+        eprintln!("error: --agentpod-receipt cannot be combined with --credentials, --network, or --verify");
+        std::process::exit(1);
+    }
     if let Some(bundle_dir) = bundle_dir.as_deref() {
+        if agentpod_receipt {
+            if session.is_some() {
+                eprintln!(
+                    "error: --agentpod-receipt --bundle reads an existing bundle; omit --session"
+                );
+                std::process::exit(1);
+            }
+            cmd_agentpod_receipt_from_bundle_dir(bundle_dir);
+            return;
+        }
         if verify {
             cmd_verify_evidence_bundle_dir(bundle_dir);
             return;
@@ -4499,10 +4518,17 @@ fn cmd_evidence(
     if let Some(session_id) = session {
         if credentials {
             cmd_session_credentials_evidence(&db_path, &session_id, limit);
+        } else if agentpod_receipt {
+            cmd_session_agentpod_receipt(&db_path, &session_id, limit);
         } else {
             cmd_session_evidence_bundle(&db_path, &session_id, limit);
         }
         return;
+    }
+
+    if agentpod_receipt {
+        eprintln!("error: --agentpod-receipt requires --session <id> or --bundle <dir>");
+        std::process::exit(1);
     }
 
     if network {
@@ -4608,6 +4634,96 @@ fn cmd_session_evidence_bundle(db_path: &PathBuf, session_id: &str, limit: usize
         "{}",
         serde_json::to_string(&bundle).expect("failed to serialize session bundle")
     );
+}
+
+fn cmd_session_agentpod_receipt(db_path: &PathBuf, session_id: &str, limit: usize) {
+    let bundle = load_session_evidence_bundle(db_path, session_id, limit);
+    print_agentpod_receipt_summary(bundle.agentpod_receipt.as_ref());
+}
+
+fn cmd_agentpod_receipt_from_bundle_dir(bundle_dir: &Path) {
+    let receipt = load_agentpod_receipt_from_bundle_dir(bundle_dir).unwrap_or_else(|err| {
+        eprintln!(
+            "error: failed to load AgentPod native receipt from {}: {}",
+            bundle_dir.display(),
+            err
+        );
+        std::process::exit(1);
+    });
+    print_agentpod_receipt_summary(receipt.as_ref());
+}
+
+fn print_agentpod_receipt_summary(
+    receipt: Option<&agentbox_daemon::runtime::types::AgentPodNativeReceiptSummary>,
+) {
+    match receipt {
+        Some(receipt) => print!("{}", format_agentpod_receipt_summary(receipt)),
+        None => {
+            eprintln!("error: evidence bundle has no AgentPod native receipt summary");
+            std::process::exit(1);
+        }
+    }
+}
+
+fn load_agentpod_receipt_from_bundle_dir(
+    bundle_dir: &Path,
+) -> Result<Option<agentbox_daemon::runtime::types::AgentPodNativeReceiptSummary>, String> {
+    verify_evidence_bundle_dir(bundle_dir)?;
+    let bundle_path = bundle_dir.join("bundle.json");
+    let bytes = fs::read(&bundle_path)
+        .map_err(|err| format!("failed to read {}: {err}", bundle_path.display()))?;
+    let bundle: agentbox_daemon::runtime::types::SessionEvidenceBundle =
+        serde_json::from_slice(&bytes)
+            .map_err(|err| format!("failed to parse {}: {err}", bundle_path.display()))?;
+    Ok(bundle.agentpod_receipt)
+}
+
+fn format_agentpod_receipt_summary(
+    receipt: &agentbox_daemon::runtime::types::AgentPodNativeReceiptSummary,
+) -> String {
+    let mut out = String::new();
+    out.push_str(&format!("provider: {}\n", receipt.provider));
+    out.push_str(&format!(
+        "enforcement_status: {}\n",
+        receipt.enforcement_status
+    ));
+    out.push_str("runner_phases:\n");
+    if receipt.runner_phases.is_empty() {
+        out.push_str("- none\n");
+    } else {
+        for phase in &receipt.runner_phases {
+            let evidence_ref = phase.evidence_ref.as_deref().unwrap_or("none");
+            out.push_str(&format!(
+                "- {} [{}] event={} evidence_ref={}\n",
+                phase.phase, phase.status, phase.event_name, evidence_ref
+            ));
+        }
+    }
+    out.push_str("enforced_phases:\n");
+    if receipt.enforced_phases.is_empty() {
+        out.push_str("- none\n");
+    } else {
+        for phase in &receipt.enforced_phases {
+            out.push_str(&format!("- {phase}\n"));
+        }
+    }
+    out.push_str("skipped_planned_primitives:\n");
+    if receipt.skipped_planned_primitives.is_empty() {
+        out.push_str("- none\n");
+    } else {
+        for primitive in &receipt.skipped_planned_primitives {
+            out.push_str(&format!("- {primitive}\n"));
+        }
+    }
+    out.push_str("evidence_refs:\n");
+    if receipt.evidence_refs.is_empty() {
+        out.push_str("- none\n");
+    } else {
+        for evidence_ref in &receipt.evidence_refs {
+            out.push_str(&format!("- {evidence_ref}\n"));
+        }
+    }
+    out
 }
 
 fn cmd_session_evidence_bundle_dir(
@@ -7923,7 +8039,16 @@ async fn main() {
             credentials,
             network,
             bundle_dir,
-        } => cmd_evidence(limit, verify, session, credentials, network, bundle_dir),
+            agentpod_receipt,
+        } => cmd_evidence(
+            limit,
+            verify,
+            session,
+            credentials,
+            network,
+            bundle_dir,
+            agentpod_receipt,
+        ),
         Commands::MinipodSpec {
             agent,
             workspace,
@@ -8145,8 +8270,9 @@ mod tests {
         RemoteAgentPodWorkspaceExportResponse, RemoteAgentPodWorkspaceFile,
     };
     use agentbox_daemon::runtime::types::{
-        AgentPodRiskLevel, AgentPodWorkspaceMode, MinipodSpec, RuntimeSession,
-        SessionEvidenceBundle, WorkspaceWritePolicy,
+        AgentPodNativeReceiptSummary, AgentPodRiskLevel, AgentPodRunnerPhaseReceipt,
+        AgentPodWorkspaceMode, MinipodSpec, RuntimeSession, SessionEvidenceBundle,
+        WorkspaceWritePolicy,
     };
 
     #[test]
@@ -8979,6 +9105,60 @@ mod tests {
             assert!(file["bytes"].as_u64().unwrap() > 0);
         }
         assert_eq!(verify_evidence_bundle_dir(&output_dir).unwrap(), 5);
+
+        let _ = fs::remove_dir_all(output_dir);
+    }
+
+    #[test]
+    fn agentpod_receipt_summary_formats_operator_view() {
+        let receipt = AgentPodNativeReceiptSummary {
+            schema_version: 1,
+            provider: "agentpod-linux".into(),
+            enforcement_status: "prototype-native-runner-evidence".into(),
+            runner_phases: vec![AgentPodRunnerPhaseReceipt {
+                phase: "exec-command".into(),
+                status: "prototype".into(),
+                event_name: "agentpod.linux.runner.exec-command".into(),
+                evidence_ref: Some("evt_1".into()),
+            }],
+            enforced_phases: vec!["exec-command".into()],
+            skipped_planned_primitives: vec!["nftables packet/domain enforcement".into()],
+            evidence_refs: vec!["evt_1".into()],
+        };
+
+        let formatted = format_agentpod_receipt_summary(&receipt);
+
+        assert!(formatted.contains("provider: agentpod-linux"));
+        assert!(formatted.contains("enforcement_status: prototype-native-runner-evidence"));
+        assert!(formatted.contains(
+            "- exec-command [prototype] event=agentpod.linux.runner.exec-command evidence_ref=evt_1"
+        ));
+        assert!(formatted.contains("- nftables packet/domain enforcement"));
+    }
+
+    #[test]
+    fn agentpod_receipt_can_be_loaded_from_verified_bundle_dir() {
+        let spec = MinipodSpec::for_agent_task("codex", "/tmp/agentbox-work");
+        let session = RuntimeSession::new(
+            spec.name.clone(),
+            "agentpod-linux".into(),
+            "linux".into(),
+            spec,
+        );
+        let bundle = SessionEvidenceBundle::from_session_events(&session, &[]);
+        let output_dir = std::env::temp_dir().join(format!(
+            "agentbox-agentpod-receipt-bundle-test-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&output_dir);
+        write_session_evidence_bundle_dir(&bundle, &output_dir).unwrap();
+
+        let receipt = load_agentpod_receipt_from_bundle_dir(&output_dir)
+            .unwrap()
+            .expect("agentpod receipt should exist");
+
+        assert_eq!(receipt.provider, "agentpod-linux");
+        assert_eq!(receipt.enforcement_status, "descriptor-only-or-unobserved");
 
         let _ = fs::remove_dir_all(output_dir);
     }

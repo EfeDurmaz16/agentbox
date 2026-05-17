@@ -71,6 +71,8 @@ grep -F "Revoke a credential grant from an AgentPod session" \
 "${CLI[@]}" evidence --help >"$TMPDIR/evidence-help.txt"
 grep -F "Export only session credential grants/events as JSONL" \
   "$TMPDIR/evidence-help.txt" >/dev/null
+grep -F "Show only the AgentPod native receipt summary" \
+  "$TMPDIR/evidence-help.txt" >/dev/null
 
 log "checking doctor JSON truth"
 set +e
