@@ -1179,11 +1179,13 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let runner = dir.join("fake-macos-vm-runner");
         let marker = dir.join("runner-argv.txt");
+        let request_marker = dir.join("runner-request-path.txt");
         let mut file = std::fs::File::create(&runner).unwrap();
         writeln!(
             file,
-            "#!/usr/bin/env sh\nprintf '%s\\n' \"$@\" > '{}'\necho fake vm unavailable >&2\nexit 125",
-            marker.display()
+            "#!/usr/bin/env sh\nprintf '%s\\n' \"$@\" > '{}'\nprintf '%s\\n' \"$2\" > '{}'\necho fake vm unavailable >&2\nexit 125",
+            marker.display(),
+            request_marker.display()
         )
         .unwrap();
         let mut permissions = std::fs::metadata(&runner).unwrap().permissions();
@@ -1212,6 +1214,9 @@ mod tests {
         assert!(err.to_string().contains("fake vm unavailable"));
         let argv = std::fs::read_to_string(marker).unwrap();
         assert!(argv.contains("--request"));
+        let request_path = std::fs::read_to_string(request_marker).unwrap();
+        let request_path = std::path::Path::new(request_path.trim());
+        assert!(!request_path.exists());
         let _ = std::fs::remove_dir_all(dir);
     }
 
