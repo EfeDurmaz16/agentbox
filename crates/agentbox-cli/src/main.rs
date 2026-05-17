@@ -564,6 +564,10 @@ enum Commands {
         /// Worker-side session id; omitted values are read from the local session when possible
         #[arg(long = "worker-session")]
         worker_session_id: Option<String>,
+
+        /// Show an AgentPod-style remote receipt summary instead of raw status JSON
+        #[arg(long = "agentpod-receipt")]
+        agentpod_receipt: bool,
     },
     /// Query remote AgentPod lifecycle event journal
     RemoteEvents {
@@ -4736,6 +4740,108 @@ fn format_agentpod_receipt_summary(
     out
 }
 
+fn format_remote_agentpod_receipt_summary(
+    status: &agentbox_daemon::runtime::providers::remote::RemoteAgentPodEvidenceStatusResponse,
+    events: &agentbox_daemon::runtime::providers::remote::RemoteAgentPodLifecycleEventsResponse,
+) -> String {
+    let mut out = String::new();
+    out.push_str("provider: remote-agentpod\n");
+    out.push_str(&format!("session_id: {}\n", status.session_id));
+    out.push_str(&format!(
+        "worker_session_id: {}\n",
+        status.worker_session_id
+    ));
+    out.push_str(&format!("status: {:?}\n", status.status));
+    out.push_str(&format!(
+        "enforcement_status: {}\n",
+        remote_agentpod_enforcement_status(status)
+    ));
+    out.push_str(&format!("evidence_sealed: {}\n", status.evidence_sealed));
+
+    out.push_str("lifecycle_events:\n");
+    if events.events.is_empty() {
+        out.push_str("- none\n");
+    } else {
+        for event in &events.events {
+            let reason = event.reason.as_deref().unwrap_or("none");
+            out.push_str(&format!(
+                "- #{} {} reason={}\n",
+                event.sequence,
+                remote_lifecycle_event_name(&event.event),
+                reason
+            ));
+        }
+    }
+
+    out.push_str("bundle_refs:\n");
+    let mut bundle_refs = Vec::new();
+    for receipt in &status.evidence_receipts {
+        bundle_refs.push(format!(
+            "receipt bundle_sha256={} events={} root={}",
+            receipt.bundle_sha256,
+            receipt.event_count,
+            receipt.bundle_root_sha256.as_deref().unwrap_or("none")
+        ));
+    }
+    for bundle in &status.stored_evidence_bundles {
+        bundle_refs.push(format!(
+            "stored bundle_sha256={} bytes={} path={}",
+            bundle.bundle_sha256, bundle.stored_bytes, bundle.storage_path
+        ));
+    }
+    for stream in &status.evidence_streams {
+        bundle_refs.push(format!(
+            "stream id={} sealed={} bytes={} sha256={}",
+            stream.stream_id,
+            stream.sealed,
+            stream.received_bytes,
+            stream.stream_sha256.as_deref().unwrap_or("none")
+        ));
+    }
+    if bundle_refs.is_empty() {
+        out.push_str("- none\n");
+    } else {
+        for bundle_ref in bundle_refs {
+            out.push_str(&format!("- {bundle_ref}\n"));
+        }
+    }
+
+    out.push_str("skipped_unsupported_credential_modes:\n");
+    for mode in remote_agentpod_unsupported_credential_modes() {
+        out.push_str(&format!("- {mode}\n"));
+    }
+
+    out
+}
+
+fn remote_agentpod_enforcement_status(
+    status: &agentbox_daemon::runtime::providers::remote::RemoteAgentPodEvidenceStatusResponse,
+) -> &'static str {
+    if status.commands_started > 0 || status.evidence_sealed {
+        "remote-worker-contract-evidence"
+    } else {
+        "remote-descriptor-or-unobserved"
+    }
+}
+
+fn remote_lifecycle_event_name(
+    event: &agentbox_daemon::runtime::providers::remote::RemoteAgentPodLifecycleEvent,
+) -> String {
+    serde_json::to_value(event)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_string))
+        .unwrap_or_else(|| format!("{event:?}"))
+}
+
+fn remote_agentpod_unsupported_credential_modes() -> [&'static str; 4] {
+    [
+        "host environment inheritance",
+        "socket credential handoff",
+        "provider-token credential handoff",
+        "daemon-synchronized one-time credential consumption",
+    ]
+}
+
 fn cmd_session_evidence_bundle_dir(
     db_path: &PathBuf,
     session_id: &str,
@@ -6578,9 +6684,11 @@ async fn cmd_remote_evidence_status(
     endpoint: Option<String>,
     session_id: String,
     worker_session_id: Option<String>,
+    agentpod_receipt: bool,
 ) {
     use agentbox_daemon::runtime::providers::remote::{
-        HttpRemoteAgentPodTransport, RemoteAgentPodEvidenceStatusRequest, RemoteAgentPodTransport,
+        HttpRemoteAgentPodTransport, RemoteAgentPodEvidenceStatusRequest,
+        RemoteAgentPodLifecycleEventsRequest, RemoteAgentPodTransport,
     };
 
     let (endpoint, worker_session_id) =
@@ -6604,7 +6712,7 @@ async fn cmd_remote_evidence_status(
         std::process::exit(1);
     });
     let response = transport
-        .evidence_status(request)
+        .evidence_status(request.clone())
         .await
         .unwrap_or_else(|e| {
             eprintln!(
@@ -6613,6 +6721,35 @@ async fn cmd_remote_evidence_status(
             );
             std::process::exit(1);
         });
+
+    if agentpod_receipt {
+        let events_request = RemoteAgentPodLifecycleEventsRequest {
+            session_id: request.session_id.clone(),
+            worker_session_id: request.worker_session_id.clone(),
+        };
+        events_request.validate().unwrap_or_else(|e| {
+            eprintln!(
+                "error: failed to build remote AgentPod lifecycle events request: {}",
+                e
+            );
+            std::process::exit(1);
+        });
+        let events = transport
+            .lifecycle_events(events_request)
+            .await
+            .unwrap_or_else(|e| {
+                eprintln!(
+                    "error: failed to query remote AgentPod lifecycle events: {}",
+                    e
+                );
+                std::process::exit(1);
+            });
+        print!(
+            "{}",
+            format_remote_agentpod_receipt_summary(&response, &events)
+        );
+        return;
+    }
 
     println!(
         "{}",
@@ -8261,7 +8398,11 @@ async fn main() {
             endpoint,
             session_id,
             worker_session_id,
-        } => cmd_remote_evidence_status(endpoint, session_id, worker_session_id).await,
+            agentpod_receipt,
+        } => {
+            cmd_remote_evidence_status(endpoint, session_id, worker_session_id, agentpod_receipt)
+                .await
+        }
         Commands::RemoteEvents {
             endpoint,
             session_id,
@@ -8404,12 +8545,16 @@ async fn main() {
 mod tests {
     use super::*;
     use agentbox_daemon::runtime::providers::remote::{
-        RemoteAgentPodLifecycleEvent, RemoteAgentPodWorkspaceBundle,
+        RemoteAgentPodEvidenceReceiptStatus, RemoteAgentPodEvidenceStatusResponse,
+        RemoteAgentPodEvidenceStreamStatus, RemoteAgentPodLifecycleEvent,
+        RemoteAgentPodLifecycleEventRecord, RemoteAgentPodLifecycleEventsResponse,
+        RemoteAgentPodRestartPolicy, RemoteAgentPodRestartStrategy,
+        RemoteAgentPodStoredEvidenceBundleStatus, RemoteAgentPodWorkspaceBundle,
         RemoteAgentPodWorkspaceExportResponse, RemoteAgentPodWorkspaceFile,
     };
     use agentbox_daemon::runtime::types::{
         AgentPodNativeReceiptSummary, AgentPodRiskLevel, AgentPodRunnerPhaseReceipt,
-        AgentPodWorkspaceMode, MinipodSpec, RuntimeSession, SessionEvidenceBundle,
+        AgentPodWorkspaceMode, MinipodSpec, RuntimeSession, RuntimeStatus, SessionEvidenceBundle,
         WorkspaceWritePolicy,
     };
 
@@ -9291,6 +9436,86 @@ mod tests {
             "- exec-command [prototype] event=agentpod.linux.runner.exec-command evidence_ref=evt_1"
         ));
         assert!(formatted.contains("- nftables packet/domain enforcement"));
+    }
+
+    #[test]
+    fn remote_agentpod_receipt_summary_formats_status_and_lifecycle() {
+        let status = RemoteAgentPodEvidenceStatusResponse {
+            session_id: "local-session".into(),
+            worker_session_id: "worker-session".into(),
+            status: RuntimeStatus::Running,
+            commands_started: 2,
+            commands_finished: 2,
+            active_command_count: 0,
+            last_command_exit_code: Some(0),
+            last_command_finished_at: None,
+            restart_policy: RemoteAgentPodRestartPolicy {
+                strategy: RemoteAgentPodRestartStrategy::OnFailure,
+                max_attempts: 2,
+                backoff_ms: 250,
+            },
+            heartbeat_interval_seconds: 30,
+            last_heartbeat_at: None,
+            kill_switch_armed: true,
+            evidence_sealed: true,
+            evidence_receipts: vec![RemoteAgentPodEvidenceReceiptStatus {
+                bundle_sha256: "a".repeat(64),
+                derived_from_bundle: true,
+                bundle_id: Some("bundle-1".into()),
+                bundle_root_sha256: Some("b".repeat(64)),
+                event_count: 3,
+                sealed_at: None,
+            }],
+            stored_evidence_bundles: vec![RemoteAgentPodStoredEvidenceBundleStatus {
+                bundle_sha256: "c".repeat(64),
+                stored_bytes: 128,
+                storage_path: "/worker/evidence/c.json".into(),
+            }],
+            evidence_streams: vec![RemoteAgentPodEvidenceStreamStatus {
+                stream_id: "stdout".into(),
+                next_sequence: 1,
+                next_offset: 12,
+                received_bytes: 12,
+                chunks: 1,
+                sealed: true,
+                stream_sha256: Some("d".repeat(64)),
+                updated_at: None,
+            }],
+            pending_approvals: Vec::new(),
+            credentials: Vec::new(),
+            supervision: None,
+        };
+        let events = RemoteAgentPodLifecycleEventsResponse {
+            session_id: "local-session".into(),
+            worker_session_id: "worker-session".into(),
+            events: vec![
+                RemoteAgentPodLifecycleEventRecord {
+                    sequence: 1,
+                    event: RemoteAgentPodLifecycleEvent::WorkerAllocated,
+                    occurred_at: chrono::Utc::now(),
+                    reason: None,
+                },
+                RemoteAgentPodLifecycleEventRecord {
+                    sequence: 2,
+                    event: RemoteAgentPodLifecycleEvent::EvidenceSealed,
+                    occurred_at: chrono::Utc::now(),
+                    reason: Some("bundle uploaded".into()),
+                },
+            ],
+        };
+
+        let formatted = format_remote_agentpod_receipt_summary(&status, &events);
+
+        assert!(formatted.contains("provider: remote-agentpod"));
+        assert!(formatted.contains("enforcement_status: remote-worker-contract-evidence"));
+        assert!(formatted.contains("evidence_sealed: true"));
+        assert!(formatted.contains("- #1 WorkerAllocated reason=none"));
+        assert!(formatted.contains("- #2 EvidenceSealed reason=bundle uploaded"));
+        assert!(formatted.contains("receipt bundle_sha256="));
+        assert!(formatted.contains("stored bundle_sha256="));
+        assert!(formatted.contains("stream id=stdout sealed=true"));
+        assert!(formatted.contains("- socket credential handoff"));
+        assert!(formatted.contains("- provider-token credential handoff"));
     }
 
     #[test]

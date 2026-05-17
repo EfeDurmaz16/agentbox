@@ -142,6 +142,10 @@ After a worker accepts evidence, the CLI can query its evidence status route:
 agentbox remote-evidence-status \
   --session agentbox-session-id
 
+agentbox remote-evidence-status \
+  --session agentbox-session-id \
+  --agentpod-receipt
+
 agentbox remote-events \
   --session agentbox-session-id
 ```
@@ -160,9 +164,14 @@ agentbox remote-evidence-status \
 The command prints the validated worker response, including session status,
 restart policy metadata, heartbeat timestamp, kill-switch state, evidence-sealed
 state, evidence metadata receipts, pending approvals, stream state, and stored
-bundle payload references. `remote-events` prints the persisted lifecycle event
-journal for the session, including allocation, command start/finish, evidence
-seal, restart, and destroy events with monotonically increasing sequence
+bundle payload references. With `--agentpod-receipt`, it also queries the same
+session lifecycle journal and prints an AgentPod-style operator receipt with
+remote enforcement status, lifecycle events, evidence-sealed state, bundle
+references, stream references, and unsupported credential modes. This is a
+receipt parity surface; it does not claim that the remote worker is a complete
+sandbox. `remote-events` prints the persisted lifecycle event journal for the
+session, including allocation, command start/finish, evidence seal, restart, and
+destroy events with monotonically increasing sequence
 numbers.
 
 If the worker reports a stopped or failed session, the operator can explicitly
@@ -431,9 +440,12 @@ Workspace materialization, workspace export, local apply, worker-side command
 policy, manifest-bound worker approval grants, command supervision counters, and
 session-bound env and file credential handoff now exist as governed flows.
 Ordered evidence stream chunks and command-scope pending approval resolution
-also exist at the worker contract layer. Rich approval prompts, socket and
-provider-token credential handoff, full evidence event streaming, supervised
-worker restarts, and merge/conflict UX beyond overwrite protection remain future
+also exist at the worker contract layer. Remote evidence status can also produce
+an AgentPod-style receipt summary that joins worker status with lifecycle events,
+sealed evidence state, bundle references, stream references, and explicitly
+unsupported credential modes. Rich approval prompts, socket and provider-token
+credential handoff, full evidence event streaming, supervised worker restarts,
+and merge/conflict UX beyond overwrite protection remain future
 work.
 
 `scripts/smoke-remote-worker.sh` starts this worker on a random loopback port,

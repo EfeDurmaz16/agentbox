@@ -688,6 +688,13 @@ AGENTBOX_REMOTE_AGENTPOD_ALLOW_HTTP_LOOPBACK=1 \
   --worker-session "$WORKER_SESSION_ID" \
   >"$TMPDIR/evidence-status-cli.json"
 AGENTBOX_REMOTE_AGENTPOD_ALLOW_HTTP_LOOPBACK=1 \
+"$ROOT/target/debug/agentbox-cli" remote-evidence-status \
+  --endpoint "http://127.0.0.1:${PORT}" \
+  --session "$SESSION_ID" \
+  --worker-session "$WORKER_SESSION_ID" \
+  --agentpod-receipt \
+  >"$TMPDIR/evidence-status-receipt.txt"
+AGENTBOX_REMOTE_AGENTPOD_ALLOW_HTTP_LOOPBACK=1 \
 "$ROOT/target/debug/agentbox-cli" remote-events \
   --endpoint "http://127.0.0.1:${PORT}" \
   --session "$SESSION_ID" \
@@ -741,6 +748,18 @@ assert data["evidence_streams"][0]["next_offset"] == 14
 assert data["evidence_streams"][0]["received_bytes"] == 14
 assert data["evidence_streams"][0]["sealed"] is True
 PY
+
+EXPECTED_BUNDLE_HASH="$(cat "$TMPDIR/evidence-bundle-upload.expected")"
+grep -F "provider: remote-agentpod" "$TMPDIR/evidence-status-receipt.txt" >/dev/null
+grep -F "enforcement_status: remote-worker-contract-evidence" "$TMPDIR/evidence-status-receipt.txt" >/dev/null
+grep -F "evidence_sealed: true" "$TMPDIR/evidence-status-receipt.txt" >/dev/null
+grep -F "WorkerAllocated" "$TMPDIR/evidence-status-receipt.txt" >/dev/null
+grep -F "EvidenceSealed" "$TMPDIR/evidence-status-receipt.txt" >/dev/null
+grep -F "receipt bundle_sha256=" "$TMPDIR/evidence-status-receipt.txt" >/dev/null
+grep -F "stored bundle_sha256=${EXPECTED_BUNDLE_HASH}" "$TMPDIR/evidence-status-receipt.txt" >/dev/null
+grep -F "stream id=stdout sealed=true" "$TMPDIR/evidence-status-receipt.txt" >/dev/null
+grep -F "socket credential handoff" "$TMPDIR/evidence-status-receipt.txt" >/dev/null
+grep -F "provider-token credential handoff" "$TMPDIR/evidence-status-receipt.txt" >/dev/null
 
 python3 - "$TMPDIR/worker-state/worker-sessions.json" "$SESSION_ID" "$WORKER_SESSION_ID" "$TMPDIR/evidence-bundle-upload.expected" "$TMPDIR/stream.expected" <<'PY'
 import json
