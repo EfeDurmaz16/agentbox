@@ -1110,6 +1110,7 @@ fn cmd_setup(
         dry_run,
         remote_endpoint.as_deref(),
     );
+    let first_run_provider_plan = setup_first_run_provider_plan(provider_filter.as_deref());
     let setup_report = SetupReport {
         schema_version: 1,
         platform: std::env::consts::OS.to_string(),
@@ -1123,6 +1124,7 @@ fn cmd_setup(
         operator_commands,
         setup_plan: plan,
         wizard_steps,
+        first_run_provider_plan,
     };
 
     if json {
@@ -1636,6 +1638,7 @@ struct SetupReport {
     operator_commands: Vec<String>,
     setup_plan: SetupPlan,
     wizard_steps: Vec<SetupWizardStep>,
+    first_run_provider_plan: SetupFirstRunProviderPlan,
 }
 
 #[derive(Serialize)]
@@ -1667,6 +1670,24 @@ struct SetupWizardStep {
     status: String,
     detail: String,
     command: Option<String>,
+}
+
+#[derive(Serialize)]
+struct SetupFirstRunProviderPlan {
+    schema_version: i64,
+    recommended_provider: String,
+    recommendation_reason: String,
+    options: Vec<SetupFirstRunProviderOption>,
+}
+
+#[derive(Serialize)]
+struct SetupFirstRunProviderOption {
+    provider: String,
+    readiness_verdict: String,
+    recommended: bool,
+    first_run_command: String,
+    setup_command: String,
+    claim_boundary: String,
 }
 
 fn setup_plan_from_doctor(report: &DoctorReport, provider: Option<&str>) -> SetupPlan {
@@ -1764,6 +1785,16 @@ fn setup_wizard_steps(
 ) -> Vec<SetupWizardStep> {
     let provider = provider.unwrap_or("all");
     let mut steps = Vec::new();
+    push_setup_wizard_step(
+        &mut steps,
+        "Choose first-run provider",
+        "recommended",
+        "Start with direct-host for shipped local command mediation unless you explicitly selected a gated native, compatibility, or remote provider.",
+        Some(match provider {
+            "all" => "agentbox provider-readiness".to_string(),
+            provider => format!("agentbox provider-readiness --provider {provider}"),
+        }),
+    );
     push_setup_wizard_step(
         &mut steps,
         "Prepare Agentbox binaries",
@@ -1904,6 +1935,80 @@ fn setup_wizard_steps(
     );
 
     steps
+}
+
+fn setup_first_run_provider_plan(provider: Option<&str>) -> SetupFirstRunProviderPlan {
+    let provider = provider.unwrap_or("all");
+    let recommended_provider = match provider {
+        "direct-host" | "podman" | "agentpod-macos" | "agentpod-linux" | "agentpod-windows"
+        | "remote-agentpod" => provider,
+        _ => "direct-host",
+    };
+    let rows = provider_readiness_rows(None);
+    let options = rows
+        .into_iter()
+        .filter_map(|row| {
+            let provider_name = row.get("provider")?.as_str()?.to_string();
+            let readiness = row.get("readiness")?;
+            let readiness_verdict = row
+                .get("readiness_verdict")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("unknown")
+                .to_string();
+            let claim_boundary = readiness
+                .get("claim_boundary")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("provider readiness claim is unavailable")
+                .to_string();
+            let setup_command = match provider_name.as_str() {
+                "direct-host" => "agentbox setup --provider direct-host",
+                "podman" => "agentbox setup-plan --provider podman",
+                "agentpod-macos" => "agentbox native-plan --provider agentpod-macos -- <cmd>",
+                "agentpod-linux" => "agentbox native-plan --provider agentpod-linux -- <cmd>",
+                "agentpod-windows" => "agentbox native-plan --provider agentpod-windows -- <cmd>",
+                "remote-agentpod" => "agentbox setup --dry-run --wizard --provider remote-agentpod",
+                _ => "agentbox provider-readiness",
+            }
+            .to_string();
+            let first_run_command = match provider_name.as_str() {
+                "direct-host" => "agentbox run --provider direct-host --risk low -- <cmd>",
+                "podman" => "agentbox run --provider podman -- <cmd>",
+                "agentpod-macos" => {
+                    "AGENTBOX_MACOS_NATIVE=1 agentbox run --provider agentpod-macos -- <cmd>"
+                }
+                "agentpod-linux" => {
+                    "AGENTBOX_LINUX_NATIVE=1 agentbox run --provider agentpod-linux -- <cmd>"
+                }
+                "agentpod-windows" => {
+                    "AGENTBOX_WINDOWS_NATIVE=1 agentbox run --provider agentpod-windows -- <cmd>"
+                }
+                "remote-agentpod" => "agentbox run --provider remote-agentpod -- <cmd>",
+                _ => "agentbox run -- <cmd>",
+            }
+            .to_string();
+            Some(SetupFirstRunProviderOption {
+                recommended: provider_name == recommended_provider,
+                provider: provider_name,
+                readiness_verdict,
+                first_run_command,
+                setup_command,
+                claim_boundary,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    let recommendation_reason = if recommended_provider == "direct-host" {
+        "direct-host is the first-run default because it is the shipped local command-mediation path; native providers remain gated prototype or descriptor surfaces"
+    } else {
+        "explicit provider selection was requested, so the wizard marks that provider as the first-run target"
+    };
+
+    SetupFirstRunProviderPlan {
+        schema_version: 1,
+        recommended_provider: recommended_provider.to_string(),
+        recommendation_reason: recommendation_reason.into(),
+        options,
+    }
 }
 
 fn setup_plan_has_check(plan: &SetupPlan, check_name: &str) -> bool {
@@ -9001,6 +9106,41 @@ mod tests {
         assert!(linux["gated"].as_array().unwrap().iter().any(|gate| {
             gate["primitive"] == "seccomp" && gate["requires_gate"] == "AGENTBOX_LINUX_NATIVE=1"
         }));
+    }
+
+    #[test]
+    fn setup_first_run_provider_plan_defaults_to_direct_host() {
+        let plan = setup_first_run_provider_plan(None);
+
+        assert_eq!(plan.schema_version, 1);
+        assert_eq!(plan.recommended_provider, "direct-host");
+        assert!(plan.recommendation_reason.contains("shipped local"));
+        let direct = plan
+            .options
+            .iter()
+            .find(|option| option.provider == "direct-host")
+            .unwrap();
+        assert!(direct.recommended);
+        assert_eq!(
+            direct.first_run_command,
+            "agentbox run --provider direct-host --risk low -- <cmd>"
+        );
+        assert!(direct.claim_boundary.contains("not a full sandbox"));
+    }
+
+    #[test]
+    fn setup_first_run_provider_plan_honors_explicit_provider() {
+        let plan = setup_first_run_provider_plan(Some("agentpod-linux"));
+
+        assert_eq!(plan.recommended_provider, "agentpod-linux");
+        let linux = plan
+            .options
+            .iter()
+            .find(|option| option.provider == "agentpod-linux")
+            .unwrap();
+        assert!(linux.recommended);
+        assert_eq!(linux.readiness_verdict, "prototype-gated");
+        assert!(linux.first_run_command.contains("AGENTBOX_LINUX_NATIVE=1"));
     }
 
     #[test]
