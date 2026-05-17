@@ -2543,6 +2543,95 @@ mod tests {
     }
 
     #[test]
+    fn nftables_plan_preserves_default_guardrail_denies_and_localhost_allowance() {
+        let spec = MinipodSpec::for_agent_task("codex", "/tmp/agentbox-work");
+
+        let plan = LinuxNftablesPolicyDescriptor::plan(&spec).unwrap();
+
+        assert_eq!(
+            plan.default_policy,
+            LinuxNftablesDefaultPolicy::AcceptWithGuardrails
+        );
+        assert!(plan.allow_localhost);
+        assert!(plan.domain_rules_require_resolver);
+        assert_eq!(plan.denied_domains, spec.network.denied_domains);
+        assert!(plan.planned_rules.iter().any(|rule| {
+            rule.action == LinuxNftablesRuleAction::Accept
+                && rule.selector.contains("127.0.0.0/8")
+                && rule.reason.contains("allows loopback")
+        }));
+        for metadata_endpoint in [
+            "169.254.169.254",
+            "metadata.google.internal",
+            "fd00:ec2::254",
+        ] {
+            assert!(plan.planned_rules.iter().any(|rule| {
+                rule.action == LinuxNftablesRuleAction::Drop
+                    && rule.selector == format!("domain:{metadata_endpoint}")
+                    && rule.reason.contains("requires resolver")
+            }));
+        }
+        assert!(plan.enforcement_claim.contains("descriptor only"));
+        assert!(plan
+            .enforcement_claim
+            .contains("no packet/domain denial proof"));
+    }
+
+    #[test]
+    fn nftables_plan_requires_resolver_for_domain_allow_and_deny_rules() {
+        let mut spec = MinipodSpec::for_agent_task("deploy", "/tmp/agentbox-work");
+        spec.network.mode = NetworkMode::DenyByDefault;
+        spec.network.allowed_domains = vec!["api.github.com".into(), "registry.npmjs.org".into()];
+        spec.network.denied_domains = vec!["169.254.169.254".into()];
+
+        let plan = LinuxNftablesPolicyDescriptor::plan(&spec).unwrap();
+
+        assert_eq!(plan.default_policy, LinuxNftablesDefaultPolicy::Drop);
+        let domain_rules: Vec<_> = plan
+            .planned_rules
+            .iter()
+            .filter(|rule| rule.selector.starts_with("domain:"))
+            .collect();
+        assert_eq!(domain_rules.len(), 3);
+        assert!(domain_rules
+            .iter()
+            .all(|rule| rule.reason.contains("requires resolver/ipset compilation")));
+        assert!(domain_rules.iter().any(|rule| {
+            rule.action == LinuxNftablesRuleAction::Accept
+                && rule.selector == "domain:api.github.com"
+        }));
+        assert!(domain_rules.iter().any(|rule| {
+            rule.action == LinuxNftablesRuleAction::Drop
+                && rule.selector == "domain:169.254.169.254"
+        }));
+    }
+
+    #[test]
+    fn nftables_plan_models_approval_mode_without_live_packet_claim() {
+        let mut spec = MinipodSpec::for_agent_task("browser", "/tmp/agentbox-work");
+        spec.network.mode = NetworkMode::ApprovalOnFirstContact;
+        spec.network.allow_localhost = false;
+
+        let plan = LinuxNftablesPolicyDescriptor::plan(&spec).unwrap();
+
+        assert_eq!(
+            plan.default_policy,
+            LinuxNftablesDefaultPolicy::RequireApproval
+        );
+        assert!(!plan.allow_localhost);
+        assert!(plan.planned_rules.iter().any(|rule| {
+            rule.action == LinuxNftablesRuleAction::Drop
+                && rule.selector.contains("127.0.0.0/8")
+                && rule.reason.contains("disables loopback")
+        }));
+        assert!(plan.requires_nftables);
+        assert!(plan.requires_linux);
+        assert!(plan
+            .enforcement_claim
+            .contains("no packet/domain denial proof"));
+    }
+
+    #[test]
     fn nftables_plan_rejects_empty_session_ids() {
         let mut spec = MinipodSpec::for_agent_task("hermes", "/tmp/agentbox-work");
         spec.id = " ".into();
