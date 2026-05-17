@@ -53,7 +53,7 @@ sandbox or release-grade isolation claim.
 | `agentpod-macos` | Apple Virtualization, Endpoint Security, Network Extension, VM evidence observer plan | no VM boot lifecycle, no signed system extension, no live ES/NE denial proof |
 | `agentpod-windows` | Job Objects, AppContainer, WFP, ETW, Windows Sandbox, Hyper-V, Windows native receipt descriptor | no live Windows apply proof, no WFP denial proof, no Sandbox/Hyper-V lifecycle |
 | FIDES / AGIT / OAPS integrations | evidence and authority descriptors | no external authority adapter or live publisher configured |
-| Linux eBPF / nftables | observability and egress policy descriptors | no probe loading, no packet/domain enforcement proof |
+| Linux eBPF / nftables | observability and egress policy descriptors plus gated nftables table lifecycle smoke | no probe loading, no egress hook, no packet/domain enforcement proof |
 
 Descriptor-only means the product can explain the boundary and emit typed
 metadata, but it must not imply enforcement.
@@ -96,8 +96,8 @@ gaps:
 
 1. macOS: boot a minimal Apple Virtualization VM cell, mount a workspace, and
    prove create/exec/destroy lifecycle with evidence.
-2. Linux: strengthen seccomp/landlock coverage, add read/execute path policy,
-   and turn nftables from descriptor into a live denial gate.
+2. Linux: strengthen seccomp/landlock coverage, prove read/execute path policy,
+   and turn the nftables lifecycle skeleton into a session-scoped live denial gate.
 3. Windows: add live Job Object process cleanup proof before claiming execution.
 4. Remote: add richer worker-side approval UX and full event streaming without
    weakening current credential restrictions.

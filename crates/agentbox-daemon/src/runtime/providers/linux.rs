@@ -949,6 +949,8 @@ pub struct LinuxNftablesPlan {
     pub schema_version: i64,
     pub table_name: String,
     pub chain_name: String,
+    #[serde(default)]
+    pub live_gate: LinuxNftablesLiveGatePlan,
     pub mode: NetworkMode,
     pub default_policy: LinuxNftablesDefaultPolicy,
     pub allow_localhost: bool,
@@ -959,6 +961,23 @@ pub struct LinuxNftablesPlan {
     pub requires_nftables: bool,
     pub requires_linux: bool,
     pub enforcement_claim: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LinuxNftablesLiveGatePlan {
+    pub schema_version: i64,
+    pub env_var: String,
+    pub enabled: bool,
+    pub table_family: String,
+    pub table_name: String,
+    pub transaction: Vec<String>,
+    pub lifecycle_claim: String,
+}
+
+impl Default for LinuxNftablesLiveGatePlan {
+    fn default() -> Self {
+        Self::for_table("agentbox_unset")
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -984,6 +1003,26 @@ pub enum LinuxNftablesRuleAction {
 }
 
 pub struct LinuxNftablesPolicyDescriptor;
+
+impl LinuxNftablesLiveGatePlan {
+    fn for_table(table_name: &str) -> Self {
+        Self {
+            schema_version: 1,
+            env_var: "AGENTBOX_LINUX_NFTABLES".into(),
+            enabled: linux_nftables_live_gate_enabled(),
+            table_family: "inet".into(),
+            table_name: table_name.into(),
+            transaction: vec![
+                format!("nft add table inet {table_name}"),
+                format!("nft list table inet {table_name}"),
+                format!("nft delete table inet {table_name}"),
+            ],
+            lifecycle_claim:
+                "gated nftables table create/list/delete skeleton only; no egress hook or packet/domain enforcement is wired"
+                    .into(),
+        }
+    }
+}
 
 impl LinuxNftablesPolicyDescriptor {
     pub fn plan(spec: &MinipodSpec) -> Result<LinuxNftablesPlan, RuntimeError> {
@@ -1032,10 +1071,13 @@ impl LinuxNftablesPolicyDescriptor {
             }
         };
 
+        let table_name = format!("agentbox_{}", sanitize_nft_name(&spec.id));
+
         Ok(LinuxNftablesPlan {
             schema_version: 1,
-            table_name: format!("agentbox_{}", sanitize_nft_name(&spec.id)),
+            table_name: table_name.clone(),
             chain_name: "agentpod_egress".into(),
+            live_gate: LinuxNftablesLiveGatePlan::for_table(&table_name),
             mode: spec.network.mode.clone(),
             default_policy,
             allow_localhost: spec.network.allow_localhost,
@@ -1049,6 +1091,10 @@ impl LinuxNftablesPolicyDescriptor {
                 "nftables policy descriptor only; no packet/domain denial proof is wired".into(),
         })
     }
+}
+
+fn linux_nftables_live_gate_enabled() -> bool {
+    matches!(std::env::var("AGENTBOX_LINUX_NFTABLES").as_deref(), Ok("1"))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1271,7 +1317,12 @@ impl LinuxAgentPodExecutionPlan {
             session_id: spec.id.clone(),
             command_argv: command.argv.clone(),
             composed_argv,
-            runner_phases: linux_agentpod_runner_phases(&mount_namespace, &seccomp, &landlock),
+            runner_phases: linux_agentpod_runner_phases(
+                &mount_namespace,
+                &seccomp,
+                &landlock,
+                &nftables,
+            ),
             user_namespace,
             mount_namespace,
             pid_namespace,
@@ -1331,6 +1382,7 @@ fn linux_agentpod_runner_phases(
     mount_namespace: &LinuxMountNamespacePlan,
     seccomp: &LinuxSeccompPlan,
     landlock: &LinuxLandlockPlan,
+    nftables: &LinuxNftablesPlan,
 ) -> Vec<LinuxAgentPodRunnerPhase> {
     vec![
         LinuxAgentPodRunnerPhase {
@@ -1397,6 +1449,17 @@ fn linux_agentpod_runner_phases(
             } else {
                 "no syscall deny filter requested".into()
             },
+        },
+        LinuxAgentPodRunnerPhase {
+            name: "apply-nftables".into(),
+            status: if nftables.live_gate.enabled {
+                "gated-skeleton"
+            } else {
+                "inactive"
+            }
+            .into(),
+            evidence_event: "agentpod.linux.runner.nftables.skeleton.applied".into(),
+            claim: nftables.live_gate.lifecycle_claim.clone(),
         },
         LinuxAgentPodRunnerPhase {
             name: "exec-command".into(),
@@ -2720,6 +2783,13 @@ mod tests {
         assert!(plan.domain_rules_require_resolver);
         assert!(plan.requires_nftables);
         assert!(plan.requires_linux);
+        assert_eq!(plan.live_gate.env_var, "AGENTBOX_LINUX_NFTABLES");
+        assert_eq!(plan.live_gate.table_family, "inet");
+        assert_eq!(plan.live_gate.table_name, plan.table_name);
+        assert!(plan
+            .live_gate
+            .lifecycle_claim
+            .contains("no egress hook or packet/domain enforcement"));
         assert!(plan.enforcement_claim.contains("descriptor only"));
         assert!(plan.planned_rules.iter().any(|rule| {
             rule.action == LinuxNftablesRuleAction::Drop && rule.selector.contains("127.0.0.0/8")
@@ -2732,6 +2802,35 @@ mod tests {
             rule.action == LinuxNftablesRuleAction::Accept
                 && rule.selector == "domain:api.openai.com"
         }));
+    }
+
+    #[test]
+    fn nftables_live_gate_transaction_is_scoped_to_agentbox_table() {
+        let mut spec = MinipodSpec::for_agent_task("hermes", "/tmp/agentbox-work");
+        spec.id = "agentpod.test/session-1".into();
+
+        let plan = LinuxNftablesPolicyDescriptor::plan(&spec).unwrap();
+
+        assert_eq!(plan.live_gate.schema_version, 1);
+        assert_eq!(plan.live_gate.env_var, "AGENTBOX_LINUX_NFTABLES");
+        assert!(!plan.live_gate.enabled);
+        assert_eq!(
+            plan.live_gate.transaction,
+            vec![
+                "nft add table inet agentbox_agentpod_test_session_1".to_string(),
+                "nft list table inet agentbox_agentpod_test_session_1".to_string(),
+                "nft delete table inet agentbox_agentpod_test_session_1".to_string(),
+            ]
+        );
+        assert!(plan
+            .live_gate
+            .transaction
+            .iter()
+            .all(|command| command.contains("agentbox_agentpod_test_session_1")));
+        assert!(plan
+            .live_gate
+            .lifecycle_claim
+            .contains("table create/list/delete skeleton only"));
     }
 
     #[test]
@@ -2919,6 +3018,12 @@ mod tests {
         let plan = LinuxAgentPodExecutionPlan::from_minipod_spec(&spec, &command).unwrap();
         assert_eq!(plan.nftables.chain_name, "agentpod_egress");
         assert!(plan.nftables.requires_nftables);
+        assert_eq!(plan.nftables.live_gate.env_var, "AGENTBOX_LINUX_NFTABLES");
+        assert!(plan.runner_phases.iter().any(|phase| {
+            phase.name == "apply-nftables"
+                && phase.evidence_event == "agentpod.linux.runner.nftables.skeleton.applied"
+                && phase.claim.contains("no egress hook")
+        }));
         assert_eq!(
             plan.ebpf.enforcement,
             LinuxEbpfEnforcementMode::ObservedOnly
@@ -3025,6 +3130,7 @@ mod tests {
                 ("apply-overlayfs", "inactive"),
                 ("apply-landlock", "prototype"),
                 ("apply-seccomp", "inactive"),
+                ("apply-nftables", "inactive"),
                 ("exec-command", "prototype"),
             ]
         );

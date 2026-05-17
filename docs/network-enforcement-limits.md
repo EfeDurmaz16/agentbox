@@ -24,7 +24,7 @@ evidence layers.
 | Direct host shims | Command classification and audit evidence | Only commands that pass through shims are governed. Direct sockets from binaries, browsers, SDKs, or interpreters are not fully mediated. |
 | Podman compatibility | Coarse provider network mode plus daemon policy/evidence | Domain allow/deny is not proven as packet-level enforcement. macOS Podman also runs behind a VM boundary. |
 | macOS AgentPod | Descriptor only | Network Extension is planned, but no shipped entitlement-backed provider exists. |
-| Linux AgentPod | Prototype primitives | eBPF/nftables are planned for observability or enforcement, but provider execution remains unavailable. |
+| Linux AgentPod | Prototype primitives | eBPF/nftables are planned for observability or enforcement. A gated nftables table lifecycle smoke exists, but it does not attach egress hooks or prove packet/domain denial. |
 | Windows AgentPod | Prototype primitives | WFP/ETW are planned for network governance/evidence, but provider execution remains unavailable. |
 
 ## Direct Host
@@ -82,8 +82,10 @@ Linux has multiple possible surfaces:
 - eBPF for observability and possibly enforcement after live denial tests
 
 The current Linux AgentPod code models kernel primitives and benchmark plans.
-It does not yet run an available provider. eBPF design is evidence-first unless
-a live hook proves blocking.
+It also has a gated nftables table create/list/delete smoke behind
+`AGENTBOX_LINUX_NFTABLES=1`. That smoke proves local nftables lifecycle access
+only; it does not attach output hooks, compile domain/IP rules, or prove egress
+denial. eBPF design is evidence-first unless a live hook proves blocking.
 
 The minimum live proof should include:
 

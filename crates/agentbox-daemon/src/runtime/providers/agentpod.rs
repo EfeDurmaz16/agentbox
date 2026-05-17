@@ -295,7 +295,7 @@ impl RuntimeProvider for AgentPodProvider {
                             "eBPF observability descriptor only; probe loading is not wired"
                         }
                         AgentPodPrimitive::Nftables => {
-                            "nftables egress descriptor only; packet/domain enforcement is not wired"
+                            "gated nftables table lifecycle skeleton behind AGENTBOX_LINUX_NFTABLES=1; packet/domain enforcement is not wired"
                         }
                         _ => "not part of the Linux AgentPod provider",
                     };
