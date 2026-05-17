@@ -2,8 +2,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::runtime::provider::RuntimeError;
 use crate::runtime::types::{
-    CredentialGrantKind, ExecCommand, MinipodSpec, MountKind, MountMode, NetworkMode,
-    WorkspaceOverlayMode, WorkspaceWritePolicy,
+    AgentPodNativeReceiptSummary, AgentPodRunnerPhaseReceipt, CredentialGrantKind, ExecCommand,
+    MinipodSpec, MountKind, MountMode, NetworkMode, WorkspaceOverlayMode, WorkspaceWritePolicy,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -593,6 +593,7 @@ pub struct WindowsAgentPodExecutionPlan {
     pub wfp: WindowsWfpBoundaryPlan,
     pub etw: WindowsEtwObserverPlan,
     pub vm_boundary: WindowsVmBoundaryPlan,
+    pub native_receipt: AgentPodNativeReceiptSummary,
     pub live_env_var: String,
     pub live_execution_enabled: bool,
     pub requires_windows: bool,
@@ -609,17 +610,30 @@ impl WindowsAgentPodExecutionPlan {
                 "Windows AgentPod execution command cannot be empty".into(),
             ));
         }
+        let job_object = WindowsJobObjectPlan::from_minipod_spec(spec)?;
+        let app_container = WindowsAppContainerPlan::from_minipod_spec(spec)?;
+        let wfp = WindowsWfpBoundaryPlan::from_minipod_spec(spec);
+        let etw = WindowsEtwObserverPlan::from_minipod_spec(spec);
+        let vm_boundary = WindowsVmBoundaryPlan::from_minipod_spec(spec);
+        let native_receipt = windows_native_receipt_descriptor(
+            &job_object,
+            &app_container,
+            &wfp,
+            &etw,
+            &vm_boundary,
+        );
 
         Ok(Self {
             schema_version: 1,
             provider: "agentpod-windows".into(),
             session_id: spec.id.clone(),
             command_argv: command.argv.clone(),
-            job_object: WindowsJobObjectPlan::from_minipod_spec(spec)?,
-            app_container: WindowsAppContainerPlan::from_minipod_spec(spec)?,
-            wfp: WindowsWfpBoundaryPlan::from_minipod_spec(spec),
-            etw: WindowsEtwObserverPlan::from_minipod_spec(spec),
-            vm_boundary: WindowsVmBoundaryPlan::from_minipod_spec(spec),
+            job_object,
+            app_container,
+            wfp,
+            etw,
+            vm_boundary,
+            native_receipt,
             live_env_var: "AGENTBOX_WINDOWS_NATIVE".into(),
             live_execution_enabled: windows_native_execution_enabled(),
             requires_windows: true,
@@ -630,6 +644,67 @@ impl WindowsAgentPodExecutionPlan {
 
     pub fn runnable_on_current_host(&self) -> bool {
         cfg!(target_os = "windows") && self.live_execution_enabled
+    }
+}
+
+fn windows_native_receipt_descriptor(
+    job_object: &WindowsJobObjectPlan,
+    app_container: &WindowsAppContainerPlan,
+    wfp: &WindowsWfpBoundaryPlan,
+    etw: &WindowsEtwObserverPlan,
+    vm_boundary: &WindowsVmBoundaryPlan,
+) -> AgentPodNativeReceiptSummary {
+    let runner_phases = vec![
+        AgentPodRunnerPhaseReceipt {
+            phase: "apply-job-object".into(),
+            status: "descriptor".into(),
+            event_name: "windows.job_object.apply".into(),
+            evidence_ref: Some(job_object.timeout_action.clone()),
+        },
+        AgentPodRunnerPhaseReceipt {
+            phase: "apply-app-container".into(),
+            status: "descriptor".into(),
+            event_name: "windows.app_container.apply".into(),
+            evidence_ref: Some(app_container.workspace_boundary.access_model.clone()),
+        },
+        AgentPodRunnerPhaseReceipt {
+            phase: "apply-wfp".into(),
+            status: "descriptor".into(),
+            event_name: "windows.wfp.policy.apply".into(),
+            evidence_ref: Some(wfp.evidence_events.join(",")),
+        },
+        AgentPodRunnerPhaseReceipt {
+            phase: "attach-etw".into(),
+            status: "descriptor".into(),
+            event_name: "windows.etw.observer.attach".into(),
+            evidence_ref: Some(etw.evidence_export.bundle_files.join(",")),
+        },
+        AgentPodRunnerPhaseReceipt {
+            phase: "boot-vm-boundary".into(),
+            status: "planned".into(),
+            event_name: "windows.vm_boundary.boot".into(),
+            evidence_ref: Some(vm_boundary.candidate_backends.join(",")),
+        },
+    ];
+    let mut evidence_refs = Vec::new();
+    evidence_refs.extend(wfp.evidence_events.clone());
+    evidence_refs.extend(etw.evidence_export.bundle_files.clone());
+    evidence_refs.push(vm_boundary.cell_config.evidence_spool_guest_path.clone());
+
+    AgentPodNativeReceiptSummary {
+        schema_version: 1,
+        provider: "agentpod-windows".into(),
+        enforcement_status: "descriptor-only-or-unobserved".into(),
+        runner_phases,
+        enforced_phases: vec![],
+        skipped_planned_primitives: vec![
+            "live Windows Job Object apply proof".into(),
+            "live AppContainer profile/ACL proof".into(),
+            "live WFP packet/domain enforcement".into(),
+            "live ETW capture/export".into(),
+            "live VM lifecycle".into(),
+        ],
+        evidence_refs,
     }
 }
 
@@ -927,6 +1002,39 @@ mod tests {
             plan.vm_boundary.cell_config.evidence_spool_guest_path,
             r"C:\ProgramData\Agentbox\Evidence"
         );
+        assert_eq!(plan.native_receipt.schema_version, 1);
+        assert_eq!(plan.native_receipt.provider, "agentpod-windows");
+        assert_eq!(
+            plan.native_receipt.enforcement_status,
+            "descriptor-only-or-unobserved"
+        );
+        assert!(plan.native_receipt.enforced_phases.is_empty());
+        assert!(plan.native_receipt.runner_phases.iter().any(|phase| {
+            phase.phase == "apply-wfp"
+                && phase.status == "descriptor"
+                && phase.event_name == "windows.wfp.policy.apply"
+        }));
+        assert!(plan.native_receipt.runner_phases.iter().any(|phase| {
+            phase.phase == "boot-vm-boundary"
+                && phase.status == "planned"
+                && phase.event_name == "windows.vm_boundary.boot"
+        }));
+        assert!(plan
+            .native_receipt
+            .evidence_refs
+            .contains(&"windows-etw-events.jsonl".to_string()));
+        assert!(plan
+            .native_receipt
+            .evidence_refs
+            .contains(&"windows.wfp.flow.block".to_string()));
+        assert!(plan
+            .native_receipt
+            .skipped_planned_primitives
+            .contains(&"live WFP packet/domain enforcement".to_string()));
+        assert!(plan
+            .native_receipt
+            .skipped_planned_primitives
+            .contains(&"live ETW capture/export".to_string()));
         assert_eq!(plan.vm_boundary.cell_config.credential_channels.len(), 2);
         assert!(plan
             .vm_boundary
@@ -948,6 +1056,33 @@ mod tests {
                 && channel.guest_path.as_deref()
                     == Some(r"C:\ProgramData\Agentbox\Credentials\deploy_token")));
         assert!(!plan.runnable_on_current_host());
+    }
+
+    #[test]
+    fn windows_native_receipt_descriptor_uses_agentpod_vocabulary_without_live_claim() {
+        let spec = MinipodSpec::for_agent_task("codex", "C:\\agentbox\\work");
+        let command = ExecCommand {
+            argv: vec!["powershell.exe".into(), "-NoProfile".into()],
+            working_dir: Some("C:\\agentbox\\work".into()),
+            env: Default::default(),
+            timeout_seconds: None,
+        };
+
+        let plan = WindowsAgentPodExecutionPlan::from_minipod_spec(&spec, &command).unwrap();
+        let receipt = plan.native_receipt;
+
+        assert_eq!(receipt.provider, "agentpod-windows");
+        assert_eq!(receipt.enforcement_status, "descriptor-only-or-unobserved");
+        assert!(receipt.enforced_phases.is_empty());
+        assert_eq!(receipt.runner_phases.len(), 5);
+        assert!(receipt
+            .runner_phases
+            .iter()
+            .all(|phase| phase.status == "descriptor" || phase.status == "planned"));
+        assert!(receipt
+            .skipped_planned_primitives
+            .iter()
+            .all(|primitive| primitive.starts_with("live ")));
     }
 
     #[test]
