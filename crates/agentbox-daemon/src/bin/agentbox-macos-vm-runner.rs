@@ -107,6 +107,13 @@ fn validate_request(
     {
         return Err("macOS VM runner request must require Apple Virtualization entitlement".into());
     }
+    request.boot_request.validate()?;
+    if request.boot_request.session_id != request.session_id {
+        return Err("macOS VM runner boot request session id must match request".into());
+    }
+    if request.boot_request.command_argv != request.command_argv {
+        return Err("macOS VM runner boot request command argv must match request".into());
+    }
     Ok(())
 }
 
@@ -154,5 +161,15 @@ mod tests {
         let err = validate_request(&request).unwrap_err();
 
         assert!(err.to_string().contains("start-virtualization-vm"));
+    }
+
+    #[test]
+    fn rejects_mismatched_boot_request_contract() {
+        let mut request = request();
+        request.boot_request.command_argv = vec!["/bin/false".into()];
+
+        let err = validate_request(&request).unwrap_err();
+
+        assert!(err.to_string().contains("boot request command argv"));
     }
 }

@@ -438,6 +438,7 @@ pub struct MacOsAgentPodRunnerRequest {
     pub session_id: String,
     pub command_argv: Vec<String>,
     pub working_dir: Option<String>,
+    pub boot_request: MacOsVmCellBootRequest,
     pub virtualization: MacOsVirtualizationCellPlan,
     pub endpoint_security: MacOsEndpointSecurityPlan,
     pub network_extension: MacOsNetworkExtensionPlan,
@@ -445,6 +446,113 @@ pub struct MacOsAgentPodRunnerRequest {
     pub prerequisite_checks: Vec<MacOsNativePrerequisiteCheck>,
     pub runner_phases: Vec<MacOsAgentPodRunnerPhase>,
     pub required_entitlements: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MacOsVmCellBootRequest {
+    pub schema_version: i64,
+    pub session_id: String,
+    pub bundle_id: String,
+    pub guest_os: String,
+    pub cpu_count: u32,
+    pub memory_bytes: u64,
+    pub command_argv: Vec<String>,
+    pub working_dir: String,
+    pub storage_layout: MacOsVmCellStorageLayout,
+    pub workspace_mount: MacOsWorkspaceMountPlan,
+    pub shared_directories: Vec<MacOsSharedDirectoryPlan>,
+    pub bridge_socket_guest_path: String,
+    pub evidence_spool_guest_path: String,
+    pub required_entitlements: Vec<String>,
+    pub claim_boundary: String,
+}
+
+impl MacOsVmCellBootRequest {
+    pub fn from_execution_plan(plan: &MacOsAgentPodExecutionPlan, command: &ExecCommand) -> Self {
+        Self {
+            schema_version: 1,
+            session_id: plan.session_id.clone(),
+            bundle_id: plan.virtualization.bundle_id.clone(),
+            guest_os: plan.virtualization.guest_os.clone(),
+            cpu_count: plan.virtualization.cpu_count,
+            memory_bytes: plan.virtualization.memory_bytes,
+            command_argv: plan.command_argv.clone(),
+            working_dir: command
+                .working_dir
+                .clone()
+                .unwrap_or_else(|| plan.virtualization.workspace_guest_path.clone()),
+            storage_layout: plan.virtualization.storage_layout.clone(),
+            workspace_mount: plan.virtualization.cell_config.workspace_mount.clone(),
+            shared_directories: plan.virtualization.shared_directories.clone(),
+            bridge_socket_guest_path: plan
+                .virtualization
+                .cell_config
+                .bridge_socket_guest_path
+                .clone(),
+            evidence_spool_guest_path: plan
+                .virtualization
+                .cell_config
+                .evidence_spool_guest_path
+                .clone(),
+            required_entitlements: plan.required_entitlements.clone(),
+            claim_boundary:
+                "boot request contract only; Apple Virtualization lifecycle is not wired".into(),
+        }
+    }
+
+    pub fn validate(&self) -> Result<(), RuntimeError> {
+        if self.schema_version != 1 {
+            return Err(RuntimeError::ManifestRejected(
+                "macOS VM cell boot request schema_version must be 1".into(),
+            ));
+        }
+        if self.session_id.trim().is_empty() || self.bundle_id.trim().is_empty() {
+            return Err(RuntimeError::ManifestRejected(
+                "macOS VM cell boot request must include session and bundle ids".into(),
+            ));
+        }
+        if self.guest_os.trim().is_empty() {
+            return Err(RuntimeError::ManifestRejected(
+                "macOS VM cell boot request guest OS cannot be empty".into(),
+            ));
+        }
+        if self.cpu_count == 0 || self.memory_bytes == 0 {
+            return Err(RuntimeError::ManifestRejected(
+                "macOS VM cell boot request must include positive CPU and memory limits".into(),
+            ));
+        }
+        if self.command_argv.is_empty() {
+            return Err(RuntimeError::ManifestRejected(
+                "macOS VM cell boot request command argv cannot be empty".into(),
+            ));
+        }
+        if self.working_dir.trim().is_empty()
+            || self.workspace_mount.host_path.trim().is_empty()
+            || self.workspace_mount.guest_path.trim().is_empty()
+            || self.bridge_socket_guest_path.trim().is_empty()
+            || self.evidence_spool_guest_path.trim().is_empty()
+        {
+            return Err(RuntimeError::ManifestRejected(
+                "macOS VM cell boot request paths cannot be empty".into(),
+            ));
+        }
+        if !self
+            .required_entitlements
+            .iter()
+            .any(|entitlement| entitlement == "com.apple.security.virtualization")
+        {
+            return Err(RuntimeError::ManifestRejected(
+                "macOS VM cell boot request must require Apple Virtualization entitlement".into(),
+            ));
+        }
+        if !self.claim_boundary.contains("not wired") {
+            return Err(RuntimeError::ManifestRejected(
+                "macOS VM cell boot request must keep an explicit non-execution claim boundary"
+                    .into(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 impl MacOsAgentPodRunnerRequest {
@@ -457,6 +565,7 @@ impl MacOsAgentPodRunnerRequest {
                 .working_dir
                 .clone()
                 .or_else(|| Some(plan.virtualization.workspace_guest_path.clone())),
+            boot_request: MacOsVmCellBootRequest::from_execution_plan(plan, command),
             virtualization: plan.virtualization.clone(),
             endpoint_security: plan.endpoint_security.clone(),
             network_extension: plan.network_extension.clone(),
@@ -1263,6 +1372,13 @@ mod tests {
         assert_eq!(request.session_id, spec.id);
         assert_eq!(request.command_argv, vec!["/bin/true"]);
         assert_eq!(request.working_dir.as_deref(), Some("/workspace"));
+        assert_eq!(request.boot_request.session_id, request.session_id);
+        assert_eq!(request.boot_request.command_argv, request.command_argv);
+        assert_eq!(
+            request.boot_request.claim_boundary,
+            "boot request contract only; Apple Virtualization lifecycle is not wired"
+        );
+        request.boot_request.validate().unwrap();
         assert_eq!(request.virtualization, plan.virtualization);
         assert_eq!(request.endpoint_security, plan.endpoint_security);
         assert_eq!(request.network_extension, plan.network_extension);
@@ -1270,6 +1386,53 @@ mod tests {
         assert_eq!(request.prerequisite_checks, plan.prerequisite_checks);
         assert_eq!(request.runner_phases, plan.runner_phases);
         assert_eq!(request.required_entitlements, plan.required_entitlements);
+    }
+
+    #[test]
+    fn macos_vm_cell_boot_request_preserves_honest_boot_boundary() {
+        let spec = MinipodSpec::for_agent_task("codex", "/tmp/agentbox-work");
+        let exec = ExecCommand {
+            argv: vec!["/usr/bin/python3".into(), "-c".into(), "print(1)".into()],
+            working_dir: Some("/workspace/project".into()),
+            env: HashMap::new(),
+            timeout_seconds: Some(30),
+        };
+        let plan = MacOsAgentPodExecutionPlan::from_minipod_spec(&spec, &exec).unwrap();
+
+        let boot_request = MacOsVmCellBootRequest::from_execution_plan(&plan, &exec);
+
+        assert_eq!(boot_request.schema_version, 1);
+        assert_eq!(boot_request.session_id, spec.id);
+        assert_eq!(boot_request.bundle_id, plan.virtualization.bundle_id);
+        assert_eq!(boot_request.guest_os, "linux");
+        assert_eq!(boot_request.command_argv, exec.argv);
+        assert_eq!(boot_request.working_dir, "/workspace/project");
+        assert_eq!(
+            boot_request.workspace_mount.guest_path,
+            spec.filesystem.workspace_guest_path
+        );
+        assert_eq!(
+            boot_request.bridge_socket_guest_path,
+            "/run/agentbox/bridge.sock"
+        );
+        assert!(boot_request
+            .required_entitlements
+            .contains(&"com.apple.security.virtualization".into()));
+        assert!(boot_request.claim_boundary.contains("not wired"));
+        boot_request.validate().unwrap();
+    }
+
+    #[test]
+    fn macos_vm_cell_boot_request_rejects_fake_execution_claims() {
+        let spec = MinipodSpec::for_agent_task("codex", "/tmp/agentbox-work");
+        let exec = command(&["/bin/true"]);
+        let plan = MacOsAgentPodExecutionPlan::from_minipod_spec(&spec, &exec).unwrap();
+        let mut boot_request = MacOsVmCellBootRequest::from_execution_plan(&plan, &exec);
+        boot_request.claim_boundary = "booted and enforced".into();
+
+        let err = boot_request.validate().unwrap_err();
+
+        assert!(err.to_string().contains("claim boundary"));
     }
 
     #[test]
