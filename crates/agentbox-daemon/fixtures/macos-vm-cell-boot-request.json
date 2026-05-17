@@ -1,0 +1,52 @@
+{
+  "schema_version": 1,
+  "session_id": "fixture-session",
+  "bundle_id": "dev.agentbox.agentpod.fixture-session",
+  "guest_os": "linux",
+  "cpu_count": 2,
+  "memory_bytes": 2147483648,
+  "command_argv": [
+    "/usr/bin/python3",
+    "-c",
+    "print(1)"
+  ],
+  "working_dir": "/workspace/project",
+  "storage_layout": {
+    "schema_version": 1,
+    "cell_root_host_path": "/Users/example/.agentbox/agentpods/macos/fixture-session",
+    "config_json_host_path": "/Users/example/.agentbox/agentpods/macos/fixture-session/config/cell.json",
+    "disk_image_host_path": "/Users/example/.agentbox/agentpods/macos/fixture-session/disk/rootfs.img",
+    "auxiliary_storage_host_path": "/Users/example/.agentbox/agentpods/macos/fixture-session/disk/aux.img",
+    "workspace_mount_host_path": "/tmp/agentbox-work",
+    "credential_channel_host_path": "/Users/example/.agentbox/agentpods/macos/fixture-session/credentials",
+    "evidence_spool_host_path": "/Users/example/.agentbox/agentpods/macos/fixture-session/evidence",
+    "cleanup_policy": {
+      "remove_runner_request_after_invocation": true,
+      "destroy_cell_root_after_stop": true,
+      "seal_evidence_before_cleanup": true,
+      "retain_disk_image_on_failure": true
+    }
+  },
+  "workspace_mount": {
+    "host_path": "/tmp/agentbox-work",
+    "guest_path": "/workspace",
+    "writable": true,
+    "review_required": true
+  },
+  "shared_directories": [
+    {
+      "host_path": "/tmp/agentbox-work",
+      "guest_path": "/workspace",
+      "read_only": false,
+      "kind": "Workspace"
+    }
+  ],
+  "bridge_socket_guest_path": "/run/agentbox/bridge.sock",
+  "evidence_spool_guest_path": "/var/lib/agentbox/evidence",
+  "required_entitlements": [
+    "com.apple.security.virtualization",
+    "com.apple.developer.endpoint-security.client",
+    "com.apple.developer.networking.networkextension"
+  ],
+  "claim_boundary": "boot request contract only; Apple Virtualization lifecycle is not wired"
+}

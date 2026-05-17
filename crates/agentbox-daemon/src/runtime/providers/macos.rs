@@ -1436,6 +1436,27 @@ mod tests {
     }
 
     #[test]
+    fn macos_vm_cell_boot_request_fixture_remains_valid() {
+        let fixture = include_str!("../../../fixtures/macos-vm-cell-boot-request.json");
+        let request: MacOsVmCellBootRequest = serde_json::from_str(fixture).unwrap();
+
+        request.validate().unwrap();
+
+        assert_eq!(request.session_id, "fixture-session");
+        assert_eq!(request.bundle_id, "dev.agentbox.agentpod.fixture-session");
+        assert_eq!(request.command_argv[0], "/usr/bin/python3");
+        assert_eq!(request.workspace_mount.guest_path, "/workspace");
+        assert_eq!(request.shared_directories.len(), 1);
+        assert!(
+            request
+                .storage_layout
+                .cleanup_policy
+                .seal_evidence_before_cleanup
+        );
+        assert!(request.claim_boundary.contains("not wired"));
+    }
+
+    #[test]
     fn macos_runner_request_filename_is_path_safe_and_unique() {
         let first = macos_agentpod_runner_request_filename("../session/with spaces");
         let second = macos_agentpod_runner_request_filename("../session/with spaces");
