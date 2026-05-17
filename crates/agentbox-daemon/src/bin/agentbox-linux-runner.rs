@@ -256,7 +256,7 @@ mod tests {
     use super::*;
     use agentbox_daemon::runtime::providers::linux::{
         LinuxLandlockAccess, LinuxLandlockPathPolicyPlan, LinuxMountNamespaceMount,
-        LinuxOverlayFsWorkspacePlan,
+        LinuxOverlayFsWorkspacePlan, LinuxSeccompProfileImportDescriptor,
     };
 
     fn request() -> LinuxAgentPodRunnerRequest {
@@ -277,6 +277,14 @@ mod tests {
                 enabled: false,
                 default_action: agentbox_daemon::runtime::types::SeccompAction::Allow,
                 syscall_rules: Vec::new(),
+                import_descriptor: LinuxSeccompProfileImportDescriptor {
+                    schema_version: 1,
+                    supported_formats: vec!["oci-seccomp-v1-json".into()],
+                    generated_oci_profile: false,
+                    import_enabled: false,
+                    loader_scope: "test".into(),
+                    claim_boundary: "test".into(),
+                },
                 oci_profile: None,
                 requires_loader: false,
                 requires_linux: true,

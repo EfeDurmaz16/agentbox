@@ -39,7 +39,7 @@ levels differ and must stay explicit.
 
 | Provider | Prototype behavior | Gate |
 | --- | --- | --- |
-| `agentpod-linux` | rootless namespace wrapper, mount namespace plan, PID namespace plan, no-new-privs, cgroups v2 planning/apply, write-oriented Landlock loader, targeted seccomp deny loader, overlayfs review workspace apply, native runner phase evidence | `AGENTBOX_LINUX_NATIVE=1` on Linux |
+| `agentpod-linux` | rootless namespace wrapper, mount namespace plan, PID namespace plan, no-new-privs, cgroups v2 planning/apply, write/create/remove Landlock loader with explicit read/execute gap model, targeted seccomp deny loader with OCI/libseccomp import descriptor, overlayfs review workspace apply, native runner phase evidence | `AGENTBOX_LINUX_NATIVE=1` on Linux |
 | `remote-agentpod` | typed worker handshake/create/exec/destroy, workspace bundle handoff/export/apply, env/file credential handoff, command policy, approval-grant resolution, evidence upload/stream/status, lifecycle event journal, restart/status contract | HTTPS endpoint, or loopback HTTP only with `AGENTBOX_REMOTE_AGENTPOD_ALLOW_HTTP_LOOPBACK=1` |
 | `agentpod-macos` | native plan compiler, VM cell storage layout, VM runner request contract, gated runner invocation that currently returns an honest unavailable result | `AGENTBOX_MACOS_NATIVE=1` |
 
