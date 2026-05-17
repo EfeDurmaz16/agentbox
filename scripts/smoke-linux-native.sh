@@ -28,6 +28,10 @@ if ! cargo run -q -p agentbox-cli -- doctor --json |
   skip "writable/delegated Linux cgroups v2 root is required for the Linux native AgentPod smoke"
 fi
 
+if ! grep -qw overlay /proc/filesystems; then
+  skip "overlayfs support is required for the Linux native AgentPod overlay-review smoke"
+fi
+
 workspace="${AGENTBOX_LINUX_NATIVE_WORKSPACE:-$(mktemp -d)}"
 command_string="${AGENTBOX_LINUX_NATIVE_COMMAND:-/bin/true}"
 timeout_seconds="${AGENTBOX_LINUX_NATIVE_TIMEOUT_SECONDS:-30}"
@@ -97,6 +101,52 @@ fi
 if [[ -e "$proof_denied" ]]; then
   printf '%s\n' "$proof_output" >&2
   echo "expected Linux Landlock proof command to deny outside-workspace write" >&2
+  exit 1
+fi
+
+overlay_workspace="$(mktemp -d)"
+overlay_base="$(mktemp -d)"
+trap 'rm -rf "$proof_outside" "$parallel_root" "$overlay_workspace" "$overlay_base"' EXIT
+printf 'base\n' >"$overlay_workspace/base.txt"
+
+set +e
+overlay_output="$(
+  cd "$overlay_workspace"
+  printf 'y\n' | AGENTBOX_LINUX_NATIVE=1 cargo run -q -p agentbox-cli -- run \
+    --provider agentpod-linux \
+    --workspace-mode overlay-review \
+    --workspace-overlay-dir "$overlay_base" \
+    --timeout-seconds "$timeout_seconds" \
+    -- /bin/sh -c 'printf overlay > created.txt; printf changed > base.txt' 2>&1
+)"
+overlay_status=$?
+set -e
+
+if [[ "$overlay_status" -ne 0 ]]; then
+  printf '%s\n' "$overlay_output" >&2
+  echo "expected Linux overlay-review AgentPod command to complete" >&2
+  exit 1
+fi
+if [[ "$(cat "$overlay_workspace/base.txt")" != "base" ]]; then
+  printf '%s\n' "$overlay_output" >&2
+  echo "expected overlay-review run to leave lower workspace file unchanged" >&2
+  exit 1
+fi
+if [[ -e "$overlay_workspace/created.txt" ]]; then
+  printf '%s\n' "$overlay_output" >&2
+  echo "expected overlay-review run not to write created file into lower workspace" >&2
+  exit 1
+fi
+if [[ "$(cat "$overlay_base/upper/base.txt")" != "changed" ]]; then
+  printf '%s\n' "$overlay_output" >&2
+  find "$overlay_base" -maxdepth 3 -type f -print >&2
+  echo "expected overlay upper layer to capture modified workspace file" >&2
+  exit 1
+fi
+if [[ "$(cat "$overlay_base/upper/created.txt")" != "overlay" ]]; then
+  printf '%s\n' "$overlay_output" >&2
+  find "$overlay_base" -maxdepth 3 -type f -print >&2
+  echo "expected overlay upper layer to capture created workspace file" >&2
   exit 1
 fi
 
