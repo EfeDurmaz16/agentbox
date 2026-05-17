@@ -487,6 +487,16 @@ enum Commands {
         #[arg(long)]
         provider: Option<String>,
     },
+    /// Summarize provider readiness and next operator command
+    ProviderReadiness {
+        /// Emit JSON
+        #[arg(long)]
+        json: bool,
+
+        /// Limit readiness output to one provider
+        #[arg(long)]
+        provider: Option<String>,
+    },
     /// Inspect provider host-bridge capability health without starting a session
     BridgeHealth {
         /// Emit JSON
@@ -6362,6 +6372,106 @@ fn cmd_provider_gaps(json: bool, provider_filter: Option<String>) {
     }
 }
 
+fn provider_readiness_rows(provider_filter: Option<&str>) -> Vec<serde_json::Value> {
+    let gap_rows = provider_gap_rows(provider_filter);
+    let provider_rows = provider_status_rows();
+    let mut rows = gap_rows
+        .into_iter()
+        .filter_map(|gap| {
+            let provider = gap.get("provider")?.as_str()?.to_string();
+            let provider_row = provider_rows
+                .iter()
+                .find(|row| row.get("provider").and_then(serde_json::Value::as_str) == Some(&provider))?;
+            let readiness = bridge_readiness(provider_row);
+            let active = json_string_array(&gap["active"]);
+            let prototype = json_string_array(&gap["prototype"]);
+            let descriptor_only = json_string_array(&gap["descriptor_only"]);
+            let missing = json_string_array(&gap["missing"]);
+            let gated = gap
+                .get("gated")
+                .and_then(serde_json::Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            let readiness_verdict = readiness
+                .get("verdict")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("unknown");
+            let next_command = readiness
+                .get("next_command")
+                .cloned()
+                .unwrap_or_else(|| serde_json::json!("agentbox providers --json"));
+
+            Some(serde_json::json!({
+                "provider": provider,
+                "status": gap.get("status").cloned().unwrap_or(serde_json::Value::Null),
+                "readiness": readiness,
+                "readiness_verdict": readiness_verdict,
+                "next_command": next_command,
+                "counts": {
+                    "active": active.len(),
+                    "prototype": prototype.len(),
+                    "descriptor_only": descriptor_only.len(),
+                    "missing": missing.len(),
+                    "gated": gated.len(),
+                },
+                "active": active,
+                "prototype": prototype,
+                "descriptor_only": descriptor_only,
+                "missing": missing,
+                "gated": gated,
+                "doctor_check": gap.get("doctor_check").cloned().unwrap_or(serde_json::Value::Null),
+                "verification_command": gap.get("verification_command").cloned().unwrap_or(serde_json::Value::Null),
+            }))
+        })
+        .collect::<Vec<_>>();
+    rows.sort_by(|left, right| {
+        left["provider"]
+            .as_str()
+            .unwrap_or_default()
+            .cmp(right["provider"].as_str().unwrap_or_default())
+    });
+    rows
+}
+
+fn cmd_provider_readiness(json: bool, provider_filter: Option<String>) {
+    let rows = provider_readiness_rows(provider_filter.as_deref());
+    if provider_filter.is_some() && rows.is_empty() {
+        let provider = provider_filter.as_deref().unwrap_or_default();
+        eprintln!("error: unknown provider `{provider}`");
+        eprintln!(
+            "hint: expected direct-host, podman, agentpod-macos, agentpod-linux, agentpod-windows, or remote-agentpod"
+        );
+        std::process::exit(1);
+    }
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&rows).expect("failed to serialize provider readiness")
+        );
+        return;
+    }
+
+    println!(
+        "{:<18} {:<18} {:<26} {:>6} {:>9} {:>10} {:>8} NEXT COMMAND",
+        "PROVIDER", "STATUS", "READINESS", "ACTIVE", "PROTOTYPE", "DESCRIPTOR", "GATED"
+    );
+    println!("{}", "-".repeat(138));
+    for row in rows {
+        println!(
+            "{:<18} {:<18} {:<26} {:>6} {:>9} {:>10} {:>8} {}",
+            row["provider"].as_str().unwrap_or_default(),
+            row["status"].as_str().unwrap_or_default(),
+            row["readiness_verdict"].as_str().unwrap_or_default(),
+            row["counts"]["active"].as_u64().unwrap_or(0),
+            row["counts"]["prototype"].as_u64().unwrap_or(0),
+            row["counts"]["descriptor_only"].as_u64().unwrap_or(0),
+            row["counts"]["gated"].as_u64().unwrap_or(0),
+            row["next_command"].as_str().unwrap_or_default()
+        );
+    }
+}
+
 fn json_string_array(value: &serde_json::Value) -> Vec<String> {
     value
         .as_array()
@@ -8368,6 +8478,7 @@ async fn main() {
         }),
         Commands::Providers { json } => cmd_providers(json),
         Commands::ProviderGaps { json, provider } => cmd_provider_gaps(json, provider),
+        Commands::ProviderReadiness { json, provider } => cmd_provider_readiness(json, provider),
         Commands::BridgeHealth { json, provider } => cmd_bridge_health(json, provider),
         Commands::RemoteDescriptor {
             endpoint,
@@ -8867,6 +8978,29 @@ mod tests {
             linux["verification_command"],
             serde_json::json!("agentbox native-plan --provider agentpod-linux -- <cmd>")
         );
+    }
+
+    #[test]
+    fn provider_readiness_rows_join_gaps_with_next_command() {
+        let rows = provider_readiness_rows(Some("agentpod-linux"));
+        assert_eq!(rows.len(), 1);
+        let linux = &rows[0];
+
+        assert_eq!(linux["provider"], serde_json::json!("agentpod-linux"));
+        assert_eq!(
+            linux["readiness_verdict"],
+            serde_json::json!("prototype-gated")
+        );
+        assert_eq!(
+            linux["next_command"],
+            serde_json::json!("agentbox native-plan --provider agentpod-linux -- <cmd>")
+        );
+        assert!(linux["counts"]["prototype"].as_u64().unwrap() >= 1);
+        assert!(linux["counts"]["gated"].as_u64().unwrap() >= 1);
+        assert!(json_string_array(&linux["prototype"]).contains(&"seccomp".to_string()));
+        assert!(linux["gated"].as_array().unwrap().iter().any(|gate| {
+            gate["primitive"] == "seccomp" && gate["requires_gate"] == "AGENTBOX_LINUX_NATIVE=1"
+        }));
     }
 
     #[test]

@@ -49,6 +49,11 @@ log "checking provider gap report JSON"
 validate_json "$TMPDIR/provider-gaps.json" \
   "any(row.get('provider') == 'direct-host' and 'path-shim' in row.get('active', []) for row in data) and any(row.get('provider') == 'agentpod-linux' and 'seccomp' in row.get('prototype', []) and 'nftables' in row.get('prototype', []) and any(g.get('requires_gate') == 'AGENTBOX_LINUX_NATIVE=1' for g in row.get('gated', [])) for row in data) and any(row.get('provider') == 'agentpod-windows' and 'wfp' in row.get('descriptor_only', []) for row in data)"
 
+log "checking provider readiness summary JSON"
+"${CLI[@]}" provider-readiness --json >"$TMPDIR/provider-readiness.json"
+validate_json "$TMPDIR/provider-readiness.json" \
+  "any(row.get('provider') == 'direct-host' and row.get('readiness_verdict') == 'active-command-mediation' and row.get('counts', {}).get('active', 0) >= 1 and row.get('next_command') == 'agentbox doctor' for row in data) and any(row.get('provider') == 'agentpod-linux' and row.get('readiness_verdict') == 'prototype-gated' and row.get('counts', {}).get('prototype', 0) >= 1 and any(g.get('requires_gate') == 'AGENTBOX_LINUX_NATIVE=1' for g in row.get('gated', [])) for row in data) and any(row.get('provider') == 'agentpod-windows' and row.get('counts', {}).get('descriptor_only', 0) >= 1 for row in data)"
+
 log "checking daemon cleanup command surface"
 "${CLI[@]}" clean --help >"$TMPDIR/clean-help.txt"
 grep -F "Remove stale daemon pid and socket files" "$TMPDIR/clean-help.txt" >/dev/null
