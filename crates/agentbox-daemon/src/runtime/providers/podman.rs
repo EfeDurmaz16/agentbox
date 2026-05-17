@@ -463,4 +463,41 @@ mod tests {
             RuntimeError::Timeout(5)
         ));
     }
+
+    #[test]
+    #[ignore = "requires AGENTBOX_LIVE_PODMAN=1 plus a runnable Podman machine"]
+    fn podman_socket_smoke() {
+        run_live_podman_bridge_smoke();
+    }
+
+    #[test]
+    #[ignore = "requires AGENTBOX_LIVE_PODMAN=1 plus a runnable Podman machine"]
+    fn shim_in_minipod() {
+        run_live_podman_bridge_smoke();
+    }
+
+    fn run_live_podman_bridge_smoke() {
+        if std::env::var("AGENTBOX_LIVE_PODMAN").as_deref() != Ok("1") {
+            eprintln!("skipping live Podman bridge smoke; set AGENTBOX_LIVE_PODMAN=1 to run it");
+            return;
+        }
+
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .nth(2)
+            .expect("workspace root should be two levels above agentbox-daemon");
+        let output = std::process::Command::new("bash")
+            .arg("scripts/smoke-podman-bridge.sh")
+            .current_dir(root)
+            .output()
+            .expect("failed to launch scripts/smoke-podman-bridge.sh");
+
+        assert!(
+            output.status.success(),
+            "podman bridge smoke failed with status {:?}\nstdout:\n{}\nstderr:\n{}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 }
