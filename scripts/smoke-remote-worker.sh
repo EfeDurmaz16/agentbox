@@ -731,6 +731,9 @@ assert "CommandStarted" in event_names
 assert "CommandFinished" in event_names
 assert "EvidenceSealed" in event_names
 assert [event["sequence"] for event in events["events"]] == sorted(event["sequence"] for event in events["events"])
+assert events["returned_count"] == len(events["events"])
+assert events["next_sequence"] > events["events"][-1]["sequence"]
+assert events["has_more"] is False
 assert events["event_stream"]["delivery"] == "http-polling-contract"
 assert events["event_stream"]["lifecycle_stream_id"].startswith("lifecycle:")
 assert "not a live bidirectional event bus" in events["event_stream"]["claim_boundary"]

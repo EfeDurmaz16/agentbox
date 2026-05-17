@@ -376,6 +376,8 @@ struct WorkerEvidenceBundleFile {
 #[derive(Debug, Clone, Deserialize)]
 struct WorkerEvidenceStatusQuery {
     session_id: String,
+    after_sequence: Option<u64>,
+    limit: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -2010,11 +2012,46 @@ async fn lifecycle_events(
             "agentbox remote worker session id does not match worker session",
         ));
     }
+    if query
+        .limit
+        .is_some_and(|limit| limit == 0 || limit > 10_000)
+    {
+        return Err(worker_error(
+            StatusCode::BAD_REQUEST,
+            "agentbox remote worker lifecycle event limit must be between 1 and 10000",
+        ));
+    }
+    let after_sequence = query.after_sequence.unwrap_or(0);
+    let limit = query.limit.unwrap_or(u64::MAX);
+    let matching_events: Vec<_> = session
+        .lifecycle_events
+        .iter()
+        .filter(|event| event.sequence > after_sequence)
+        .cloned()
+        .collect();
+    let has_more = matching_events.len() > usize::try_from(limit).unwrap_or(usize::MAX);
+    let events: Vec<_> = matching_events
+        .into_iter()
+        .take(usize::try_from(limit).unwrap_or(usize::MAX))
+        .collect();
+    let next_sequence = events
+        .last()
+        .map(|event| event.sequence.saturating_add(1))
+        .or_else(|| {
+            session
+                .lifecycle_events
+                .last()
+                .map(|event| event.sequence.saturating_add(1))
+        })
+        .unwrap_or(after_sequence.saturating_add(1));
     Ok(Json(RemoteAgentPodLifecycleEventsResponse {
         session_id: session.session_id.clone(),
         event_stream: worker_event_stream_descriptor(&session.session_id, &worker_session_id),
         worker_session_id,
-        events: session.lifecycle_events.clone(),
+        next_sequence,
+        returned_count: events.len().try_into().unwrap_or(u64::MAX),
+        has_more,
+        events,
     }))
 }
 
@@ -4123,6 +4160,8 @@ mod tests {
             AxumPath("worker-session-1".into()),
             Query(WorkerEvidenceStatusQuery {
                 session_id: "session-1".into(),
+                after_sequence: None,
+                limit: None,
             }),
         )
         .await
@@ -4690,6 +4729,8 @@ mod tests {
             AxumPath("worker-session-1".into()),
             Query(WorkerEvidenceStatusQuery {
                 session_id: "session-1".into(),
+                after_sequence: None,
+                limit: None,
             }),
         )
         .await
@@ -4782,6 +4823,64 @@ mod tests {
         assert_eq!(
             response.supervision.persistence,
             WorkerSupervisionPersistence::MemoryOnly
+        );
+    }
+
+    #[tokio::test]
+    async fn lifecycle_events_support_cursor_and_limit() {
+        let config = RemoteWorkerConfig::new(
+            "worker.local/dev",
+            "https://worker.example.com/agentpod/evidence",
+            SigningKey::from_bytes(&[78_u8; 32]),
+        );
+        let state = test_state(config);
+        let mut session = WorkerSession::new(
+            "session-1".into(),
+            std::env::temp_dir(),
+            WorkerPolicy::default(),
+        );
+        session.record_lifecycle_event(
+            RemoteAgentPodLifecycleEvent::WorkerAllocated,
+            Some("allocated".into()),
+        );
+        session.record_lifecycle_event(
+            RemoteAgentPodLifecycleEvent::SessionCreated,
+            Some("created".into()),
+        );
+        session.record_lifecycle_event(
+            RemoteAgentPodLifecycleEvent::CommandStarted,
+            Some("started".into()),
+        );
+        session.record_lifecycle_event(
+            RemoteAgentPodLifecycleEvent::CommandFinished,
+            Some("finished".into()),
+        );
+        state
+            .sessions
+            .lock()
+            .await
+            .insert("worker-session-1".into(), session);
+
+        let response = lifecycle_events(
+            State(state),
+            AxumPath("worker-session-1".into()),
+            Query(WorkerEvidenceStatusQuery {
+                session_id: "session-1".into(),
+                after_sequence: Some(2),
+                limit: Some(1),
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+
+        assert_eq!(response.returned_count, 1);
+        assert!(response.has_more);
+        assert_eq!(response.next_sequence, 4);
+        assert_eq!(response.events[0].sequence, 3);
+        assert_eq!(
+            response.events[0].event,
+            RemoteAgentPodLifecycleEvent::CommandStarted
         );
     }
 
@@ -5011,6 +5110,8 @@ mod tests {
             AxumPath("worker-session-1".into()),
             Query(WorkerEvidenceStatusQuery {
                 session_id: "other-session".into(),
+                after_sequence: None,
+                limit: None,
             }),
         )
         .await

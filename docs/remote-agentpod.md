@@ -175,8 +175,9 @@ receipt parity surface; it does not claim that the remote worker is a complete
 sandbox. `remote-events` prints the persisted lifecycle event journal for the
 session plus the same typed event stream descriptor, including allocation,
 command start/finish, evidence seal, restart, and destroy events with
-monotonically increasing sequence
-numbers.
+monotonically increasing sequence numbers. The lifecycle journal response also
+reports `returned_count`, `next_sequence`, and `has_more`; the worker route
+accepts `after_sequence` and `limit` query parameters for resumable polling.
 
 If the worker reports a stopped or failed session, the operator can explicitly
 resume the same worker session without replaying the prior command:

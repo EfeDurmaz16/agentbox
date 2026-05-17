@@ -1199,6 +1199,10 @@ impl RemoteAgentPodLifecycleEventRecord {
 pub struct RemoteAgentPodLifecycleEventsRequest {
     pub session_id: String,
     pub worker_session_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after_sequence: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u64>,
 }
 
 impl RemoteAgentPodLifecycleEventsRequest {
@@ -1206,6 +1210,11 @@ impl RemoteAgentPodLifecycleEventsRequest {
         if self.session_id.trim().is_empty() || self.worker_session_id.trim().is_empty() {
             return Err(RuntimeError::ManifestRejected(
                 "remote lifecycle events request must include session ids".into(),
+            ));
+        }
+        if self.limit.is_some_and(|limit| limit == 0 || limit > 10_000) {
+            return Err(RuntimeError::ManifestRejected(
+                "remote lifecycle events request limit must be between 1 and 10000".into(),
             ));
         }
         Ok(())
@@ -1218,6 +1227,12 @@ pub struct RemoteAgentPodLifecycleEventsResponse {
     pub worker_session_id: String,
     #[serde(default)]
     pub event_stream: RemoteAgentPodEventStreamDescriptor,
+    #[serde(default)]
+    pub next_sequence: u64,
+    #[serde(default)]
+    pub returned_count: u64,
+    #[serde(default)]
+    pub has_more: bool,
     pub events: Vec<RemoteAgentPodLifecycleEventRecord>,
 }
 
@@ -1235,6 +1250,11 @@ impl RemoteAgentPodLifecycleEventsResponse {
             ));
         }
         self.event_stream.validate()?;
+        if self.returned_count != self.events.len().try_into().unwrap_or(u64::MAX) {
+            return Err(RuntimeError::ManifestRejected(
+                "remote lifecycle events response returned count must match events".into(),
+            ));
+        }
         let mut previous = 0;
         for event in &self.events {
             event.validate()?;
@@ -1244,6 +1264,24 @@ impl RemoteAgentPodLifecycleEventsResponse {
                 ));
             }
             previous = event.sequence;
+        }
+        if previous > 0 && self.next_sequence <= previous {
+            return Err(RuntimeError::ManifestRejected(
+                "remote lifecycle events response next sequence must advance past returned events"
+                    .into(),
+            ));
+        }
+        if let Some(limit) = request.limit {
+            if self.returned_count > limit {
+                return Err(RuntimeError::ManifestRejected(
+                    "remote lifecycle events response returned more events than requested".into(),
+                ));
+            }
+            if self.has_more && self.returned_count != limit {
+                return Err(RuntimeError::ManifestRejected(
+                    "remote lifecycle events response can mark has_more only after filling the requested limit".into(),
+                ));
+            }
         }
         Ok(())
     }
@@ -2067,10 +2105,17 @@ impl RemoteAgentPodTransport for HttpRemoteAgentPodTransport {
         request: RemoteAgentPodLifecycleEventsRequest,
     ) -> Result<RemoteAgentPodLifecycleEventsResponse, RuntimeError> {
         request.validate()?;
+        let mut query = vec![("session_id", request.session_id.clone())];
+        if let Some(after_sequence) = request.after_sequence {
+            query.push(("after_sequence", after_sequence.to_string()));
+        }
+        if let Some(limit) = request.limit {
+            query.push(("limit", limit.to_string()));
+        }
         let response = self
             .client
             .get(self.route(format!("sessions/{}/events", request.worker_session_id)))
-            .query(&[("session_id", request.session_id.as_str())])
+            .query(&query)
             .send()
             .await
             .map_err(|err| {
@@ -3292,6 +3337,9 @@ mod tests {
                 session_id: request.session_id.clone(),
                 worker_session_id: request.worker_session_id.clone(),
                 event_stream: RemoteAgentPodEventStreamDescriptor::default(),
+                next_sequence: 3,
+                returned_count: 2,
+                has_more: false,
                 events: vec![
                     RemoteAgentPodLifecycleEventRecord {
                         sequence: 1,

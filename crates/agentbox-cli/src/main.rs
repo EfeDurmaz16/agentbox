@@ -6941,6 +6941,8 @@ async fn cmd_remote_evidence_status(
         let events_request = RemoteAgentPodLifecycleEventsRequest {
             session_id: request.session_id.clone(),
             worker_session_id: request.worker_session_id.clone(),
+            after_sequence: None,
+            limit: None,
         };
         events_request.validate().unwrap_or_else(|e| {
             eprintln!(
@@ -6994,6 +6996,8 @@ async fn cmd_remote_events(
     let request = RemoteAgentPodLifecycleEventsRequest {
         session_id,
         worker_session_id,
+        after_sequence: None,
+        limit: None,
     };
     request.validate().unwrap_or_else(|e| {
         eprintln!(
@@ -9765,6 +9769,9 @@ mod tests {
             session_id: "local-session".into(),
             worker_session_id: "worker-session".into(),
             event_stream: RemoteAgentPodEventStreamDescriptor::default(),
+            next_sequence: 3,
+            returned_count: 2,
+            has_more: false,
             events: vec![
                 RemoteAgentPodLifecycleEventRecord {
                     sequence: 1,
