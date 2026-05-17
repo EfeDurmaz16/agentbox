@@ -116,6 +116,10 @@ contract-only `agentbox-macos-vm-runner` binary. Behind
 `AGENTBOX_MACOS_NATIVE=1`, the `agentpod-macos` provider can create a gated
 session, write that typed request, invoke the runner with `--request`, and
 surface the runner refusal as evidence that the contract boundary was reached.
+The macOS VM cell plan includes a deterministic local storage layout under
+`~/.agentbox/agentpods/macos/<session>`, covering the cell config JSON, root
+disk image, auxiliary disk image, workspace mount source, credential channel
+directory, evidence spool directory, and cleanup policy.
 The runner still refuses execution until the Apple Virtualization lifecycle is
 wired. Provider execution remains unavailable until the VM runner can boot
 cells, signed system extension, Network Extension lifecycle, and live

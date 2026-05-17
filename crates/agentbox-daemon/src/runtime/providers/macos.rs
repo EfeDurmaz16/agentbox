@@ -2,6 +2,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+use crate::config;
 use crate::runtime::bridge::{
     CommandMediationRequest, FileGrantRequest, HostBridgeDecision, HostBridgeRequest,
     HostBridgeTransportKind, NetworkFirstContactRequest,
@@ -21,6 +22,7 @@ pub struct MacOsVirtualizationCellPlan {
     pub workspace_host_path: String,
     pub workspace_guest_path: String,
     pub cell_config: MacOsVmCellConfigPlan,
+    pub storage_layout: MacOsVmCellStorageLayout,
     pub shared_directories: Vec<MacOsSharedDirectoryPlan>,
     pub host_bridge: MacOsHostBridgePlan,
     pub requires_apple_virtualization: bool,
@@ -33,6 +35,27 @@ pub struct MacOsVmCellConfigPlan {
     pub bridge_socket_guest_path: String,
     pub evidence_spool_guest_path: String,
     pub shutdown_policy: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MacOsVmCellStorageLayout {
+    pub schema_version: i64,
+    pub cell_root_host_path: String,
+    pub config_json_host_path: String,
+    pub disk_image_host_path: String,
+    pub auxiliary_storage_host_path: String,
+    pub workspace_mount_host_path: String,
+    pub credential_channel_host_path: String,
+    pub evidence_spool_host_path: String,
+    pub cleanup_policy: MacOsVmCellCleanupPolicy,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MacOsVmCellCleanupPolicy {
+    pub remove_runner_request_after_invocation: bool,
+    pub destroy_cell_root_after_stop: bool,
+    pub seal_evidence_before_cleanup: bool,
+    pub retain_disk_image_on_failure: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -128,6 +151,8 @@ impl MacOsVirtualizationCellPlan {
             .collect();
         let bridge_socket_guest_path = "/run/agentbox/bridge.sock".to_string();
 
+        let storage_layout = MacOsVmCellStorageLayout::from_minipod_spec(spec);
+
         Ok(Self {
             schema_version: 1,
             bundle_id: format!("dev.agentbox.agentpod.{}", spec.id),
@@ -143,6 +168,7 @@ impl MacOsVirtualizationCellPlan {
                 evidence_spool_guest_path: "/var/lib/agentbox/evidence".into(),
                 shutdown_policy: "destroy-vm-cell-and-seal-evidence".into(),
             },
+            storage_layout,
             shared_directories,
             host_bridge: MacOsHostBridgePlan {
                 transport: HostBridgeTransportKind::Vsock,
@@ -152,6 +178,54 @@ impl MacOsVirtualizationCellPlan {
             },
             requires_apple_virtualization: true,
         })
+    }
+}
+
+impl MacOsVmCellStorageLayout {
+    pub fn from_minipod_spec(spec: &MinipodSpec) -> Self {
+        let cell_root = config::config_dir()
+            .join("agentpods")
+            .join("macos")
+            .join(macos_agentpod_cell_safe_id(&spec.id));
+        Self {
+            schema_version: 1,
+            cell_root_host_path: path_to_string(&cell_root),
+            config_json_host_path: path_to_string(&cell_root.join("config").join("cell.json")),
+            disk_image_host_path: path_to_string(&cell_root.join("disk").join("rootfs.img")),
+            auxiliary_storage_host_path: path_to_string(&cell_root.join("disk").join("aux.img")),
+            workspace_mount_host_path: path_to_string(&spec.filesystem.workspace_host_path),
+            credential_channel_host_path: path_to_string(&cell_root.join("credentials")),
+            evidence_spool_host_path: path_to_string(&cell_root.join("evidence")),
+            cleanup_policy: MacOsVmCellCleanupPolicy {
+                remove_runner_request_after_invocation: true,
+                destroy_cell_root_after_stop: true,
+                seal_evidence_before_cleanup: true,
+                retain_disk_image_on_failure: true,
+            },
+        }
+    }
+}
+
+fn path_to_string(path: &std::path::Path) -> String {
+    path.display().to_string()
+}
+
+fn macos_agentpod_cell_safe_id(session_id: &str) -> String {
+    let safe_session_id: String = session_id
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let safe_session_id = safe_session_id.trim_matches('_');
+    if safe_session_id.is_empty() {
+        "session".into()
+    } else {
+        safe_session_id.into()
     }
 }
 
@@ -1066,6 +1140,42 @@ mod tests {
             plan.cell_config.evidence_spool_guest_path,
             "/var/lib/agentbox/evidence"
         );
+        let safe_id = macos_agentpod_cell_safe_id(&spec.id);
+        assert!(plan
+            .storage_layout
+            .cell_root_host_path
+            .ends_with(&format!(".agentbox/agentpods/macos/{safe_id}")));
+        assert!(plan
+            .storage_layout
+            .config_json_host_path
+            .ends_with(&format!(
+                ".agentbox/agentpods/macos/{safe_id}/config/cell.json"
+            )));
+        assert!(plan.storage_layout.disk_image_host_path.ends_with(&format!(
+            ".agentbox/agentpods/macos/{safe_id}/disk/rootfs.img"
+        )));
+        assert_eq!(
+            plan.storage_layout.workspace_mount_host_path,
+            "/tmp/agentbox-work"
+        );
+        assert!(plan
+            .storage_layout
+            .credential_channel_host_path
+            .ends_with(&format!(".agentbox/agentpods/macos/{safe_id}/credentials")));
+        assert!(plan
+            .storage_layout
+            .evidence_spool_host_path
+            .ends_with(&format!(".agentbox/agentpods/macos/{safe_id}/evidence")));
+        assert!(
+            plan.storage_layout
+                .cleanup_policy
+                .remove_runner_request_after_invocation
+        );
+        assert!(
+            plan.storage_layout
+                .cleanup_policy
+                .seal_evidence_before_cleanup
+        );
         assert_eq!(plan.cell_config.credential_channels.len(), 2);
         assert!(plan.cell_config.credential_channels.iter().any(|channel| {
             channel.name == "AWS_PROFILE"
@@ -1081,6 +1191,15 @@ mod tests {
         assert_eq!(plan.shared_directories.len(), 2);
         assert!(!plan.shared_directories[0].read_only);
         assert!(plan.shared_directories[1].read_only);
+    }
+
+    #[test]
+    fn macos_vm_cell_storage_safe_id_normalizes_session_paths() {
+        let safe = macos_agentpod_cell_safe_id("../session/with spaces");
+
+        assert_eq!(safe, "session_with_spaces");
+        assert!(!safe.contains('/'));
+        assert!(!safe.contains(' '));
     }
 
     #[test]
