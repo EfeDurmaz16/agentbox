@@ -1004,6 +1004,10 @@ async fn reject_duplicate_worker_session(
 fn validate_create_material(
     request: &RemoteAgentPodCreateSessionRequest,
 ) -> Result<(), (StatusCode, Json<WorkerError>)> {
+    request
+        .transport
+        .validate()
+        .map_err(|err| worker_error(StatusCode::BAD_REQUEST, err.to_string()))?;
     if request.spec.credentials.inherit_host_env || !request.spec.credentials.grants.is_empty() {
         if !request.spec.credentials.inherit_host_env
             && request.spec.credentials.grants.iter().all(|grant| {
@@ -4013,11 +4017,33 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn create_session_materializes_workspace_bundle() {
+    async fn create_session_rejects_invalid_event_stream_descriptor() {
         let config = RemoteWorkerConfig::new(
             "worker.local/dev",
             "https://worker.example.com/agentpod/evidence",
             SigningKey::from_bytes(&[32_u8; 32]),
+        );
+        let state = test_state(config);
+        let mut request = create_session_request(std::env::temp_dir());
+        request.transport.event_stream.delivery = "websocket".into();
+        request.transport.event_stream.claim_boundary =
+            "live bidirectional event bus is ready".into();
+
+        let err = create_session(State(state.clone()), Json(request))
+            .await
+            .unwrap_err();
+
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+        assert!(err.1 .0.error.contains("polling-only delivery"));
+        assert!(state.sessions.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn create_session_materializes_workspace_bundle() {
+        let config = RemoteWorkerConfig::new(
+            "worker.local/dev",
+            "https://worker.example.com/agentpod/evidence",
+            SigningKey::from_bytes(&[33_u8; 32]),
         );
         let state = test_state(config);
         let workspace = std::env::temp_dir().join(format!(

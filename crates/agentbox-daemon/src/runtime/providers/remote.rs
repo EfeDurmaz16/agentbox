@@ -2236,10 +2236,8 @@ impl RemoteAgentPodTransportDescriptor {
         let endpoint = endpoint.into();
         validate_remote_endpoint(&endpoint)?;
         let lifecycle = RemoteAgentPodLifecycleDescriptor::default();
-        lifecycle.validate()?;
         let event_stream = RemoteAgentPodEventStreamDescriptor::default();
-        event_stream.validate()?;
-        Ok(Self {
+        let descriptor = Self {
             schema_version: 1,
             provider: "remote-agentpod".to_string(),
             endpoint,
@@ -2250,7 +2248,30 @@ impl RemoteAgentPodTransportDescriptor {
             lifecycle,
             event_stream,
             created_at: Utc::now(),
-        })
+        };
+        descriptor.validate()?;
+        Ok(descriptor)
+    }
+
+    pub fn validate(&self) -> Result<(), RuntimeError> {
+        if self.schema_version != 1 || self.provider != "remote-agentpod" {
+            return Err(RuntimeError::ManifestRejected(
+                "remote transport descriptor must be schema v1 for remote-agentpod".into(),
+            ));
+        }
+        validate_remote_endpoint(&self.endpoint)?;
+        if self.secret_material_included {
+            return Err(RuntimeError::ManifestRejected(
+                "remote transport descriptor must not include secret material".into(),
+            ));
+        }
+        if !self.kill_switch_required {
+            return Err(RuntimeError::ManifestRejected(
+                "remote transport descriptor must require kill-switch support".into(),
+            ));
+        }
+        self.lifecycle.validate()?;
+        self.event_stream.validate()
     }
 }
 

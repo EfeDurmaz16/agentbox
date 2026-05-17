@@ -19,6 +19,7 @@ PY
 
 SIGNING_KEY_HEX="0000000000000000000000000000000000000000000000000000000000000021"
 
+AGENTBOX_REMOTE_AGENTPOD_ALLOW_HTTP_LOOPBACK=1 \
 cargo run --locked -q -p agentbox-remote-worker -- \
   --listen "127.0.0.1:${PORT}" \
   --worker worker.local/smoke \
@@ -828,6 +829,7 @@ kill "$WORKER_PID"
 wait "$WORKER_PID" 2>/dev/null || true
 WORKER_PID=""
 
+AGENTBOX_REMOTE_AGENTPOD_ALLOW_HTTP_LOOPBACK=1 \
 cargo run --locked -q -p agentbox-remote-worker -- \
   --listen "127.0.0.1:${PORT}" \
   --worker worker.local/smoke \
