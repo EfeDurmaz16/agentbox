@@ -546,6 +546,7 @@ pub struct LinuxLandlockPlan {
     pub schema_version: i64,
     pub ruleset_name: String,
     pub rules: Vec<LinuxLandlockRule>,
+    pub path_policy: LinuxLandlockPathPolicyPlan,
     pub handled_access_mask: u64,
     pub default_deny: bool,
     pub requires_loader: bool,
@@ -569,6 +570,23 @@ pub enum LinuxLandlockAccess {
     RemoveFile,
     RemoveDir,
     Execute,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LinuxLandlockPathPolicyPlan {
+    pub schema_version: i64,
+    pub access_classes: Vec<LinuxLandlockAccessClassPlan>,
+    pub current_loader_scope: String,
+    pub claim_boundary: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LinuxLandlockAccessClassPlan {
+    pub class: String,
+    pub planned: bool,
+    pub enforced_by_prototype_loader: bool,
+    pub access: Vec<LinuxLandlockAccess>,
+    pub reason: String,
 }
 
 const LANDLOCK_ACCESS_FS_EXECUTE: u64 = 1 << 0;
@@ -604,6 +622,56 @@ impl LinuxLandlockAccess {
             Self::RemoveDir => LANDLOCK_ACCESS_FS_REMOVE_DIR,
             Self::RemoveFile => LANDLOCK_ACCESS_FS_REMOVE_FILE,
             Self::MakeDir => LANDLOCK_ACCESS_FS_MAKE_DIR,
+        }
+    }
+}
+
+impl LinuxLandlockPathPolicyPlan {
+    pub fn prototype_loader_scope() -> Self {
+        Self {
+            schema_version: 1,
+            access_classes: vec![
+                LinuxLandlockAccessClassPlan {
+                    class: "read".into(),
+                    planned: true,
+                    enforced_by_prototype_loader: false,
+                    access: vec![LinuxLandlockAccess::ReadFile, LinuxLandlockAccess::ReadDir],
+                    reason: "planned read path policy; prototype loader does not yet handle read access".into(),
+                },
+                LinuxLandlockAccessClassPlan {
+                    class: "execute".into(),
+                    planned: true,
+                    enforced_by_prototype_loader: false,
+                    access: vec![LinuxLandlockAccess::Execute],
+                    reason: "planned execute path policy; prototype loader must run after launcher sequencing before handling execute access".into(),
+                },
+                LinuxLandlockAccessClassPlan {
+                    class: "write".into(),
+                    planned: true,
+                    enforced_by_prototype_loader: true,
+                    access: vec![LinuxLandlockAccess::WriteFile],
+                    reason: "prototype loader handles write-file path-beneath access".into(),
+                },
+                LinuxLandlockAccessClassPlan {
+                    class: "create".into(),
+                    planned: true,
+                    enforced_by_prototype_loader: true,
+                    access: vec![LinuxLandlockAccess::MakeDir],
+                    reason: "prototype loader handles create access covered by ABI v1 make-dir and make-reg bits".into(),
+                },
+                LinuxLandlockAccessClassPlan {
+                    class: "remove".into(),
+                    planned: true,
+                    enforced_by_prototype_loader: true,
+                    access: vec![
+                        LinuxLandlockAccess::RemoveFile,
+                        LinuxLandlockAccess::RemoveDir,
+                    ],
+                    reason: "prototype loader handles remove-file and remove-dir path-beneath access".into(),
+                },
+            ],
+            current_loader_scope: "write/create/remove path-beneath denial only".into(),
+            claim_boundary: "read and execute path policy are planned but not enforced by the prototype loader".into(),
         }
     }
 }
@@ -661,6 +729,7 @@ impl LinuxLandlockRuleset {
         Ok(LinuxLandlockPlan {
             schema_version: 1,
             ruleset_name: format!("agentbox-{}", spec.id),
+            path_policy: LinuxLandlockPathPolicyPlan::prototype_loader_scope(),
             handled_access_mask: landlock_handled_access_mask(&rules),
             rules,
             default_deny: true,
@@ -2497,6 +2566,60 @@ mod tests {
             0,
             "prototype loader must not handle exec until it can run after the launcher starts"
         );
+    }
+
+    #[test]
+    fn landlock_path_policy_plan_separates_read_execute_from_loader_scope() {
+        let spec = MinipodSpec::for_agent_task("hermes", "/tmp/agentbox-work");
+
+        let plan = LinuxLandlockRuleset::plan(&spec).unwrap();
+
+        assert_eq!(plan.path_policy.schema_version, 1);
+        assert!(plan
+            .path_policy
+            .claim_boundary
+            .contains("not enforced by the prototype loader"));
+        assert_eq!(
+            plan.path_policy.current_loader_scope,
+            "write/create/remove path-beneath denial only"
+        );
+
+        let read = plan
+            .path_policy
+            .access_classes
+            .iter()
+            .find(|class| class.class == "read")
+            .unwrap();
+        assert!(read.planned);
+        assert!(!read.enforced_by_prototype_loader);
+        assert!(read.access.contains(&LinuxLandlockAccess::ReadFile));
+        assert!(read.access.contains(&LinuxLandlockAccess::ReadDir));
+
+        let execute = plan
+            .path_policy
+            .access_classes
+            .iter()
+            .find(|class| class.class == "execute")
+            .unwrap();
+        assert!(execute.planned);
+        assert!(!execute.enforced_by_prototype_loader);
+        assert!(execute.access.contains(&LinuxLandlockAccess::Execute));
+        assert_eq!(
+            plan.handled_access_mask & LANDLOCK_ACCESS_FS_EXECUTE,
+            0,
+            "execute is planned but still outside the prototype loader scope"
+        );
+
+        for enforced_class in ["write", "create", "remove"] {
+            let class = plan
+                .path_policy
+                .access_classes
+                .iter()
+                .find(|class| class.class == enforced_class)
+                .unwrap();
+            assert!(class.planned);
+            assert!(class.enforced_by_prototype_loader);
+        }
     }
 
     #[test]

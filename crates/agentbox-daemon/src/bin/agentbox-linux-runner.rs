@@ -255,7 +255,8 @@ fn exec_request(
 mod tests {
     use super::*;
     use agentbox_daemon::runtime::providers::linux::{
-        LinuxLandlockAccess, LinuxMountNamespaceMount, LinuxOverlayFsWorkspacePlan,
+        LinuxLandlockAccess, LinuxLandlockPathPolicyPlan, LinuxMountNamespaceMount,
+        LinuxOverlayFsWorkspacePlan,
     };
 
     fn request() -> LinuxAgentPodRunnerRequest {
@@ -289,6 +290,7 @@ mod tests {
                     reason: "workspace".into(),
                     access_mask: 1,
                 }],
+                path_policy: LinuxLandlockPathPolicyPlan::prototype_loader_scope(),
                 handled_access_mask: 1,
                 default_deny: true,
                 requires_loader: true,
