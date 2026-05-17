@@ -173,10 +173,12 @@ live bidirectional event bus. With `--agentpod-receipt`, it also queries the sam
 session lifecycle journal and prints an AgentPod-style operator receipt with
 remote enforcement status, lifecycle events, evidence-sealed state, bundle
 references, stream references, and unsupported credential modes. This is a
-receipt parity surface; it does not claim that the remote worker is a complete
-sandbox. `remote-events` prints the persisted lifecycle event journal for the
-session plus the same typed event stream descriptor, including allocation,
-command start/finish, evidence seal, restart, and destroy events with
+receipt parity surface; pending approval prompts are rendered with the exact
+approve/deny command templates and the prompt claim boundary. It does not claim
+that the remote worker is a complete sandbox. `remote-events` prints the
+persisted lifecycle event journal for the session plus the same typed event
+stream descriptor, including allocation, command start/finish, evidence seal,
+restart, and destroy events with
 monotonically increasing sequence numbers. The lifecycle journal response also
 reports `returned_count`, `next_sequence`, and `has_more`; the worker route
 accepts `after_sequence` and `limit` query parameters for resumable polling.

@@ -4951,6 +4951,24 @@ fn format_remote_agentpod_receipt_summary(
         }
     }
 
+    out.push_str("approval_prompts:\n");
+    if status.pending_approvals.is_empty() {
+        out.push_str("- none\n");
+    } else {
+        for approval in &status.pending_approvals {
+            let command = approval.command_argv.join(" ");
+            out.push_str(&format!(
+                "- request_id={} command={} reason={}\n",
+                approval.request_id, command, approval.reason
+            ));
+            out.push_str(&format!("  approve: {}\n", approval.prompt.approve_command));
+            if let Some(deny_command) = &approval.prompt.deny_command {
+                out.push_str(&format!("  deny: {deny_command}\n"));
+            }
+            out.push_str(&format!("  boundary: {}\n", approval.prompt.claim_boundary));
+        }
+    }
+
     out.push_str("skipped_unsupported_credential_modes:\n");
     for mode in remote_agentpod_unsupported_credential_modes() {
         out.push_str(&format!("- {mode}\n"));
@@ -8866,10 +8884,10 @@ mod tests {
         RemoteAgentPodEventStreamDescriptor, RemoteAgentPodEvidenceReceiptStatus,
         RemoteAgentPodEvidenceStatusResponse, RemoteAgentPodEvidenceStreamStatus,
         RemoteAgentPodLifecycleEvent, RemoteAgentPodLifecycleEventRecord,
-        RemoteAgentPodLifecycleEventsResponse, RemoteAgentPodRestartPolicy,
-        RemoteAgentPodRestartStrategy, RemoteAgentPodStoredEvidenceBundleStatus,
-        RemoteAgentPodWorkspaceBundle, RemoteAgentPodWorkspaceExportResponse,
-        RemoteAgentPodWorkspaceFile,
+        RemoteAgentPodLifecycleEventsResponse, RemoteAgentPodPendingApprovalStatus,
+        RemoteAgentPodRestartPolicy, RemoteAgentPodRestartStrategy,
+        RemoteAgentPodStoredEvidenceBundleStatus, RemoteAgentPodWorkspaceBundle,
+        RemoteAgentPodWorkspaceExportResponse, RemoteAgentPodWorkspaceFile,
     };
     use agentbox_daemon::runtime::types::{
         AgentPodNativeReceiptSummary, AgentPodRiskLevel, AgentPodRunnerPhaseReceipt,
@@ -9859,7 +9877,13 @@ mod tests {
                 stream_sha256: Some("d".repeat(64)),
                 updated_at: None,
             }],
-            pending_approvals: Vec::new(),
+            pending_approvals: vec![RemoteAgentPodPendingApprovalStatus {
+                request_id: "approval-1".into(),
+                command_argv: vec!["curl".into(), "https://approval.example.com".into()],
+                reason: "network first contact requires approval".into(),
+                prompt: Default::default(),
+                created_at: chrono::Utc::now(),
+            }],
             credentials: Vec::new(),
             supervision: None,
         };
@@ -9896,6 +9920,10 @@ mod tests {
         assert!(formatted.contains("receipt bundle_sha256="));
         assert!(formatted.contains("stored bundle_sha256="));
         assert!(formatted.contains("stream id=stdout sealed=true"));
+        assert!(formatted.contains("approval_prompts:"));
+        assert!(formatted.contains("request_id=approval-1"));
+        assert!(formatted.contains("approve: agentbox remote-approval-grant"));
+        assert!(formatted.contains("deny: agentbox remote-approval-deny"));
         assert!(formatted.contains("- socket credential handoff"));
         assert!(formatted.contains("- provider-token credential handoff"));
     }
