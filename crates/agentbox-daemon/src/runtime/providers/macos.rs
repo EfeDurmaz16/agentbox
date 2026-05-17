@@ -8,7 +8,7 @@ use crate::runtime::bridge::{
 };
 use crate::runtime::provider::RuntimeError;
 use crate::runtime::types::{
-    ExecCommand, FileAccessMode, MinipodSpec, MountKind, MountMode, NetworkMode,
+    CommandResult, ExecCommand, FileAccessMode, MinipodSpec, MountKind, MountMode, NetworkMode,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -514,6 +514,169 @@ pub fn macos_native_execution_enabled() -> bool {
     matches!(std::env::var("AGENTBOX_MACOS_NATIVE").as_deref(), Ok("1"))
 }
 
+pub struct MacOsAgentPodPrototypeExecutor;
+
+impl MacOsAgentPodPrototypeExecutor {
+    pub fn execute(
+        spec: &MinipodSpec,
+        command: &ExecCommand,
+    ) -> Result<CommandResult, RuntimeError> {
+        let plan = MacOsAgentPodExecutionPlan::from_minipod_spec(spec, command)?;
+        if !plan.live_execution_enabled {
+            return Err(RuntimeError::Unavailable(
+                "macOS AgentPod VM runner invocation requires AGENTBOX_MACOS_NATIVE=1".into(),
+            ));
+        }
+        Self::execute_plan(&plan, command)
+    }
+
+    #[cfg(target_os = "macos")]
+    fn execute_plan(
+        plan: &MacOsAgentPodExecutionPlan,
+        command: &ExecCommand,
+    ) -> Result<CommandResult, RuntimeError> {
+        if !plan.runnable_on_current_host() {
+            return Err(RuntimeError::Unavailable(
+                "macOS AgentPod VM runner invocation is not runnable on this host".into(),
+            ));
+        }
+
+        let runner_binary = macos_agentpod_vm_runner_binary()?;
+        let request_file = write_macos_agentpod_runner_request(plan, command)?;
+        let output = std::process::Command::new(&runner_binary)
+            .arg("--request")
+            .arg(request_file.path())
+            .output()
+            .map_err(|err| {
+                RuntimeError::ExecFailed(format!(
+                    "failed to invoke macOS AgentPod VM runner {}: {err}",
+                    runner_binary.display()
+                ))
+            })?;
+
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        if !output.status.success() {
+            return Err(RuntimeError::Unavailable(format!(
+                "macOS AgentPod VM runner contract invoked but VM execution is unavailable: {stderr}"
+            )));
+        }
+
+        Err(RuntimeError::Unavailable(
+            "macOS AgentPod VM runner returned success before VM execution support is implemented"
+                .into(),
+        ))
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn execute_plan(
+        _plan: &MacOsAgentPodExecutionPlan,
+        _command: &ExecCommand,
+    ) -> Result<CommandResult, RuntimeError> {
+        Err(RuntimeError::Unavailable(
+            "macOS AgentPod VM runner invocation is only available on macOS".into(),
+        ))
+    }
+}
+
+#[cfg(target_os = "macos")]
+struct MacOsAgentPodRunnerRequestFile {
+    path: std::path::PathBuf,
+}
+
+#[cfg(target_os = "macos")]
+impl MacOsAgentPodRunnerRequestFile {
+    fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl Drop for MacOsAgentPodRunnerRequestFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn macos_agentpod_vm_runner_binary() -> Result<std::path::PathBuf, RuntimeError> {
+    if let Some(path) = std::env::var_os("AGENTBOX_MACOS_VM_RUNNER") {
+        let path = std::path::PathBuf::from(path);
+        if path.exists() {
+            return Ok(path);
+        }
+        return Err(RuntimeError::Unavailable(format!(
+            "AGENTBOX_MACOS_VM_RUNNER does not exist: {}",
+            path.display()
+        )));
+    }
+
+    let current = std::env::current_exe().map_err(|err| {
+        RuntimeError::ExecFailed(format!("failed to locate current executable: {err}"))
+    })?;
+    let sibling = current.with_file_name("agentbox-macos-vm-runner");
+    if sibling.exists() {
+        return Ok(sibling);
+    }
+
+    Err(RuntimeError::Unavailable(format!(
+        "agentbox-macos-vm-runner binary not found next to {}; set AGENTBOX_MACOS_VM_RUNNER",
+        current.display()
+    )))
+}
+
+#[cfg(target_os = "macos")]
+fn write_macos_agentpod_runner_request(
+    plan: &MacOsAgentPodExecutionPlan,
+    command: &ExecCommand,
+) -> Result<MacOsAgentPodRunnerRequestFile, RuntimeError> {
+    let request = MacOsAgentPodRunnerRequest::from_execution_plan(plan, command);
+    let dir = std::env::temp_dir().join("agentbox-macos-vm-runner");
+    std::fs::create_dir_all(&dir).map_err(|err| {
+        RuntimeError::ExecFailed(format!(
+            "failed to create macOS VM runner request dir {}: {err}",
+            dir.display()
+        ))
+    })?;
+    let path = dir.join(macos_agentpod_runner_request_filename(&plan.session_id));
+    let file = std::fs::File::create(&path).map_err(|err| {
+        RuntimeError::ExecFailed(format!(
+            "failed to create macOS VM runner request {}: {err}",
+            path.display()
+        ))
+    })?;
+    serde_json::to_writer(file, &request).map_err(|err| {
+        let _ = std::fs::remove_file(&path);
+        RuntimeError::ExecFailed(format!(
+            "failed to serialize macOS VM runner request {}: {err}",
+            path.display()
+        ))
+    })?;
+    Ok(MacOsAgentPodRunnerRequestFile { path })
+}
+
+#[cfg(any(test, target_os = "macos"))]
+fn macos_agentpod_runner_request_filename(session_id: &str) -> String {
+    static REQUEST_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let safe_session_id: String = session_id
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let safe_session_id = safe_session_id.trim_matches('_');
+    let safe_session_id = if safe_session_id.is_empty() {
+        "session"
+    } else {
+        safe_session_id
+    };
+    let count = REQUEST_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    format!("{safe_session_id}-{}-{count}.json", ulid::Ulid::new())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MacOsNetworkFlowDirection {
     Outbound,
@@ -988,6 +1151,68 @@ mod tests {
         assert_eq!(request.prerequisite_checks, plan.prerequisite_checks);
         assert_eq!(request.runner_phases, plan.runner_phases);
         assert_eq!(request.required_entitlements, plan.required_entitlements);
+    }
+
+    #[test]
+    fn macos_runner_request_filename_is_path_safe_and_unique() {
+        let first = macos_agentpod_runner_request_filename("../session/with spaces");
+        let second = macos_agentpod_runner_request_filename("../session/with spaces");
+
+        assert!(first.ends_with(".json"));
+        assert!(first.starts_with("session_with_spaces-"));
+        assert!(!first.contains('/'));
+        assert!(!first.contains(' '));
+        assert_ne!(first, second);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_vm_runner_invocation_writes_request_and_preserves_unavailable_claim() {
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!(
+            "agentbox-macos-vm-runner-test-{}-{}",
+            std::process::id(),
+            ulid::Ulid::new()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let runner = dir.join("fake-macos-vm-runner");
+        let marker = dir.join("runner-argv.txt");
+        let mut file = std::fs::File::create(&runner).unwrap();
+        writeln!(
+            file,
+            "#!/usr/bin/env sh\nprintf '%s\\n' \"$@\" > '{}'\necho fake vm unavailable >&2\nexit 125",
+            marker.display()
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&runner).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&runner, permissions).unwrap();
+
+        let spec = MinipodSpec::for_agent_task("codex", "/tmp/agentbox-work");
+        let exec = command(&["/bin/true"]);
+        let previous_gate = std::env::var_os("AGENTBOX_MACOS_NATIVE");
+        let previous_runner = std::env::var_os("AGENTBOX_MACOS_VM_RUNNER");
+        std::env::set_var("AGENTBOX_MACOS_NATIVE", "1");
+        std::env::set_var("AGENTBOX_MACOS_VM_RUNNER", &runner);
+
+        let err = MacOsAgentPodPrototypeExecutor::execute(&spec, &exec).unwrap_err();
+
+        match previous_gate {
+            Some(value) => std::env::set_var("AGENTBOX_MACOS_NATIVE", value),
+            None => std::env::remove_var("AGENTBOX_MACOS_NATIVE"),
+        }
+        match previous_runner {
+            Some(value) => std::env::set_var("AGENTBOX_MACOS_VM_RUNNER", value),
+            None => std::env::remove_var("AGENTBOX_MACOS_VM_RUNNER"),
+        }
+
+        assert!(err.to_string().contains("contract invoked"));
+        assert!(err.to_string().contains("fake vm unavailable"));
+        let argv = std::fs::read_to_string(marker).unwrap();
+        assert!(argv.contains("--request"));
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
