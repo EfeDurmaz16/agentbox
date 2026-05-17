@@ -49,6 +49,11 @@ ETW, and Windows Sandbox/Hyper-V fallback metadata without running anything.
 The Job Object descriptor maps memory, CPU weight, risk-based process limits,
 and wall-clock timeout action metadata into the plan, while explicitly stating
 that live Win32 apply proof is not wired.
+`scripts/smoke-windows-job-object.sh` adds a narrower gated lifecycle smoke:
+with `AGENTBOX_WINDOWS_JOB_OBJECT=1` on Windows it calls `CreateJobObjectW` and
+`CloseHandle` through PowerShell P/Invoke. That proves create/close access only;
+it does not assign a process to the job, set limits, prove cleanup, or upgrade
+the provider execution claim.
 The VM boundary descriptor includes the planned workspace mount, named-pipe or
 Hyper-V socket host bridge, policy/evidence endpoints, credential delivery
 channels, guest evidence spool path, and teardown policy. These fields are a
@@ -216,12 +221,14 @@ cargo test --workspace
 Future Windows live gate:
 
 ```powershell
-$env:AGENTBOX_WINDOWS_LIVE_TESTS = "1"
-cargo test -p agentbox-daemon windows_provider
+$env:AGENTBOX_WINDOWS_JOB_OBJECT = "1"
+bash scripts/smoke-windows-job-object.sh
 ```
 
-Live tests should skip only when Windows support is unavailable. If Job Object
-or WFP behavior is present but incorrect, the test should fail.
+The first smoke should skip only when Windows support or the explicit gate is
+unavailable. If the smoke is gated on Windows and `CreateJobObjectW` or
+`CloseHandle` fails, it should fail. Process assignment, kill-on-close, and
+resource limit behavior still require later live proof.
 
 ## References
 

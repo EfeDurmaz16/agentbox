@@ -114,6 +114,7 @@ if [ "$RUN_LIVE_SMOKE" = "1" ]; then
   run_step macos-minipod-smoke bash scripts/smoke-macos-minipod.sh
   run_step linux-native-smoke bash scripts/smoke-linux-native.sh
   run_step linux-nftables-smoke bash scripts/smoke-linux-nftables.sh
+  run_step windows-job-object-smoke bash scripts/smoke-windows-job-object.sh
 else
   log "live smoke skipped"
   printf 'Set AGENTBOX_RELEASE_LIVE_SMOKE=1 to run optional platform/live-provider smoke scripts.\n' \

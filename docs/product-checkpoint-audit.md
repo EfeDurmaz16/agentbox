@@ -51,7 +51,7 @@ sandbox or release-grade isolation claim.
 | Provider | Descriptor surface | Current limit |
 | --- | --- | --- |
 | `agentpod-macos` | Apple Virtualization, Endpoint Security, Network Extension, VM evidence observer plan | no VM boot lifecycle, no signed system extension, no live ES/NE denial proof |
-| `agentpod-windows` | Job Objects, AppContainer, WFP, ETW, Windows Sandbox, Hyper-V, Windows native receipt descriptor | no live Windows apply proof, no WFP denial proof, no Sandbox/Hyper-V lifecycle |
+| `agentpod-windows` | Job Objects, gated Job Object create/close smoke, AppContainer, WFP, ETW, Windows Sandbox, Hyper-V, Windows native receipt descriptor | no process assignment proof, no resource limit enforcement proof, no WFP denial proof, no Sandbox/Hyper-V lifecycle |
 | FIDES / AGIT / OAPS integrations | evidence and authority descriptors | no external authority adapter or live publisher configured |
 | Linux eBPF / nftables | observability and egress policy descriptors plus gated nftables table lifecycle smoke | no probe loading, no egress hook, no packet/domain enforcement proof |
 
@@ -87,6 +87,7 @@ Use platform/live gates only when the host supports them:
 ```sh
 AGENTBOX_LINUX_NATIVE=1 bash scripts/smoke-linux-native.sh
 AGENTBOX_LIVE_PODMAN=1 bash scripts/smoke-podman-bridge.sh
+AGENTBOX_WINDOWS_JOB_OBJECT=1 bash scripts/smoke-windows-job-object.sh
 ```
 
 ## Next Product Work
@@ -98,7 +99,8 @@ gaps:
    prove create/exec/destroy lifecycle with evidence.
 2. Linux: strengthen seccomp/landlock coverage, prove read/execute path policy,
    and turn the nftables lifecycle skeleton into a session-scoped live denial gate.
-3. Windows: add live Job Object process cleanup proof before claiming execution.
+3. Windows: extend the Job Object create/close smoke into process assignment,
+   kill-on-close cleanup, and resource limit enforcement proof before claiming execution.
 4. Remote: add richer worker-side approval UX and full event streaming without
    weakening current credential restrictions.
 5. Installer UX: turn provider gap reports and bridge health into guided setup

@@ -10,6 +10,8 @@ use crate::runtime::types::{
 pub struct WindowsJobObjectPlan {
     pub schema_version: i64,
     pub job_name: String,
+    #[serde(default)]
+    pub live_smoke: WindowsJobObjectLiveSmokePlan,
     pub kill_on_close: bool,
     pub memory_limit_bytes: u64,
     pub cpu_rate_weight: u32,
@@ -18,6 +20,21 @@ pub struct WindowsJobObjectPlan {
     pub timeout_action: String,
     pub resource_claim: String,
     pub requires_windows: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WindowsJobObjectLiveSmokePlan {
+    pub schema_version: i64,
+    pub env_var: String,
+    pub enabled: bool,
+    pub lifecycle_steps: Vec<String>,
+    pub lifecycle_claim: String,
+}
+
+impl Default for WindowsJobObjectLiveSmokePlan {
+    fn default() -> Self {
+        Self::descriptor()
+    }
 }
 
 impl WindowsJobObjectPlan {
@@ -36,6 +53,7 @@ impl WindowsJobObjectPlan {
         Ok(Self {
             schema_version: 1,
             job_name: format!("agentbox-{}", spec.id),
+            live_smoke: WindowsJobObjectLiveSmokePlan::descriptor(),
             kill_on_close: true,
             memory_limit_bytes: spec.resources.memory_bytes,
             cpu_rate_weight: cpu_shares_to_job_weight(spec.resources.cpu_shares),
@@ -78,6 +96,24 @@ impl WindowsJobObjectPlan {
         }
 
         limits
+    }
+}
+
+impl WindowsJobObjectLiveSmokePlan {
+    fn descriptor() -> Self {
+        Self {
+            schema_version: 1,
+            env_var: "AGENTBOX_WINDOWS_JOB_OBJECT".into(),
+            enabled: windows_job_object_live_smoke_enabled(),
+            lifecycle_steps: vec![
+                "CreateJobObjectW".into(),
+                "CloseHandle".into(),
+                "no process assignment or resource enforcement proof".into(),
+            ],
+            lifecycle_claim:
+                "gated Job Object create/close smoke skeleton only; process assignment and limit enforcement are not proven"
+                    .into(),
+        }
     }
 }
 
@@ -715,6 +751,13 @@ pub fn windows_native_execution_enabled() -> bool {
     )
 }
 
+pub fn windows_job_object_live_smoke_enabled() -> bool {
+    matches!(
+        std::env::var("AGENTBOX_WINDOWS_JOB_OBJECT").as_deref(),
+        Ok("1") | Ok("true") | Ok("yes")
+    )
+}
+
 pub struct WindowsJobObjectController;
 
 impl WindowsJobObjectController {
@@ -773,6 +816,12 @@ mod tests {
 
         assert_eq!(plan.schema_version, 1);
         assert_eq!(plan.job_name, format!("agentbox-{}", spec.id));
+        assert_eq!(plan.live_smoke.env_var, "AGENTBOX_WINDOWS_JOB_OBJECT");
+        assert!(!plan.live_smoke.enabled);
+        assert!(plan
+            .live_smoke
+            .lifecycle_claim
+            .contains("process assignment and limit enforcement are not proven"));
         assert!(plan.kill_on_close);
         assert_eq!(plan.memory_limit_bytes, 536_870_912);
         assert_eq!(plan.cpu_rate_weight, 1);
@@ -809,6 +858,31 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn job_object_live_smoke_descriptor_models_create_close_only() {
+        let spec = MinipodSpec::for_agent_task("codex", "C:\\agentbox\\work");
+
+        let plan = WindowsJobObjectController::plan(&spec).unwrap();
+
+        assert_eq!(plan.live_smoke.schema_version, 1);
+        assert_eq!(
+            plan.live_smoke.lifecycle_steps,
+            vec![
+                "CreateJobObjectW".to_string(),
+                "CloseHandle".to_string(),
+                "no process assignment or resource enforcement proof".to_string(),
+            ]
+        );
+        assert!(plan
+            .live_smoke
+            .lifecycle_claim
+            .contains("create/close smoke skeleton only"));
+        assert!(plan
+            .live_smoke
+            .lifecycle_claim
+            .contains("limit enforcement are not proven"));
     }
 
     #[test]
@@ -870,6 +944,10 @@ mod tests {
         assert!(plan.security_claim.contains("execution is not wired"));
         assert!(plan.job_object.kill_on_close);
         assert_eq!(plan.job_object.process_limit, Some(128));
+        assert_eq!(
+            plan.job_object.live_smoke.env_var,
+            "AGENTBOX_WINDOWS_JOB_OBJECT"
+        );
         assert!(plan
             .job_object
             .resource_claim

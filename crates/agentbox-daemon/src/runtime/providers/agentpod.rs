@@ -319,7 +319,7 @@ impl RuntimeProvider for AgentPodProvider {
             AgentPodProviderKind::Windows => (
                 ProviderImplementationStatus::DescriptorOnly,
                 Some("AGENTBOX_WINDOWS_NATIVE=1"),
-                "plan compiler only; Job Object/AppContainer/WFP/ETW execution is not wired",
+                "plan compiler only; Job Object create/close smoke is gated separately by AGENTBOX_WINDOWS_JOB_OBJECT=1, but provider execution is not wired and AppContainer/WFP/ETW execution plus live limit enforcement are not wired",
             ),
             AgentPodProviderKind::Linux => unreachable!("Linux handled above"),
         };
