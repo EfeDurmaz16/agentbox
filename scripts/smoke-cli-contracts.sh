@@ -261,6 +261,11 @@ grep -F "omitted values are read from the local session when possible" \
 grep -F "after-sequence" "$TMPDIR/remote-events-help.txt" >/dev/null
 grep -F "Maximum number of lifecycle events to return" \
   "$TMPDIR/remote-events-help.txt" >/dev/null
+"${CLI[@]}" remote-approval-deny --help >"$TMPDIR/remote-approval-deny-help.txt"
+grep -F "Deny a pending remote AgentPod command approval" \
+  "$TMPDIR/remote-approval-deny-help.txt" >/dev/null
+grep -F "Pending approval request id" \
+  "$TMPDIR/remote-approval-deny-help.txt" >/dev/null
 "${CLI[@]}" remote-restart --help >"$TMPDIR/remote-restart-help.txt"
 grep -F "Restart a stopped or failed remote AgentPod worker session" \
   "$TMPDIR/remote-restart-help.txt" >/dev/null

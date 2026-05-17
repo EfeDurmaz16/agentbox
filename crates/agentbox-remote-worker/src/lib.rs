@@ -5,7 +5,8 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use agentbox_daemon::runtime::providers::remote::{
-    Ed25519HandshakeVerifier, RemoteAgentPodApprovalGrantRequest,
+    Ed25519HandshakeVerifier, RemoteAgentPodApprovalDenyRequest,
+    RemoteAgentPodApprovalDenyResponse, RemoteAgentPodApprovalGrantRequest,
     RemoteAgentPodApprovalGrantResponse, RemoteAgentPodApprovalPrompt,
     RemoteAgentPodCreateSessionRequest, RemoteAgentPodCreateSessionResponse,
     RemoteAgentPodCredentialStatus, RemoteAgentPodDestroySessionRequest,
@@ -880,6 +881,10 @@ pub fn router(config: RemoteWorkerConfig) -> Router {
         .route(
             "/sessions/{worker_session_id}/approvals/grant",
             post(grant_approval),
+        )
+        .route(
+            "/sessions/{worker_session_id}/approvals/deny",
+            post(deny_approval),
         )
         .route(
             "/sessions/{worker_session_id}/workspace/export",
@@ -1918,6 +1923,26 @@ async fn grant_approval(
     }))
 }
 
+async fn deny_approval(
+    State(state): State<Arc<RemoteWorkerState>>,
+    AxumPath(route_worker_session_id): AxumPath<String>,
+    Json(request): Json<RemoteAgentPodApprovalDenyRequest>,
+) -> WorkerRouteResult<RemoteAgentPodApprovalDenyResponse> {
+    require_route_worker_session_id(&route_worker_session_id, &request.worker_session_id)?;
+    request
+        .validate()
+        .map_err(|err| worker_error(StatusCode::BAD_REQUEST, err.to_string()))?;
+    let remaining_pending_approvals = deny_pending_approval(&state, &request).await?;
+    Ok(Json(RemoteAgentPodApprovalDenyResponse {
+        session_id: request.session_id,
+        worker_session_id: request.worker_session_id,
+        request_id: request.request_id,
+        denied: true,
+        remaining_pending_approvals,
+        lifecycle_events: vec![RemoteAgentPodLifecycleEvent::EvidenceSealed],
+    }))
+}
+
 async fn evidence_status(
     State(state): State<Arc<RemoteWorkerState>>,
     AxumPath(worker_session_id): AxumPath<String>,
@@ -2696,6 +2721,41 @@ async fn accept_approval_grant(
     Ok(remaining)
 }
 
+async fn deny_pending_approval(
+    state: &Arc<RemoteWorkerState>,
+    request: &RemoteAgentPodApprovalDenyRequest,
+) -> Result<u64, (StatusCode, Json<WorkerError>)> {
+    let mut sessions = state.sessions.lock().await;
+    let session = get_matching_session_mut(
+        &mut sessions,
+        &request.worker_session_id,
+        &request.session_id,
+    )?;
+    let Some(index) = session
+        .pending_approvals
+        .iter()
+        .position(|approval| approval.request_id == request.request_id)
+    else {
+        return Err(worker_error(
+            StatusCode::NOT_FOUND,
+            "agentbox remote worker pending approval request was not found",
+        ));
+    };
+    session.pending_approvals.remove(index);
+    session.record_lifecycle_event(
+        RemoteAgentPodLifecycleEvent::EvidenceSealed,
+        Some(format!("remote worker denied approval: {}", request.reason)),
+    );
+    let remaining = session
+        .pending_approvals
+        .len()
+        .try_into()
+        .unwrap_or(u64::MAX);
+    drop(sessions);
+    persist_sessions(state).await.map_err(worker_state_error)?;
+    Ok(remaining)
+}
+
 fn ensure_grant_matches_pending_approval(
     grant: &ApprovalGrant,
     pending: &WorkerPendingApproval,
@@ -2784,7 +2844,10 @@ fn worker_pending_approval_prompt(
             "agentbox remote-approval-grant --session {session_id} --worker-session {worker_session_id} --request {} --reason <reason>",
             approval.request_id
         ),
-        deny_command: None,
+        deny_command: Some(format!(
+            "agentbox remote-approval-deny --session {session_id} --worker-session {worker_session_id} --request {} --reason <reason>",
+            approval.request_id
+        )),
         claim_boundary:
             "prompt descriptor only; rich interactive remote approval UI is not wired".into(),
     }
@@ -3809,6 +3872,57 @@ mod tests {
         assert!(session.pending_approvals.is_empty());
         assert_eq!(session.approval_grants.len(), 1);
         assert_eq!(session.approval_grants[0].id, "grant-1");
+    }
+
+    #[tokio::test]
+    async fn deny_approval_removes_pending_request_without_grant() {
+        let config = RemoteWorkerConfig::new(
+            "worker.local/dev",
+            "https://worker.example.com/agentpod/evidence",
+            SigningKey::from_bytes(&[79_u8; 32]),
+        );
+        let state = test_state(config);
+        let mut session = WorkerSession::new(
+            "session-1".into(),
+            std::env::temp_dir(),
+            WorkerPolicy::default(),
+        );
+        session.pending_approvals.push(WorkerPendingApproval {
+            request_id: "approval-1".into(),
+            command_argv: vec!["curl".into(), "https://approval.example.com".into()],
+            reason: "first contact".into(),
+            created_at: Utc::now(),
+        });
+        state
+            .sessions
+            .lock()
+            .await
+            .insert("worker-session-1".into(), session);
+
+        let response = deny_approval(
+            State(state.clone()),
+            worker_session_path(),
+            Json(RemoteAgentPodApprovalDenyRequest {
+                session_id: "session-1".into(),
+                worker_session_id: "worker-session-1".into(),
+                request_id: "approval-1".into(),
+                reason: "operator denied test command".into(),
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+
+        assert!(response.denied);
+        assert_eq!(response.remaining_pending_approvals, 0);
+        let sessions = state.sessions.lock().await;
+        let session = sessions.get("worker-session-1").unwrap();
+        assert!(session.pending_approvals.is_empty());
+        assert!(session.approval_grants.is_empty());
+        assert!(session.lifecycle_events.iter().any(|event| event
+            .reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("denied approval"))));
     }
 
     #[tokio::test]

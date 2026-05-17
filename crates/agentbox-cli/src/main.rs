@@ -725,6 +725,28 @@ enum Commands {
         #[arg(long = "ttl-seconds")]
         ttl_seconds: Option<i64>,
     },
+    /// Deny a pending remote AgentPod command approval
+    RemoteApprovalDeny {
+        /// Remote worker endpoint, e.g. https://worker.example.com/agentpod; omitted values are read from the local session when possible
+        #[arg(long)]
+        endpoint: Option<String>,
+
+        /// Agentbox session id
+        #[arg(long = "session")]
+        session_id: String,
+
+        /// Worker-side session id; omitted values are read from the local session when possible
+        #[arg(long = "worker-session")]
+        worker_session_id: Option<String>,
+
+        /// Pending approval request id from remote-evidence-status
+        #[arg(long = "request")]
+        request_id: String,
+
+        /// Denial reason
+        #[arg(long, default_value = "operator denied pending remote command")]
+        reason: String,
+    },
     /// Export a remote AgentPod worker workspace into a local review directory
     RemoteWorkspaceExport {
         /// Remote worker endpoint, e.g. https://worker.example.com/agentpod; omitted values are read from the local session when possible
@@ -7538,6 +7560,51 @@ async fn cmd_remote_approval_grant(
     );
 }
 
+async fn cmd_remote_approval_deny(
+    endpoint: Option<String>,
+    session_id: String,
+    worker_session_id: Option<String>,
+    request_id: String,
+    reason: String,
+) {
+    use agentbox_daemon::runtime::providers::remote::{
+        HttpRemoteAgentPodTransport, RemoteAgentPodApprovalDenyRequest, RemoteAgentPodTransport,
+    };
+
+    let (endpoint, worker_session_id) =
+        resolve_remote_session_metadata(&session_id, endpoint, worker_session_id);
+    let transport = HttpRemoteAgentPodTransport::new(endpoint).unwrap_or_else(|e| {
+        eprintln!(
+            "error: failed to build remote AgentPod approval deny transport: {}",
+            e
+        );
+        std::process::exit(1);
+    });
+    let request = RemoteAgentPodApprovalDenyRequest {
+        session_id,
+        worker_session_id,
+        request_id,
+        reason,
+    };
+    request.validate().unwrap_or_else(|e| {
+        eprintln!(
+            "error: failed to build remote AgentPod approval deny request: {}",
+            e
+        );
+        std::process::exit(1);
+    });
+    let response = transport.deny_approval(request).await.unwrap_or_else(|e| {
+        eprintln!("error: failed to deny remote AgentPod approval: {}", e);
+        std::process::exit(1);
+    });
+
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&response)
+            .expect("failed to serialize remote AgentPod approval deny response")
+    );
+}
+
 async fn cmd_remote_workspace_export(
     endpoint: Option<String>,
     session_id: String,
@@ -8718,6 +8785,16 @@ async fn main() {
                 ttl_seconds,
             )
             .await
+        }
+        Commands::RemoteApprovalDeny {
+            endpoint,
+            session_id,
+            worker_session_id,
+            request_id,
+            reason,
+        } => {
+            cmd_remote_approval_deny(endpoint, session_id, worker_session_id, request_id, reason)
+                .await
         }
         Commands::RemoteWorkspaceExport {
             endpoint,

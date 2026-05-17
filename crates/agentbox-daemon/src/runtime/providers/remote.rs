@@ -1470,7 +1470,9 @@ impl Default for RemoteAgentPodApprovalPrompt {
             title: "Remote AgentPod approval required".into(),
             body: "A remote worker command requires operator approval.".into(),
             approve_command: "agentbox remote-approval-grant --session <session> --request <request-id> --reason <reason>".into(),
-            deny_command: None,
+            deny_command: Some(
+                "agentbox remote-approval-deny --session <session> --request <request-id> --reason <reason>".into(),
+            ),
             claim_boundary: "prompt descriptor only; rich interactive remote approval UI is not wired".into(),
         }
     }
@@ -1558,6 +1560,67 @@ pub struct RemoteAgentPodApprovalGrantResponse {
     pub accepted_grant_id: String,
     pub remaining_pending_approvals: u64,
     pub lifecycle_events: Vec<RemoteAgentPodLifecycleEvent>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteAgentPodApprovalDenyRequest {
+    pub session_id: String,
+    pub worker_session_id: String,
+    pub request_id: String,
+    pub reason: String,
+}
+
+impl RemoteAgentPodApprovalDenyRequest {
+    pub fn validate(&self) -> Result<(), RuntimeError> {
+        if self.session_id.trim().is_empty()
+            || self.worker_session_id.trim().is_empty()
+            || self.request_id.trim().is_empty()
+            || self.reason.trim().is_empty()
+        {
+            return Err(RuntimeError::ManifestRejected(
+                "remote approval deny request must include session ids, request id, and reason"
+                    .into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteAgentPodApprovalDenyResponse {
+    pub session_id: String,
+    pub worker_session_id: String,
+    pub request_id: String,
+    pub denied: bool,
+    pub remaining_pending_approvals: u64,
+    pub lifecycle_events: Vec<RemoteAgentPodLifecycleEvent>,
+}
+
+impl RemoteAgentPodApprovalDenyResponse {
+    pub fn validate_for(
+        &self,
+        request: &RemoteAgentPodApprovalDenyRequest,
+    ) -> Result<(), RuntimeError> {
+        request.validate()?;
+        if self.session_id != request.session_id
+            || self.worker_session_id != request.worker_session_id
+            || self.request_id != request.request_id
+        {
+            return Err(RuntimeError::ManifestRejected(
+                "remote approval deny response ids do not match request".into(),
+            ));
+        }
+        if !self.denied {
+            return Err(RuntimeError::ManifestRejected(
+                "remote approval deny response must acknowledge denial".into(),
+            ));
+        }
+        require_lifecycle_events(
+            &self.lifecycle_events,
+            &[RemoteAgentPodLifecycleEvent::EvidenceSealed],
+            "approval deny response",
+        )
+    }
 }
 
 impl RemoteAgentPodApprovalGrantResponse {
@@ -1838,6 +1901,10 @@ pub trait RemoteAgentPodTransport: Send + Sync {
         &self,
         request: RemoteAgentPodApprovalGrantRequest,
     ) -> Result<RemoteAgentPodApprovalGrantResponse, RuntimeError>;
+    async fn deny_approval(
+        &self,
+        request: RemoteAgentPodApprovalDenyRequest,
+    ) -> Result<RemoteAgentPodApprovalDenyResponse, RuntimeError>;
 
     async fn export_workspace(
         &self,
@@ -2218,6 +2285,38 @@ impl RemoteAgentPodTransport for HttpRemoteAgentPodTransport {
             .map_err(|err| {
                 RuntimeError::ManifestRejected(format!(
                     "remote approval grant response was invalid JSON: {err}"
+                ))
+            })?;
+        response.validate_for(&request)?;
+        Ok(response)
+    }
+
+    async fn deny_approval(
+        &self,
+        request: RemoteAgentPodApprovalDenyRequest,
+    ) -> Result<RemoteAgentPodApprovalDenyResponse, RuntimeError> {
+        request.validate()?;
+        let response = self
+            .client
+            .post(self.route(format!(
+                "sessions/{}/approvals/deny",
+                request.worker_session_id
+            )))
+            .json(&request)
+            .send()
+            .await
+            .map_err(|err| {
+                RuntimeError::Unavailable(format!("remote approval deny failed: {err}"))
+            })?
+            .error_for_status()
+            .map_err(|err| {
+                RuntimeError::Unavailable(format!("remote approval deny rejected: {err}"))
+            })?
+            .json::<RemoteAgentPodApprovalDenyResponse>()
+            .await
+            .map_err(|err| {
+                RuntimeError::ManifestRejected(format!(
+                    "remote approval deny response was invalid JSON: {err}"
                 ))
             })?;
         response.validate_for(&request)?;
@@ -3401,6 +3500,22 @@ mod tests {
                 worker_session_id: request.worker_session_id.clone(),
                 request_id: request.request_id.clone(),
                 accepted_grant_id: request.grant.id.clone(),
+                remaining_pending_approvals: 0,
+                lifecycle_events: vec![RemoteAgentPodLifecycleEvent::EvidenceSealed],
+            };
+            response.validate_for(&request)?;
+            Ok(response)
+        }
+
+        async fn deny_approval(
+            &self,
+            request: RemoteAgentPodApprovalDenyRequest,
+        ) -> Result<RemoteAgentPodApprovalDenyResponse, RuntimeError> {
+            let response = RemoteAgentPodApprovalDenyResponse {
+                session_id: request.session_id.clone(),
+                worker_session_id: request.worker_session_id.clone(),
+                request_id: request.request_id.clone(),
+                denied: true,
                 remaining_pending_approvals: 0,
                 lifecycle_events: vec![RemoteAgentPodLifecycleEvent::EvidenceSealed],
             };

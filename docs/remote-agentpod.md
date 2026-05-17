@@ -232,6 +232,11 @@ agentbox remote-approval-grant \
   --session agentbox-session-id \
   --request approval-request-id \
   --ttl-seconds 300
+
+agentbox remote-approval-deny \
+  --session agentbox-session-id \
+  --request approval-request-id \
+  --reason "operator denied network access"
 ```
 
 Like `remote-evidence-status`, this derives the worker endpoint and worker-side
@@ -240,6 +245,9 @@ the remote provider. Operators can pass `--endpoint` and `--worker-session`
 manually when granting against an external worker session.
 
 The CLI first reads the worker evidence status, finds the pending request, and
+for grants builds a command-scope approval from the pending argv. Denials remove
+the pending request without adding an approval grant and record an evidence
+lifecycle event with the operator reason.
 derives a command-scope grant from the blocked argv. The worker accepts the
 grant only when it matches the pending command, removes the pending request, and
 uses that grant on later exec calls. It does not mint broad session grants or
