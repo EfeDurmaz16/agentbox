@@ -1101,6 +1101,18 @@ pub struct LinuxAgentPodExecutionPlan {
 pub struct LinuxAgentPodRunnerPhase {
     pub name: String,
     pub status: String,
+    pub evidence_event: String,
+    pub claim: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LinuxAgentPodRunnerPhaseEvidence {
+    pub schema_version: u32,
+    pub provider: String,
+    pub session_id: String,
+    pub phase: String,
+    pub status: String,
+    pub event_name: String,
     pub claim: String,
 }
 
@@ -1176,6 +1188,21 @@ impl LinuxAgentPodExecutionPlan {
     pub fn runnable_on_current_host(&self) -> bool {
         cfg!(target_os = "linux") && self.live_execution_enabled
     }
+
+    pub fn runner_phase_evidence(&self) -> Vec<LinuxAgentPodRunnerPhaseEvidence> {
+        self.runner_phases
+            .iter()
+            .map(|phase| LinuxAgentPodRunnerPhaseEvidence {
+                schema_version: 1,
+                provider: self.provider.clone(),
+                session_id: self.session_id.clone(),
+                phase: phase.name.clone(),
+                status: phase.status.clone(),
+                event_name: phase.evidence_event.clone(),
+                claim: phase.claim.clone(),
+            })
+            .collect()
+    }
 }
 
 fn linux_agentpod_unshare_prefix(
@@ -1204,6 +1231,7 @@ fn linux_agentpod_runner_phases(
         LinuxAgentPodRunnerPhase {
             name: "enter-user-mount-pid-namespaces".into(),
             status: "prototype".into(),
+            evidence_event: "agentpod.linux.runner.namespaces.entered".into(),
             claim: format!(
                 "unshare user, mount, and PID namespaces with {} propagation",
                 mount_namespace.propagation
@@ -1217,6 +1245,7 @@ fn linux_agentpod_runner_phases(
                 "planned"
             }
             .into(),
+            evidence_event: "agentpod.linux.runner.workspace.mounted".into(),
             claim: mount_namespace.workspace_mount_claim.clone(),
         },
         LinuxAgentPodRunnerPhase {
@@ -1227,6 +1256,7 @@ fn linux_agentpod_runner_phases(
                 "inactive"
             }
             .into(),
+            evidence_event: "agentpod.linux.runner.overlayfs.applied".into(),
             claim: if let Some(overlayfs) = &mount_namespace.overlayfs {
                 format!(
                     "mount overlayfs lower={} upper={} work={} merged={}",
@@ -1242,6 +1272,7 @@ fn linux_agentpod_runner_phases(
         LinuxAgentPodRunnerPhase {
             name: "apply-landlock".into(),
             status: "prototype".into(),
+            evidence_event: "agentpod.linux.runner.landlock.applied".into(),
             claim: format!(
                 "apply handled filesystem access mask {} after no-new-privs",
                 landlock.handled_access_mask
@@ -1255,6 +1286,7 @@ fn linux_agentpod_runner_phases(
                 "inactive"
             }
             .into(),
+            evidence_event: "agentpod.linux.runner.seccomp.applied".into(),
             claim: if seccomp.requires_loader {
                 "install supported BPF syscall deny filter after no-new-privs".into()
             } else {
@@ -1264,6 +1296,7 @@ fn linux_agentpod_runner_phases(
         LinuxAgentPodRunnerPhase {
             name: "exec-command".into(),
             status: "prototype".into(),
+            evidence_event: "agentpod.linux.runner.command.executed".into(),
             claim: "execute direct argv without shell wrapping and collect output".into(),
         },
     ]
@@ -2772,6 +2805,35 @@ mod tests {
                     .claim
                     .contains("upper=/tmp/agentbox-overlay/session-1/upper")
         }));
+    }
+
+    #[test]
+    fn runner_phase_evidence_events_match_plan_phases() {
+        let mut spec = MinipodSpec::for_agent_task("hermes", "/tmp/agentbox-work");
+        spec.seccomp =
+            crate::runtime::types::SeccompProfile::deny_syscalls(&["kill"], "block signal fanout");
+        let command = command(&["/bin/true"]);
+
+        let plan = LinuxAgentPodExecutionPlan::from_minipod_spec(&spec, &command).unwrap();
+        let events = plan.runner_phase_evidence();
+
+        assert_eq!(events.len(), plan.runner_phases.len());
+        assert_eq!(events[0].schema_version, 1);
+        assert_eq!(events[0].provider, "agentpod-linux");
+        assert_eq!(events[0].session_id, spec.id);
+        assert_eq!(events[0].phase, "enter-user-mount-pid-namespaces");
+        assert_eq!(
+            events[0].event_name,
+            "agentpod.linux.runner.namespaces.entered"
+        );
+        assert!(events.iter().any(|event| {
+            event.phase == "apply-seccomp"
+                && event.status == "prototype"
+                && event.event_name == "agentpod.linux.runner.seccomp.applied"
+        }));
+        assert!(events
+            .iter()
+            .all(|event| event.event_name.starts_with("agentpod.linux.runner.")));
     }
 
     #[test]

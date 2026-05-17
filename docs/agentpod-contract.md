@@ -84,8 +84,10 @@ mounts an overlayfs review workspace when the manifest carries upper/work
 paths. It then applies Landlock/seccomp and execs the requested argv. The Linux
 native plan exposes ordered `runner_phases` so the namespace, workspace bind,
 overlayfs, Landlock, seccomp, and exec stages can be reviewed separately;
-workspace bind, overlayfs, Landlock, and seccomp are prototype phases. This is
-still a prototype primitive: live execution must be explicitly gated with
+each phase carries a stable `agentpod.linux.runner.*` evidence event name so
+plans and post-run evidence use the same lifecycle vocabulary. Workspace bind,
+overlayfs, Landlock, and seccomp are prototype phases. This is still a
+prototype primitive: live execution must be explicitly gated with
 `AGENTBOX_LINUX_NATIVE`, and it is not a complete sandbox claim until the
 remaining loaders and provider lifecycle are wired and tested on Linux.
 

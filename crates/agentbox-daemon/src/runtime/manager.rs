@@ -9,6 +9,7 @@ use crate::runtime::approval::{
 };
 use crate::runtime::policy::validate_minipod_spec;
 use crate::runtime::provider::{RuntimeError, RuntimeProvider};
+use crate::runtime::providers::linux::LinuxAgentPodExecutionPlan;
 use crate::runtime::session::RuntimeSessionStore;
 use crate::runtime::types::{
     ApprovalGrant, CommandResult, CommandTranscript, CredentialGrant, CredentialGrantKind,
@@ -140,6 +141,7 @@ impl RuntimeManager {
             None,
             Some(self.provider.name().to_string()),
         )?;
+        self.audit_native_runner_phase_events_if_needed(&session, &hydrated_command)?;
 
         Ok(result)
     }
@@ -541,6 +543,29 @@ impl RuntimeManager {
         )
     }
 
+    fn audit_native_runner_phase_events_if_needed(
+        &self,
+        session: &RuntimeSession,
+        command: &ExecCommand,
+    ) -> Result<(), RuntimeError> {
+        if self.provider.name() != "agentpod-linux" {
+            return Ok(());
+        }
+
+        let plan = LinuxAgentPodExecutionPlan::from_minipod_spec(&session.spec, command)?;
+        for event in plan.runner_phase_evidence() {
+            self.audit_runtime_event(
+                &format!("{} {}", event.event_name, event.phase),
+                session,
+                "native-runner",
+                &format!("{}:{}", event.phase, event.status),
+                None,
+                Some(self.provider.name().to_string()),
+            )?;
+        }
+        Ok(())
+    }
+
     fn audit_runtime_event(
         &self,
         command: &str,
@@ -786,6 +811,65 @@ mod tests {
         }
     }
 
+    struct LinuxMockProvider;
+
+    #[async_trait]
+    impl RuntimeProvider for LinuxMockProvider {
+        fn name(&self) -> &str {
+            "agentpod-linux"
+        }
+
+        fn platform(&self) -> &str {
+            "linux-test"
+        }
+
+        fn capabilities(&self) -> &[RuntimeCapability] {
+            &[
+                RuntimeCapability::NativeNamespaces,
+                RuntimeCapability::FilesystemPolicy,
+                RuntimeCapability::EvidenceExport,
+            ]
+        }
+
+        async fn is_available(&self) -> bool {
+            true
+        }
+
+        async fn create(&self, spec: &MinipodSpec) -> Result<RuntimeSession, RuntimeError> {
+            Ok(RuntimeSession::new(
+                spec.name.clone(),
+                self.name().to_string(),
+                self.platform().to_string(),
+                spec.clone(),
+            ))
+        }
+
+        async fn exec(
+            &self,
+            _session_id: &str,
+            command: &ExecCommand,
+        ) -> Result<CommandResult, RuntimeError> {
+            Ok(CommandResult {
+                exit_code: 0,
+                stdout: command.argv.join(" "),
+                stderr: String::new(),
+                duration_ms: 3,
+            })
+        }
+
+        async fn status(&self, _session_id: &str) -> Result<RuntimeStatus, RuntimeError> {
+            Ok(RuntimeStatus::Running)
+        }
+
+        async fn destroy(&self, _session_id: &str) -> Result<(), RuntimeError> {
+            Ok(())
+        }
+
+        async fn list(&self) -> Result<Vec<RuntimeSession>, RuntimeError> {
+            Ok(vec![])
+        }
+    }
+
     struct SealRecordingProvider {
         sealed: Arc<Mutex<Vec<SessionEvidenceBundle>>>,
     }
@@ -869,6 +953,14 @@ mod tests {
         )
     }
 
+    fn linux_manager(name: &str) -> RuntimeManager {
+        RuntimeManager::new(
+            Arc::new(LinuxMockProvider),
+            session_store(name),
+            AuditStore::in_memory().unwrap(),
+        )
+    }
+
     async fn temp_env_var<F, Fut>(key: &str, value: Option<&str>, body: F)
     where
         F: FnOnce() -> Fut,
@@ -925,6 +1017,51 @@ mod tests {
         assert_eq!(audit[0].decision, "exit_code:0");
         assert!(audit[0].command.contains("runtime.exec"));
         assert_eq!(audit[0].prev_hash, audit[1].event_hash);
+    }
+
+    #[tokio::test]
+    async fn runner_phase_evidence_events_are_recorded_for_agentpod_linux_exec() {
+        let manager = linux_manager("runner-phase-evidence");
+        let mut spec = MinipodSpec::for_agent_task("openclaw", "/tmp/agentbox-work");
+        spec.seccomp =
+            crate::runtime::types::SeccompProfile::deny_syscalls(&["kill"], "block signal fanout");
+        let session = manager.create(&spec).await.unwrap();
+        let command = ExecCommand {
+            argv: vec!["/bin/true".to_string()],
+            working_dir: Some("/workspace".into()),
+            env: Default::default(),
+            timeout_seconds: None,
+        };
+
+        manager.exec(&session.id, &command).await.unwrap();
+
+        let events = manager
+            .audit
+            .query_session_evidence(&session.id, Some("openclaw"), 20)
+            .unwrap();
+        let bundle = SessionEvidenceBundle::from_session_events(&session, &events);
+
+        assert!(bundle.boundary_events.iter().any(|event| {
+            event.bucket == "native-runner"
+                && event
+                    .command
+                    .contains("agentpod.linux.runner.namespaces.entered")
+        }));
+        assert!(bundle.boundary_events.iter().any(|event| {
+            event.bucket == "native-runner"
+                && event
+                    .command
+                    .contains("agentpod.linux.runner.seccomp.applied")
+                && event.decision == "apply-seccomp:prototype"
+        }));
+        assert!(bundle
+            .replay
+            .steps
+            .iter()
+            .any(|step| step.policy_bucket == "native-runner"
+                && step
+                    .command
+                    .contains("agentpod.linux.runner.command.executed")));
     }
 
     #[tokio::test]
