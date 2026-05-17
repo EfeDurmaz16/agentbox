@@ -2708,6 +2708,13 @@ async fn accept_approval_grant(
     }
     session.pending_approvals.remove(index);
     session.record_lifecycle_event(
+        RemoteAgentPodLifecycleEvent::ApprovalGranted,
+        Some(format!(
+            "remote worker granted approval {} for request {}: {}",
+            request.grant.id, request.request_id, request.grant.reason
+        )),
+    );
+    session.record_lifecycle_event(
         RemoteAgentPodLifecycleEvent::EvidenceSealed,
         Some("remote worker accepted approval grant".into()),
     );
@@ -2742,6 +2749,13 @@ async fn deny_pending_approval(
         ));
     };
     session.pending_approvals.remove(index);
+    session.record_lifecycle_event(
+        RemoteAgentPodLifecycleEvent::ApprovalDenied,
+        Some(format!(
+            "remote worker denied approval request {}: {}",
+            request.request_id, request.reason
+        )),
+    );
     session.record_lifecycle_event(
         RemoteAgentPodLifecycleEvent::EvidenceSealed,
         Some(format!("remote worker denied approval: {}", request.reason)),
@@ -3872,6 +3886,12 @@ mod tests {
         assert!(session.pending_approvals.is_empty());
         assert_eq!(session.approval_grants.len(), 1);
         assert_eq!(session.approval_grants[0].id, "grant-1");
+        assert!(session.lifecycle_events.iter().any(|event| event.event
+            == RemoteAgentPodLifecycleEvent::ApprovalGranted
+            && event
+                .reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("grant-1"))));
     }
 
     #[tokio::test]
@@ -3919,10 +3939,12 @@ mod tests {
         let session = sessions.get("worker-session-1").unwrap();
         assert!(session.pending_approvals.is_empty());
         assert!(session.approval_grants.is_empty());
-        assert!(session.lifecycle_events.iter().any(|event| event
-            .reason
-            .as_deref()
-            .is_some_and(|reason| reason.contains("denied approval"))));
+        assert!(session.lifecycle_events.iter().any(|event| event.event
+            == RemoteAgentPodLifecycleEvent::ApprovalDenied
+            && event
+                .reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("operator denied test command"))));
     }
 
     #[tokio::test]

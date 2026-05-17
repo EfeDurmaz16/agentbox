@@ -382,6 +382,8 @@ pub enum RemoteAgentPodLifecycleEvent {
     SessionCreated,
     CommandStarted,
     CommandFinished,
+    ApprovalGranted,
+    ApprovalDenied,
     EvidenceSealed,
     KillSwitchAck,
     WorkerDestroyed,

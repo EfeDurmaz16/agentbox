@@ -249,7 +249,9 @@ manually when granting against an external worker session.
 The CLI first reads the worker evidence status, finds the pending request, and
 for grants builds a command-scope approval from the pending argv. Denials remove
 the pending request without adding an approval grant and record an evidence
-lifecycle event with the operator reason.
+lifecycle event with the operator reason. Grant and deny decisions are also
+typed lifecycle journal entries (`ApprovalGranted` and `ApprovalDenied`) so
+approval governance can be replayed independently of command execution.
 derives a command-scope grant from the blocked argv. The worker accepts the
 grant only when it matches the pending command, removes the pending request, and
 uses that grant on later exec calls. It does not mint broad session grants or

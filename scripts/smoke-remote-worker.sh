@@ -416,8 +416,10 @@ curl -fsS "http://127.0.0.1:${PORT}/sessions/${APPROVAL_WORKER_SESSION_ID}/exec"
   >"$TMPDIR/approval-exec-after-grant-response.json"
 curl -fsS "http://127.0.0.1:${PORT}/sessions/${APPROVAL_WORKER_SESSION_ID}/evidence/status?session_id=${APPROVAL_SESSION_ID}" \
   >"$TMPDIR/approval-status-after.json"
+curl -fsS "http://127.0.0.1:${PORT}/sessions/${APPROVAL_WORKER_SESSION_ID}/events?session_id=${APPROVAL_SESSION_ID}" \
+  >"$TMPDIR/approval-events-after-grant.json"
 
-python3 - "$TMPDIR/approval-exec-response.json" "$TMPDIR/approval-status-before.json" "$TMPDIR/approval-grant-response.json" "$TMPDIR/approval-exec-after-grant-response.json" "$TMPDIR/approval-status-after.json" <<'PY'
+python3 - "$TMPDIR/approval-exec-response.json" "$TMPDIR/approval-status-before.json" "$TMPDIR/approval-grant-response.json" "$TMPDIR/approval-exec-after-grant-response.json" "$TMPDIR/approval-status-after.json" "$TMPDIR/approval-events-after-grant.json" <<'PY'
 import json
 import sys
 
@@ -431,6 +433,8 @@ with open(sys.argv[4], "r", encoding="utf-8") as fh:
     after_exec = json.load(fh)
 with open(sys.argv[5], "r", encoding="utf-8") as fh:
     after_status = json.load(fh)
+with open(sys.argv[6], "r", encoding="utf-8") as fh:
+    approval_events = json.load(fh)
 
 assert before_exec["result"]["exit_code"] == 126
 assert "policy denied" in before_exec["result"]["stderr"]
@@ -445,6 +449,8 @@ assert "interactive remote approval UI is not wired" in prompt["claim_boundary"]
 assert grant["remaining_pending_approvals"] == 0
 assert after_status["pending_approvals"] == []
 assert "policy denied" not in after_exec["result"]["stderr"]
+event_names = [event["event"] for event in approval_events["events"]]
+assert "ApprovalGranted" in event_names
 PY
 
 printf 'worker export smoke\n' >"$TMPDIR/workspace/export.txt"
