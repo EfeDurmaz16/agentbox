@@ -434,6 +434,13 @@ with open(sys.argv[5], "r", encoding="utf-8") as fh:
 assert before_exec["result"]["exit_code"] == 126
 assert "policy denied" in before_exec["result"]["stderr"]
 assert before_status["pending_approvals"]
+pending = before_status["pending_approvals"][0]
+prompt = pending["prompt"]
+assert "agentbox remote-approval-grant" in prompt["approve_command"]
+assert pending["request_id"] in prompt["approve_command"]
+assert "--session " in prompt["approve_command"]
+assert "--worker-session " in prompt["approve_command"]
+assert "interactive remote approval UI is not wired" in prompt["claim_boundary"]
 assert grant["remaining_pending_approvals"] == 0
 assert after_status["pending_approvals"] == []
 assert "policy denied" not in after_exec["result"]["stderr"]

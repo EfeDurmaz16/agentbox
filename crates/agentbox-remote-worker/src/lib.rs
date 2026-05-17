@@ -6,13 +6,14 @@ use std::time::Instant;
 
 use agentbox_daemon::runtime::providers::remote::{
     Ed25519HandshakeVerifier, RemoteAgentPodApprovalGrantRequest,
-    RemoteAgentPodApprovalGrantResponse, RemoteAgentPodCreateSessionRequest,
-    RemoteAgentPodCreateSessionResponse, RemoteAgentPodCredentialStatus,
-    RemoteAgentPodDestroySessionRequest, RemoteAgentPodDestroySessionResponse,
-    RemoteAgentPodEvidenceStreamChunkRequest, RemoteAgentPodEvidenceStreamChunkResponse,
-    RemoteAgentPodEvidenceStreamStatus, RemoteAgentPodEvidenceUploadRequest,
-    RemoteAgentPodEvidenceUploadResponse, RemoteAgentPodExecRequest, RemoteAgentPodExecResponse,
-    RemoteAgentPodHandshakeAck, RemoteAgentPodHandshakeDescriptor, RemoteAgentPodLifecycleEvent,
+    RemoteAgentPodApprovalGrantResponse, RemoteAgentPodApprovalPrompt,
+    RemoteAgentPodCreateSessionRequest, RemoteAgentPodCreateSessionResponse,
+    RemoteAgentPodCredentialStatus, RemoteAgentPodDestroySessionRequest,
+    RemoteAgentPodDestroySessionResponse, RemoteAgentPodEvidenceStreamChunkRequest,
+    RemoteAgentPodEvidenceStreamChunkResponse, RemoteAgentPodEvidenceStreamStatus,
+    RemoteAgentPodEvidenceUploadRequest, RemoteAgentPodEvidenceUploadResponse,
+    RemoteAgentPodExecRequest, RemoteAgentPodExecResponse, RemoteAgentPodHandshakeAck,
+    RemoteAgentPodHandshakeDescriptor, RemoteAgentPodLifecycleEvent,
     RemoteAgentPodLifecycleEventRecord, RemoteAgentPodLifecycleEventsResponse,
     RemoteAgentPodPendingApprovalStatus, RemoteAgentPodRestartPolicy,
     RemoteAgentPodRestartSessionRequest, RemoteAgentPodRestartSessionResponse,
@@ -1930,7 +1931,7 @@ async fn evidence_status(
     }
     Ok(Json(WorkerEvidenceStatusResponse {
         session_id: session.session_id.clone(),
-        worker_session_id,
+        worker_session_id: worker_session_id.clone(),
         status: session.status.clone(),
         commands_started: session.commands_started,
         commands_finished: session.commands_finished,
@@ -1976,7 +1977,9 @@ async fn evidence_status(
         pending_approvals: session
             .pending_approvals
             .iter()
-            .map(worker_pending_approval_status)
+            .map(|approval| {
+                worker_pending_approval_status(&session.session_id, &worker_session_id, approval)
+            })
             .collect(),
         credentials: worker_credential_status(session),
         supervision: state.supervision.status(),
@@ -2685,13 +2688,39 @@ fn ensure_grant_matches_pending_approval(
 }
 
 fn worker_pending_approval_status(
+    session_id: &str,
+    worker_session_id: &str,
     approval: &WorkerPendingApproval,
 ) -> RemoteAgentPodPendingApprovalStatus {
     RemoteAgentPodPendingApprovalStatus {
         request_id: approval.request_id.clone(),
         command_argv: approval.command_argv.clone(),
         reason: approval.reason.clone(),
+        prompt: worker_pending_approval_prompt(session_id, worker_session_id, approval),
         created_at: approval.created_at,
+    }
+}
+
+fn worker_pending_approval_prompt(
+    session_id: &str,
+    worker_session_id: &str,
+    approval: &WorkerPendingApproval,
+) -> RemoteAgentPodApprovalPrompt {
+    RemoteAgentPodApprovalPrompt {
+        schema_version: 1,
+        title: "Remote AgentPod approval required".into(),
+        body: format!(
+            "Approve remote command `{}` for worker session `{}`.",
+            approval.command_argv.join(" "),
+            worker_session_id
+        ),
+        approve_command: format!(
+            "agentbox remote-approval-grant --session {session_id} --worker-session {worker_session_id} --request {} --reason <reason>",
+            approval.request_id
+        ),
+        deny_command: None,
+        claim_boundary:
+            "prompt descriptor only; rich interactive remote approval UI is not wired".into(),
     }
 }
 
@@ -4656,6 +4685,21 @@ mod tests {
             response.pending_approvals[0].command_argv,
             vec!["curl", "https://approval.example.com"]
         );
+        let approval_prompt = &response.pending_approvals[0].prompt;
+        assert_eq!(approval_prompt.schema_version, 1);
+        assert!(approval_prompt
+            .approve_command
+            .contains("agentbox remote-approval-grant"));
+        assert!(approval_prompt
+            .approve_command
+            .contains("--session session-1"));
+        assert!(approval_prompt
+            .approve_command
+            .contains("--worker-session worker-session-1"));
+        assert!(approval_prompt.approve_command.contains("approval-status"));
+        assert!(approval_prompt
+            .claim_boundary
+            .contains("interactive remote approval UI is not wired"));
         assert_eq!(response.credentials.len(), 2);
         assert_eq!(response.credentials[0].name, "OPENAI_API_KEY");
         assert_eq!(response.credentials[0].kind, CredentialGrantKind::EnvVar);

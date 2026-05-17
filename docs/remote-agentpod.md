@@ -397,9 +397,11 @@ command, path, domain, or session. `Once` approval grants are deliberately not
 honored by the worker yet because the worker cannot safely synchronize one-time
 grant consumption back to the daemon. Approval-required commands without a
 matching grant record pending approval metadata on the worker session. The
-operator can then submit an explicit command-scope grant through the CLI. Rich
-interactive approval prompts, signatures, and grant revocation synchronization
-are still future work.
+operator can then submit an explicit command-scope grant through the CLI. Status
+responses include a typed approval prompt descriptor with an
+`agentbox remote-approval-grant` command template, request id, session ids, and
+an explicit claim boundary. Rich interactive approval UI, signatures, and grant
+revocation synchronization are still future work.
 Evidence upload validates the evidence metadata and records an in-memory receipt
 on the matching worker session before acknowledging the bundle hash and event
 count. With `--state-dir`, those receipts are also persisted in the worker state
@@ -426,7 +428,8 @@ state-changing operations as durable when persistence fails.
 The status route returns the matching session status, command supervision
 counters, the last command exit code/timestamp, evidence metadata receipts,
 stored bundle payload references, evidence stream status, pending approval
-requests, and redacted env/file credential status after binding the
+requests with approval prompt descriptors, and redacted env/file credential
+status after binding the
 caller-provided `session_id` to the allocated `worker_session_id`. If a worker
 restarts from persisted state, running command counters are reset to zero
 because the current contract worker does not yet reattach to orphaned OS
@@ -443,9 +446,10 @@ Ordered evidence stream chunks and command-scope pending approval resolution
 also exist at the worker contract layer. Remote evidence status can also produce
 an AgentPod-style receipt summary that joins worker status with lifecycle events,
 sealed evidence state, bundle references, stream references, and explicitly
-unsupported credential modes. Rich approval prompts, socket and provider-token
-credential handoff, full evidence event streaming, supervised worker restarts,
-and merge/conflict UX beyond overwrite protection remain future
+unsupported credential modes. Typed approval prompt descriptors now exist, but
+rich interactive approval UI is not wired. Socket and provider-token credential
+handoff, full evidence event streaming, supervised worker restarts, and
+merge/conflict UX beyond overwrite protection remain future
 work.
 
 `scripts/smoke-remote-worker.sh` starts this worker on a random loopback port,

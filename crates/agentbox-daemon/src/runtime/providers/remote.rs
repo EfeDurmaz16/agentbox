@@ -1342,7 +1342,32 @@ pub struct RemoteAgentPodPendingApprovalStatus {
     pub request_id: String,
     pub command_argv: Vec<String>,
     pub reason: String,
+    #[serde(default)]
+    pub prompt: RemoteAgentPodApprovalPrompt,
     pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteAgentPodApprovalPrompt {
+    pub schema_version: i64,
+    pub title: String,
+    pub body: String,
+    pub approve_command: String,
+    pub deny_command: Option<String>,
+    pub claim_boundary: String,
+}
+
+impl Default for RemoteAgentPodApprovalPrompt {
+    fn default() -> Self {
+        Self {
+            schema_version: 1,
+            title: "Remote AgentPod approval required".into(),
+            body: "A remote worker command requires operator approval.".into(),
+            approve_command: "agentbox remote-approval-grant --session <session> --request <request-id> --reason <reason>".into(),
+            deny_command: None,
+            claim_boundary: "prompt descriptor only; rich interactive remote approval UI is not wired".into(),
+        }
+    }
 }
 
 impl RemoteAgentPodPendingApprovalStatus {
@@ -1360,6 +1385,17 @@ impl RemoteAgentPodPendingApprovalStatus {
         if self.reason.trim().is_empty() {
             return Err(RuntimeError::ManifestRejected(
                 "remote pending approval status must include reason".into(),
+            ));
+        }
+        if self.prompt.approve_command.trim().is_empty()
+            || !self
+                .prompt
+                .claim_boundary
+                .contains("interactive remote approval UI is not wired")
+        {
+            return Err(RuntimeError::ManifestRejected(
+                "remote pending approval prompt must include a grant command and honest claim boundary"
+                    .into(),
             ));
         }
         Ok(())
@@ -3129,6 +3165,7 @@ mod tests {
                     request_id: "approval-1".into(),
                     command_argv: vec!["curl".into(), "https://example.com".into()],
                     reason: "network first contact requires approval".into(),
+                    prompt: RemoteAgentPodApprovalPrompt::default(),
                     created_at: Utc::now(),
                 }],
                 credentials: vec![RemoteAgentPodCredentialStatus {
@@ -4201,6 +4238,7 @@ mod tests {
                 request_id: "approval-1".into(),
                 command_argv: vec!["curl".into(), "https://example.com".into()],
                 reason: "network first contact requires approval".into(),
+                prompt: RemoteAgentPodApprovalPrompt::default(),
                 created_at: Utc::now(),
             }],
             credentials: vec![RemoteAgentPodCredentialStatus {
@@ -4230,6 +4268,25 @@ mod tests {
         assert!(response.kill_switch_armed);
         assert!(response.evidence_sealed);
         assert_eq!(response.supervision.unwrap().boot_count, 1);
+    }
+
+    #[test]
+    fn remote_pending_approval_status_requires_prompt_boundary() {
+        let approval = RemoteAgentPodPendingApprovalStatus {
+            request_id: "approval-1".into(),
+            command_argv: vec!["curl".into(), "https://example.com".into()],
+            reason: "network first contact requires approval".into(),
+            prompt: RemoteAgentPodApprovalPrompt {
+                approve_command: String::new(),
+                claim_boundary: "full interactive approval UI is available".into(),
+                ..RemoteAgentPodApprovalPrompt::default()
+            },
+            created_at: Utc::now(),
+        };
+
+        let err = approval.validate().unwrap_err();
+
+        assert!(err.to_string().contains("honest claim boundary"));
     }
 
     #[test]
