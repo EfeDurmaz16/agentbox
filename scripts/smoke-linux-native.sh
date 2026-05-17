@@ -53,7 +53,7 @@ cargo run -q -p agentbox-cli -- native-plan \
     and (.mount_namespace.workspace_mount_claim | contains("agentbox-linux-runner"))
     and any(.runner_phases[]; .name == "bind-workspace" and .status == "prototype")
     and any(.runner_phases[]; .name == "apply-landlock" and .status == "prototype")
-    and (.security_claim | contains("runner-managed workspace bind mount"))
+    and (.security_claim | contains("runner-managed workspace mount"))
   ' >/dev/null
 
 (
@@ -66,7 +66,8 @@ cargo run -q -p agentbox-cli -- native-plan \
 )
 
 proof_outside="$(mktemp -d)"
-trap 'rm -rf "$proof_outside"' EXIT
+parallel_root=""
+trap 'rm -rf "$proof_outside" "$parallel_root"' EXIT
 proof_allowed="$workspace/agentbox-landlock-allowed"
 proof_denied="$proof_outside/agentbox-landlock-denied"
 rm -f "$proof_allowed" "$proof_denied"
@@ -96,6 +97,59 @@ fi
 if [[ -e "$proof_denied" ]]; then
   printf '%s\n' "$proof_output" >&2
   echo "expected Linux Landlock proof command to deny outside-workspace write" >&2
+  exit 1
+fi
+
+parallel_root="$(mktemp -d)"
+parallel_left="$parallel_root/left"
+parallel_right="$parallel_root/right"
+request_dir="${TMPDIR:-/tmp}/agentbox-linux-runner"
+mkdir -p "$parallel_left" "$parallel_right" "$request_dir"
+request_count_before="$(find "$request_dir" -maxdepth 1 -type f -name '*.json' | wc -l | tr -d ' ')"
+
+run_parallel_agentpod() {
+  local label="$1"
+  local dir="$2"
+  (
+    cd "$dir"
+    printf 'y\n' | AGENTBOX_LINUX_NATIVE=1 cargo run -q -p agentbox-cli -- run \
+      --provider agentpod-linux \
+      --workspace-mode direct \
+      --timeout-seconds "$timeout_seconds" \
+      -- /bin/sh -c 'printf "%s\n" "$1" > "$2"; sleep 1' sh "$label" "$dir/agentbox-parallel-proof"
+  ) >"$dir/run.log" 2>&1
+}
+
+run_parallel_agentpod left "$parallel_left" &
+left_pid=$!
+run_parallel_agentpod right "$parallel_right" &
+right_pid=$!
+
+left_status=0
+right_status=0
+wait "$left_pid" || left_status=$?
+wait "$right_pid" || right_status=$?
+
+if [[ "$left_status" -ne 0 || "$right_status" -ne 0 ]]; then
+  cat "$parallel_left/run.log" "$parallel_right/run.log" >&2
+  echo "expected parallel Linux native AgentPod commands to both complete" >&2
+  exit 1
+fi
+if [[ "$(cat "$parallel_left/agentbox-parallel-proof")" != "left" ]]; then
+  cat "$parallel_left/run.log" >&2
+  echo "expected left parallel AgentPod command to write its own workspace proof" >&2
+  exit 1
+fi
+if [[ "$(cat "$parallel_right/agentbox-parallel-proof")" != "right" ]]; then
+  cat "$parallel_right/run.log" >&2
+  echo "expected right parallel AgentPod command to write its own workspace proof" >&2
+  exit 1
+fi
+
+request_count_after="$(find "$request_dir" -maxdepth 1 -type f -name '*.json' | wc -l | tr -d ' ')"
+if [[ "$request_count_after" != "$request_count_before" ]]; then
+  find "$request_dir" -maxdepth 1 -type f -name '*.json' -print >&2
+  echo "expected Linux runner request files to be cleaned after parallel exec" >&2
   exit 1
 fi
 
