@@ -258,6 +258,9 @@ grep -F "Query remote AgentPod lifecycle event journal" \
   "$TMPDIR/remote-events-help.txt" >/dev/null
 grep -F "omitted values are read from the local session when possible" \
   "$TMPDIR/remote-events-help.txt" >/dev/null
+grep -F "after-sequence" "$TMPDIR/remote-events-help.txt" >/dev/null
+grep -F "Maximum number of lifecycle events to return" \
+  "$TMPDIR/remote-events-help.txt" >/dev/null
 "${CLI[@]}" remote-restart --help >"$TMPDIR/remote-restart-help.txt"
 grep -F "Restart a stopped or failed remote AgentPod worker session" \
   "$TMPDIR/remote-restart-help.txt" >/dev/null

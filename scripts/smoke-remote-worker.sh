@@ -708,8 +708,16 @@ AGENTBOX_REMOTE_AGENTPOD_ALLOW_HTTP_LOOPBACK=1 \
   --session "$SESSION_ID" \
   --worker-session "$WORKER_SESSION_ID" \
   >"$TMPDIR/lifecycle-events.json"
+AGENTBOX_REMOTE_AGENTPOD_ALLOW_HTTP_LOOPBACK=1 \
+"$ROOT/target/debug/agentbox-cli" remote-events \
+  --endpoint "http://127.0.0.1:${PORT}" \
+  --session "$SESSION_ID" \
+  --worker-session "$WORKER_SESSION_ID" \
+  --after-sequence 1 \
+  --limit 2 \
+  >"$TMPDIR/lifecycle-events-cursor.json"
 
-python3 - "$TMPDIR/evidence-status.json" "$TMPDIR/evidence-status-cli.json" "$TMPDIR/lifecycle-events.json" "$TMPDIR/evidence-bundle-upload.expected" <<'PY'
+python3 - "$TMPDIR/evidence-status.json" "$TMPDIR/evidence-status-cli.json" "$TMPDIR/lifecycle-events.json" "$TMPDIR/evidence-bundle-upload.expected" "$TMPDIR/lifecycle-events-cursor.json" <<'PY'
 import json
 import sys
 
@@ -721,6 +729,8 @@ with open(sys.argv[3], "r", encoding="utf-8") as fh:
     events = json.load(fh)
 with open(sys.argv[4], "r", encoding="utf-8") as fh:
     expected_bundle_hash = fh.read().strip()
+with open(sys.argv[5], "r", encoding="utf-8") as fh:
+    cursor_events = json.load(fh)
 
 for key in ["boot_id", "boot_count", "recovered_sessions", "persistence"]:
     assert cli["supervision"][key] == data["supervision"][key]
@@ -734,6 +744,9 @@ assert [event["sequence"] for event in events["events"]] == sorted(event["sequen
 assert events["returned_count"] == len(events["events"])
 assert events["next_sequence"] > events["events"][-1]["sequence"]
 assert events["has_more"] is False
+assert cursor_events["returned_count"] == 2
+assert cursor_events["events"][0]["sequence"] == 2
+assert cursor_events["has_more"] is True
 assert events["event_stream"]["delivery"] == "http-polling-contract"
 assert events["event_stream"]["lifecycle_stream_id"].startswith("lifecycle:")
 assert "not a live bidirectional event bus" in events["event_stream"]["claim_boundary"]

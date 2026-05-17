@@ -592,6 +592,14 @@ enum Commands {
         /// Worker-side session id; omitted values are read from the local session when possible
         #[arg(long = "worker-session")]
         worker_session_id: Option<String>,
+
+        /// Return lifecycle events after this sequence number
+        #[arg(long = "after-sequence")]
+        after_sequence: Option<u64>,
+
+        /// Maximum number of lifecycle events to return
+        #[arg(long)]
+        limit: Option<u64>,
     },
     /// Restart a stopped or failed remote AgentPod worker session
     RemoteRestart {
@@ -6979,6 +6987,8 @@ async fn cmd_remote_events(
     endpoint: Option<String>,
     session_id: String,
     worker_session_id: Option<String>,
+    after_sequence: Option<u64>,
+    limit: Option<u64>,
 ) {
     use agentbox_daemon::runtime::providers::remote::{
         HttpRemoteAgentPodTransport, RemoteAgentPodLifecycleEventsRequest, RemoteAgentPodTransport,
@@ -6996,8 +7006,8 @@ async fn cmd_remote_events(
     let request = RemoteAgentPodLifecycleEventsRequest {
         session_id,
         worker_session_id,
-        after_sequence: None,
-        limit: None,
+        after_sequence,
+        limit,
     };
     request.validate().unwrap_or_else(|e| {
         eprintln!(
@@ -8627,7 +8637,18 @@ async fn main() {
             endpoint,
             session_id,
             worker_session_id,
-        } => cmd_remote_events(endpoint, session_id, worker_session_id).await,
+            after_sequence,
+            limit,
+        } => {
+            cmd_remote_events(
+                endpoint,
+                session_id,
+                worker_session_id,
+                after_sequence,
+                limit,
+            )
+            .await
+        }
         Commands::RemoteRestart {
             endpoint,
             session_id,

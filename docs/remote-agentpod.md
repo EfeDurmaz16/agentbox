@@ -147,7 +147,9 @@ agentbox remote-evidence-status \
   --agentpod-receipt
 
 agentbox remote-events \
-  --session agentbox-session-id
+  --session agentbox-session-id \
+  --after-sequence 10 \
+  --limit 100
 ```
 
 For sessions created through `agentbox run --provider remote-agentpod`, the CLI
