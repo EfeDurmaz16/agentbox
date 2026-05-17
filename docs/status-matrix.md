@@ -105,6 +105,8 @@ See [Mac mini replacement wedge](mac-mini-replacement-wedge.md) for the local
 software-boundary positioning and its limits.
 See [250+ commit product sprint](roadmap-250-commits.md) for the current
 execution queue that supersedes the original 100-issue planning cut.
+See [product checkpoint audit](product-checkpoint-audit.md) for the current
+runnable, prototype, descriptor-only, skipped, and next-proof boundary.
 See [release readiness](release-readiness.md) for the checklist before tagging
 public builds.
 See [v0.2 demo checklist](v0.2-demo-checklist.md) for the public demo path and
