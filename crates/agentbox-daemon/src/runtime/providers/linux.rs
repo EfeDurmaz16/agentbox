@@ -2,8 +2,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::runtime::provider::RuntimeError;
 use crate::runtime::types::{
-    AgentPodRiskLevel, CommandResult, ExecCommand, MinipodSpec, MountMode, NetworkMode,
-    ResourcePolicy, SeccompAction, SeccompProfile, WorkspaceOverlayMode,
+    AgentPodRiskLevel, AgentPodWorkspaceMode, CommandResult, ExecCommand, MinipodSpec, MountMode,
+    NetworkMode, ResourcePolicy, SeccompAction, SeccompProfile, WorkspaceOverlayMode,
 };
 
 const LINUX_AGENTPOD_PIDS_MAX_LOW_RISK: u32 = 256;
@@ -83,6 +83,8 @@ impl LinuxUserNamespaceLauncher {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LinuxMountNamespacePlan {
     pub schema_version: i64,
+    #[serde(default)]
+    pub workspace_mode: AgentPodWorkspaceMode,
     pub workspace_host_path: String,
     pub workspace_guest_path: String,
     pub workspace_bind_mount_wired: bool,
@@ -158,6 +160,7 @@ impl LinuxMountNamespacePlan {
 
         Self {
             schema_version: 1,
+            workspace_mode: spec.workspace_mode.clone(),
             workspace_host_path: spec.filesystem.workspace_host_path.display().to_string(),
             workspace_guest_path: spec.filesystem.workspace_guest_path.clone(),
             workspace_bind_mount_wired,
@@ -177,6 +180,11 @@ impl LinuxMountNamespaceLauncher {
         if spec.filesystem.workspace_guest_path.trim().is_empty() {
             return Err(RuntimeError::ManifestRejected(
                 "mount namespace workspace guest path cannot be empty".into(),
+            ));
+        }
+        if matches!(spec.workspace_mode, AgentPodWorkspaceMode::CommitGated) {
+            return Err(RuntimeError::ManifestRejected(
+                "Linux mount namespace commit-gated workspace mode is not supported yet".into(),
             ));
         }
 
@@ -2173,7 +2181,9 @@ fn cpu_shares_to_cgroup_weight(cpu_shares: u32) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runtime::types::{MountKind, MountRule};
+    use crate::runtime::types::{
+        AgentPodWorkspaceMode, MountKind, MountRule, WorkspaceWritePolicy,
+    };
     use std::collections::HashMap;
     use std::path::PathBuf;
 
@@ -2361,6 +2371,7 @@ mod tests {
         let plan = LinuxMountNamespaceLauncher::plan(&spec).unwrap();
 
         assert_eq!(plan.schema_version, 1);
+        assert_eq!(plan.workspace_mode, AgentPodWorkspaceMode::Direct);
         assert_eq!(plan.workspace_host_path, "/tmp/agentbox-work");
         assert_eq!(plan.workspace_guest_path, "/workspace");
         assert!(plan.workspace_bind_mount_wired);
@@ -2375,12 +2386,14 @@ mod tests {
     #[test]
     fn mount_namespace_plan_carries_overlayfs_workspace_metadata() {
         let mut spec = MinipodSpec::for_agent_task("hermes", "/tmp/agentbox-work");
+        spec.workspace_mode = AgentPodWorkspaceMode::OverlayReview;
         spec.filesystem.workspace_overlay =
             crate::runtime::types::WorkspaceOverlayPolicy::review_required(Some(PathBuf::from(
                 "/tmp/agentbox-overlay",
             )));
 
         let plan = LinuxMountNamespaceLauncher::plan(&spec).unwrap();
+        assert_eq!(plan.workspace_mode, AgentPodWorkspaceMode::OverlayReview);
         let overlayfs = plan.overlayfs.expect("overlayfs plan should be present");
 
         assert_eq!(overlayfs.lower_host_path, "/tmp/agentbox-work");
@@ -2390,6 +2403,38 @@ mod tests {
         assert_eq!(overlayfs.mode, WorkspaceOverlayMode::ReviewRequired);
         assert!(overlayfs.review_required);
         assert!(overlayfs.requires_overlayfs);
+    }
+
+    #[test]
+    fn mount_namespace_plan_carries_ephemeral_overlay_workspace_metadata() {
+        let mut spec = MinipodSpec::for_agent_task("hermes", "/tmp/agentbox-work");
+        spec.workspace_mode = AgentPodWorkspaceMode::Ephemeral;
+        spec.filesystem.workspace_write_policy = WorkspaceWritePolicy::WritableOverlay;
+        let mut overlay = crate::runtime::types::WorkspaceOverlayPolicy::review_required(Some(
+            PathBuf::from("/tmp/agentbox-ephemeral"),
+        ));
+        overlay.mode = WorkspaceOverlayMode::DiscardOnDestroy;
+        spec.filesystem.workspace_overlay = overlay;
+
+        let plan = LinuxMountNamespaceLauncher::plan(&spec).unwrap();
+        let overlayfs = plan.overlayfs.expect("overlayfs plan should be present");
+
+        assert_eq!(plan.workspace_mode, AgentPodWorkspaceMode::Ephemeral);
+        assert_eq!(overlayfs.mode, WorkspaceOverlayMode::DiscardOnDestroy);
+        assert!(!overlayfs.review_required);
+        assert_eq!(overlayfs.upper_host_path, "/tmp/agentbox-ephemeral/upper");
+        assert_eq!(overlayfs.work_host_path, "/tmp/agentbox-ephemeral/work");
+    }
+
+    #[test]
+    fn mount_namespace_plan_rejects_unsupported_commit_gated_workspace_mode() {
+        let mut spec = MinipodSpec::for_agent_task("hermes", "/tmp/agentbox-work");
+        spec.workspace_mode = AgentPodWorkspaceMode::CommitGated;
+
+        let err = LinuxMountNamespaceLauncher::plan(&spec).unwrap_err();
+
+        assert!(err.to_string().contains("commit-gated workspace mode"));
+        assert!(err.to_string().contains("not supported yet"));
     }
 
     #[test]

@@ -1,7 +1,8 @@
 use agentbox_daemon::runtime::providers::linux::{
-    LinuxAgentPodRunnerRequest, LinuxLandlockRule, LinuxLandlockRuleset, LinuxMountNamespacePlan,
-    LinuxOverlayFsWorkspacePlan, LinuxSeccompProfileLoader,
+    LinuxAgentPodRunnerRequest, LinuxLandlockRule, LinuxLandlockRuleset, LinuxMountNamespaceMount,
+    LinuxMountNamespacePlan, LinuxOverlayFsWorkspacePlan, LinuxSeccompProfileLoader,
 };
+use agentbox_daemon::runtime::types::{AgentPodWorkspaceMode, WorkspaceOverlayMode};
 use std::path::{Path, PathBuf};
 
 fn main() {
@@ -69,8 +70,62 @@ fn validate_request(
     {
         return Err("runner workspace guest path cannot be empty".into());
     }
-    if let Some(overlayfs) = &request.mount_namespace.overlayfs {
-        validate_overlayfs(overlayfs)?;
+    validate_workspace_mode(&request.mount_namespace)?;
+    validate_read_only_mounts(&request.mount_namespace.read_only_mounts)?;
+    Ok(())
+}
+
+fn validate_workspace_mode(
+    plan: &LinuxMountNamespacePlan,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    match (&plan.workspace_mode, &plan.overlayfs) {
+        (AgentPodWorkspaceMode::Direct, None) => Ok(()),
+        (AgentPodWorkspaceMode::Direct, Some(_)) => {
+            Err("runner direct workspace mode must not include overlayfs".into())
+        }
+        (AgentPodWorkspaceMode::OverlayReview, Some(overlayfs)) => {
+            validate_overlayfs(overlayfs)?;
+            if overlayfs.mode != WorkspaceOverlayMode::ReviewRequired || !overlayfs.review_required
+            {
+                return Err(
+                    "runner overlay-review workspace mode requires review overlayfs".into(),
+                );
+            }
+            Ok(())
+        }
+        (AgentPodWorkspaceMode::OverlayReview, None) => {
+            Err("runner overlay-review workspace mode requires overlayfs".into())
+        }
+        (AgentPodWorkspaceMode::Ephemeral, Some(overlayfs)) => {
+            validate_overlayfs(overlayfs)?;
+            if overlayfs.mode != WorkspaceOverlayMode::DiscardOnDestroy || overlayfs.review_required
+            {
+                return Err("runner ephemeral workspace mode requires discard overlayfs".into());
+            }
+            Ok(())
+        }
+        (AgentPodWorkspaceMode::Ephemeral, None) => {
+            Err("runner ephemeral workspace mode requires overlayfs".into())
+        }
+        (AgentPodWorkspaceMode::CommitGated, _) => {
+            Err("runner commit-gated workspace mode is not supported yet".into())
+        }
+    }
+}
+
+fn validate_read_only_mounts(
+    mounts: &[LinuxMountNamespaceMount],
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    for mount in mounts {
+        if mount.host_path.trim().is_empty() {
+            return Err("runner read-only mount host path cannot be empty".into());
+        }
+        if mount.guest_path.trim().is_empty() {
+            return Err("runner read-only mount guest path cannot be empty".into());
+        }
+        if !mount.read_only {
+            return Err("runner read-only mount request must be read-only".into());
+        }
     }
     Ok(())
 }
@@ -258,6 +313,7 @@ mod tests {
         LinuxLandlockAccess, LinuxLandlockPathPolicyPlan, LinuxMountNamespaceMount,
         LinuxOverlayFsWorkspacePlan, LinuxSeccompProfileImportDescriptor, LinuxUserNamespacePlan,
     };
+    use agentbox_daemon::runtime::types::AgentPodWorkspaceMode;
 
     fn request() -> LinuxAgentPodRunnerRequest {
         LinuxAgentPodRunnerRequest {
@@ -272,6 +328,7 @@ mod tests {
             },
             mount_namespace: LinuxMountNamespacePlan {
                 schema_version: 1,
+                workspace_mode: AgentPodWorkspaceMode::Direct,
                 workspace_host_path: "/tmp/agentbox-work".into(),
                 workspace_guest_path: "/workspace".into(),
                 workspace_bind_mount_wired: true,
@@ -332,6 +389,7 @@ mod tests {
     #[test]
     fn validates_overlayfs_workspace_request() {
         let mut request = request();
+        request.mount_namespace.workspace_mode = AgentPodWorkspaceMode::OverlayReview;
         request.mount_namespace.overlayfs = Some(LinuxOverlayFsWorkspacePlan {
             lower_host_path: "/tmp/agentbox-work".into(),
             upper_host_path: "/tmp/agentbox-overlay/upper".into(),
@@ -350,8 +408,62 @@ mod tests {
     }
 
     #[test]
+    fn validates_ephemeral_overlay_workspace_request() {
+        let mut request = request();
+        request.mount_namespace.workspace_mode = AgentPodWorkspaceMode::Ephemeral;
+        request.mount_namespace.overlayfs = Some(LinuxOverlayFsWorkspacePlan {
+            lower_host_path: "/tmp/agentbox-work".into(),
+            upper_host_path: "/tmp/agentbox-ephemeral/upper".into(),
+            work_host_path: "/tmp/agentbox-ephemeral/work".into(),
+            merged_guest_path: "/workspace".into(),
+            mode: agentbox_daemon::runtime::types::WorkspaceOverlayMode::DiscardOnDestroy,
+            review_required: false,
+            requires_overlayfs: true,
+        });
+
+        validate_request(&request).unwrap();
+    }
+
+    #[test]
+    fn rejects_direct_workspace_request_with_overlayfs() {
+        let mut request = request();
+        request.mount_namespace.overlayfs = Some(LinuxOverlayFsWorkspacePlan {
+            lower_host_path: "/tmp/agentbox-work".into(),
+            upper_host_path: "/tmp/agentbox-overlay/upper".into(),
+            work_host_path: "/tmp/agentbox-overlay/work".into(),
+            merged_guest_path: "/workspace".into(),
+            mode: agentbox_daemon::runtime::types::WorkspaceOverlayMode::ReviewRequired,
+            review_required: true,
+            requires_overlayfs: true,
+        });
+
+        let err = validate_request(&request).unwrap_err();
+
+        assert!(err.to_string().contains("direct workspace mode"));
+        assert!(err.to_string().contains("must not include overlayfs"));
+    }
+
+    #[test]
+    fn rejects_read_only_mount_request_with_empty_guest_path() {
+        let mut request = request();
+        request
+            .mount_namespace
+            .read_only_mounts
+            .push(LinuxMountNamespaceMount {
+                host_path: "/tmp/fixtures".into(),
+                guest_path: " ".into(),
+                read_only: true,
+            });
+
+        let err = validate_request(&request).unwrap_err();
+
+        assert!(err.to_string().contains("read-only mount guest path"));
+    }
+
+    #[test]
     fn rejects_overlayfs_request_with_same_upper_and_work_paths() {
         let mut request = request();
+        request.mount_namespace.workspace_mode = AgentPodWorkspaceMode::OverlayReview;
         request.mount_namespace.overlayfs = Some(LinuxOverlayFsWorkspacePlan {
             lower_host_path: "/tmp/agentbox-work".into(),
             upper_host_path: "/tmp/agentbox-overlay/same".into(),
