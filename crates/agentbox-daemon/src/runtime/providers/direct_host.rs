@@ -6,7 +6,8 @@ use tokio::process::Command;
 
 use crate::runtime::bridge::HostBridgeTransportKind;
 use crate::runtime::provider::{
-    ProviderFamily, ProviderImplementationStatus, RuntimeError, RuntimeProvider,
+    BoundaryPrimitiveStatus, ProviderFamily, ProviderImplementationStatus, RuntimeError,
+    RuntimeProvider,
 };
 use crate::runtime::types::{
     CommandResult, ExecCommand, MinipodSpec, RuntimeCapability, RuntimeSession, RuntimeStatus,
@@ -59,6 +60,34 @@ impl RuntimeProvider for DirectHostRuntimeProvider {
 
     fn boundary_primitives(&self) -> Vec<&'static str> {
         vec!["path-shim", "daemon-policy", "sqlite-audit"]
+    }
+
+    fn boundary_primitive_statuses(&self) -> Vec<BoundaryPrimitiveStatus> {
+        vec![
+            BoundaryPrimitiveStatus {
+                primitive: "path-shim",
+                status: ProviderImplementationStatus::Shipped,
+                active: true,
+                requires_gate: None,
+                enforcement_scope:
+                    "weak dev/fallback command mediation only; no OS sandbox boundary",
+            },
+            BoundaryPrimitiveStatus {
+                primitive: "daemon-policy",
+                status: ProviderImplementationStatus::Shipped,
+                active: true,
+                requires_gate: None,
+                enforcement_scope:
+                    "weak dev/fallback policy decision point only; no OS sandbox boundary",
+            },
+            BoundaryPrimitiveStatus {
+                primitive: "sqlite-audit",
+                status: ProviderImplementationStatus::Shipped,
+                active: true,
+                requires_gate: None,
+                enforcement_scope: "weak dev/fallback audit trail only; no OS sandbox boundary",
+            },
+        ]
     }
 
     async fn is_available(&self) -> bool {
@@ -199,6 +228,40 @@ mod tests {
     use super::*;
     use crate::runtime::types::MinipodSpec;
     use std::collections::HashMap;
+
+    #[test]
+    fn direct_host_boundary_statuses_report_weak_isolation_without_os_sandbox() {
+        let provider = DirectHostRuntimeProvider::new();
+
+        assert_eq!(
+            provider.boundary_primitive_statuses(),
+            vec![
+                BoundaryPrimitiveStatus {
+                    primitive: "path-shim",
+                    status: ProviderImplementationStatus::Shipped,
+                    active: true,
+                    requires_gate: None,
+                    enforcement_scope:
+                        "weak dev/fallback command mediation only; no OS sandbox boundary",
+                },
+                BoundaryPrimitiveStatus {
+                    primitive: "daemon-policy",
+                    status: ProviderImplementationStatus::Shipped,
+                    active: true,
+                    requires_gate: None,
+                    enforcement_scope:
+                        "weak dev/fallback policy decision point only; no OS sandbox boundary",
+                },
+                BoundaryPrimitiveStatus {
+                    primitive: "sqlite-audit",
+                    status: ProviderImplementationStatus::Shipped,
+                    active: true,
+                    requires_gate: None,
+                    enforcement_scope: "weak dev/fallback audit trail only; no OS sandbox boundary",
+                },
+            ]
+        );
+    }
 
     #[tokio::test]
     async fn direct_host_provider_runs_argv_in_workspace_without_shell() {
