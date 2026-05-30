@@ -318,8 +318,8 @@ impl RuntimeProvider for AgentPodProvider {
             ),
             AgentPodProviderKind::Windows => (
                 ProviderImplementationStatus::DescriptorOnly,
-                Some("AGENTBOX_WINDOWS_NATIVE=1"),
-                "plan compiler only; Job Object create/close smoke is gated separately by AGENTBOX_WINDOWS_JOB_OBJECT=1, but provider execution is not wired and AppContainer/WFP/ETW execution plus live limit enforcement are not wired",
+                Some("live Windows lifecycle/enforcement gates"),
+                "plan compiler only; Job Object create/close smoke is gated separately by AGENTBOX_WINDOWS_JOB_OBJECT=1, but provider execution is not wired and process assignment, cleanup, AppContainer/WFP/ETW execution, and live limit enforcement are not wired",
             ),
             AgentPodProviderKind::Linux => unreachable!("Linux handled above"),
         };
@@ -591,12 +591,29 @@ mod tests {
         let provider = AgentPodProvider::new(AgentPodProviderKind::Windows);
 
         assert_unavailable_provider_contract(&provider).await;
-        assert!(provider
-            .boundary_primitive_statuses()
-            .iter()
-            .all(|status| !status.active
-                && status.requires_gate == Some("AGENTBOX_WINDOWS_NATIVE=1")
-                && status.enforcement_scope.contains("execution is not wired")));
+        assert_eq!(
+            provider.implementation_status(),
+            ProviderImplementationStatus::DescriptorOnly
+        );
+        assert!(!provider.is_available().await);
+
+        let statuses = provider.boundary_primitive_statuses();
+        assert_eq!(statuses.len(), provider.boundary_primitives().len());
+        for status in statuses {
+            assert_eq!(status.status, ProviderImplementationStatus::DescriptorOnly);
+            assert!(!status.active);
+            assert_eq!(
+                status.requires_gate,
+                Some("live Windows lifecycle/enforcement gates")
+            );
+            assert!(status.enforcement_scope.contains("execution is not wired"));
+            assert!(status.enforcement_scope.contains("process assignment"));
+            assert!(status.enforcement_scope.contains("cleanup"));
+            assert!(status.enforcement_scope.contains("live limit enforcement"));
+            assert!(status
+                .enforcement_scope
+                .contains("AppContainer/WFP/ETW execution"));
+        }
     }
 
     #[cfg(target_os = "macos")]

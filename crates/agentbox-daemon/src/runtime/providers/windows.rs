@@ -745,10 +745,10 @@ fn windows_native_receipt_descriptor(
 }
 
 pub fn windows_native_execution_enabled() -> bool {
-    matches!(
-        std::env::var("AGENTBOX_WINDOWS_NATIVE").as_deref(),
-        Ok("1") | Ok("true") | Ok("yes")
-    )
+    // Keep descriptor-only until the provider has a real process lifecycle,
+    // assignment, cleanup, and enforcement gate. The Job Object smoke only
+    // proves create/close, not runnable execution.
+    false
 }
 
 pub fn windows_job_object_live_smoke_enabled() -> bool {
@@ -941,6 +941,7 @@ mod tests {
         assert_eq!(plan.live_env_var, "AGENTBOX_WINDOWS_NATIVE");
         assert!(plan.requires_windows);
         assert!(!plan.live_execution_enabled);
+        assert!(!windows_native_execution_enabled());
         assert!(plan.security_claim.contains("execution is not wired"));
         assert!(plan.job_object.kill_on_close);
         assert_eq!(plan.job_object.process_limit, Some(128));
@@ -1134,6 +1135,33 @@ mod tests {
                 && channel.guest_path.as_deref()
                     == Some(r"C:\ProgramData\Agentbox\Credentials\deploy_token")));
         assert!(!plan.runnable_on_current_host());
+    }
+
+    #[test]
+    fn windows_native_gate_does_not_claim_runnable_execution() {
+        let previous = std::env::var("AGENTBOX_WINDOWS_NATIVE").ok();
+        std::env::set_var("AGENTBOX_WINDOWS_NATIVE", "1");
+
+        let spec = MinipodSpec::for_agent_task("codex", "C:\\agentbox\\work");
+        let command = ExecCommand {
+            argv: vec!["powershell.exe".into(), "-NoProfile".into()],
+            working_dir: Some("C:\\agentbox\\work".into()),
+            env: Default::default(),
+            timeout_seconds: None,
+        };
+        let plan = WindowsAgentPodExecutionPlan::from_minipod_spec(&spec, &command).unwrap();
+
+        assert_eq!(plan.live_env_var, "AGENTBOX_WINDOWS_NATIVE");
+        assert!(!windows_native_execution_enabled());
+        assert!(!plan.live_execution_enabled);
+        assert!(!plan.runnable_on_current_host());
+        assert!(plan.security_claim.contains("execution is not wired"));
+        assert!(plan.native_receipt.enforced_phases.is_empty());
+
+        match previous {
+            Some(value) => std::env::set_var("AGENTBOX_WINDOWS_NATIVE", value),
+            None => std::env::remove_var("AGENTBOX_WINDOWS_NATIVE"),
+        }
     }
 
     #[test]
