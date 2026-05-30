@@ -703,6 +703,8 @@ pub struct LinuxLandlockRule {
     pub access: Vec<LinuxLandlockAccess>,
     pub reason: String,
     pub access_mask: u64,
+    #[serde(default)]
+    pub optional: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -750,11 +752,7 @@ const LANDLOCK_ABI_V1_FS_ACCESS_MASK: u64 = LANDLOCK_ACCESS_FS_EXECUTE
     | LANDLOCK_ACCESS_FS_REMOVE_FILE
     | LANDLOCK_ACCESS_FS_MAKE_DIR
     | LANDLOCK_ACCESS_FS_MAKE_REG;
-const LANDLOCK_PROTOTYPE_HANDLED_FS_ACCESS_MASK: u64 = LANDLOCK_ACCESS_FS_WRITE_FILE
-    | LANDLOCK_ACCESS_FS_REMOVE_DIR
-    | LANDLOCK_ACCESS_FS_REMOVE_FILE
-    | LANDLOCK_ACCESS_FS_MAKE_DIR
-    | LANDLOCK_ACCESS_FS_MAKE_REG;
+const LANDLOCK_AGENTPOD_HANDLED_FS_ACCESS_MASK: u64 = LANDLOCK_ABI_V1_FS_ACCESS_MASK;
 
 impl LinuxLandlockAccess {
     fn access_mask(&self) -> u64 {
@@ -771,37 +769,37 @@ impl LinuxLandlockAccess {
 }
 
 impl LinuxLandlockPathPolicyPlan {
-    pub fn prototype_loader_scope() -> Self {
+    pub fn runner_loader_scope() -> Self {
         Self {
             schema_version: 1,
             access_classes: vec![
                 LinuxLandlockAccessClassPlan {
                     class: "read".into(),
                     planned: true,
-                    enforced_by_prototype_loader: false,
+                    enforced_by_prototype_loader: true,
                     access: vec![LinuxLandlockAccess::ReadFile, LinuxLandlockAccess::ReadDir],
-                    reason: "planned read path policy; prototype loader does not yet handle read access".into(),
+                    reason: "runner handles read-file/read-dir path-beneath access with explicit workspace, mount, and runtime support paths".into(),
                 },
                 LinuxLandlockAccessClassPlan {
                     class: "execute".into(),
                     planned: true,
-                    enforced_by_prototype_loader: false,
+                    enforced_by_prototype_loader: true,
                     access: vec![LinuxLandlockAccess::Execute],
-                    reason: "planned execute path policy; prototype loader must run after launcher sequencing before handling execute access".into(),
+                    reason: "runner handles execute path-beneath access while allowing the command runtime paths needed after launcher sequencing".into(),
                 },
                 LinuxLandlockAccessClassPlan {
                     class: "write".into(),
                     planned: true,
                     enforced_by_prototype_loader: true,
                     access: vec![LinuxLandlockAccess::WriteFile],
-                    reason: "prototype loader handles write-file path-beneath access".into(),
+                    reason: "runner handles write-file path-beneath access".into(),
                 },
                 LinuxLandlockAccessClassPlan {
                     class: "create".into(),
                     planned: true,
                     enforced_by_prototype_loader: true,
                     access: vec![LinuxLandlockAccess::MakeDir],
-                    reason: "prototype loader handles create access covered by ABI v1 make-dir and make-reg bits".into(),
+                    reason: "runner handles create access covered by ABI v1 make-dir and make-reg bits".into(),
                 },
                 LinuxLandlockAccessClassPlan {
                     class: "remove".into(),
@@ -811,12 +809,18 @@ impl LinuxLandlockPathPolicyPlan {
                         LinuxLandlockAccess::RemoveFile,
                         LinuxLandlockAccess::RemoveDir,
                     ],
-                    reason: "prototype loader handles remove-file and remove-dir path-beneath access".into(),
+                    reason: "runner handles remove-file and remove-dir path-beneath access".into(),
                 },
             ],
-            current_loader_scope: "write/create/remove path-beneath denial only".into(),
-            claim_boundary: "read and execute path policy are planned but not enforced by the prototype loader".into(),
+            current_loader_scope: "read/write/create/remove/execute path-beneath enforcement".into(),
+            claim_boundary:
+                "Landlock ABI v1 filesystem path-beneath enforcement only; runtime support paths are explicitly allowed and this is not a complete sandbox"
+                    .into(),
         }
+    }
+
+    pub fn prototype_loader_scope() -> Self {
+        Self::runner_loader_scope()
     }
 }
 
@@ -830,9 +834,9 @@ impl LinuxLandlockRuleset {
             ));
         }
 
-        let mut rules = vec![LinuxLandlockRule {
-            path: spec.filesystem.workspace_host_path.display().to_string(),
-            access: vec![
+        let mut rules = vec![linux_landlock_rule(
+            spec.filesystem.workspace_host_path.display().to_string(),
+            vec![
                 LinuxLandlockAccess::ReadFile,
                 LinuxLandlockAccess::ReadDir,
                 LinuxLandlockAccess::WriteFile,
@@ -841,12 +845,9 @@ impl LinuxLandlockRuleset {
                 LinuxLandlockAccess::RemoveDir,
                 LinuxLandlockAccess::Execute,
             ],
-            reason: "task workspace is the writable execution boundary".into(),
-            access_mask: 0,
-        }];
-        if let Some(rule) = rules.first_mut() {
-            rule.access_mask = landlock_access_mask(&rule.access);
-        }
+            "task workspace is the writable execution boundary",
+            false,
+        )];
 
         for mount in &spec.filesystem.mounts {
             let mut access = vec![
@@ -862,18 +863,19 @@ impl LinuxLandlockRuleset {
                     LinuxLandlockAccess::RemoveDir,
                 ]);
             }
-            rules.push(LinuxLandlockRule {
-                path: mount.host_path.display().to_string(),
-                access_mask: landlock_access_mask(&access),
+            rules.push(linux_landlock_rule(
+                mount.host_path.display().to_string(),
                 access,
-                reason: format!("explicit {:?} mount", mount.kind),
-            });
+                format!("explicit {:?} mount", mount.kind),
+                false,
+            ));
         }
+        rules.extend(linux_landlock_runtime_support_rules());
 
         Ok(LinuxLandlockPlan {
             schema_version: 1,
             ruleset_name: format!("agentbox-{}", spec.id),
-            path_policy: LinuxLandlockPathPolicyPlan::prototype_loader_scope(),
+            path_policy: LinuxLandlockPathPolicyPlan::runner_loader_scope(),
             handled_access_mask: landlock_handled_access_mask(&rules),
             rules,
             default_deny: true,
@@ -912,7 +914,64 @@ fn landlock_access_mask(access: &[LinuxLandlockAccess]) -> u64 {
 
 fn landlock_handled_access_mask(rules: &[LinuxLandlockRule]) -> u64 {
     rules.iter().fold(0, |mask, rule| mask | rule.access_mask)
-        & LANDLOCK_PROTOTYPE_HANDLED_FS_ACCESS_MASK
+        & LANDLOCK_AGENTPOD_HANDLED_FS_ACCESS_MASK
+}
+
+fn linux_landlock_rule(
+    path: impl Into<String>,
+    access: Vec<LinuxLandlockAccess>,
+    reason: impl Into<String>,
+    optional: bool,
+) -> LinuxLandlockRule {
+    LinuxLandlockRule {
+        path: path.into(),
+        access_mask: landlock_access_mask(&access),
+        access,
+        reason: reason.into(),
+        optional,
+    }
+}
+
+fn linux_landlock_runtime_support_rules() -> Vec<LinuxLandlockRule> {
+    let read_execute = vec![
+        LinuxLandlockAccess::ReadFile,
+        LinuxLandlockAccess::ReadDir,
+        LinuxLandlockAccess::Execute,
+    ];
+    let read_only = vec![LinuxLandlockAccess::ReadFile, LinuxLandlockAccess::ReadDir];
+    let file_read_only = vec![LinuxLandlockAccess::ReadFile];
+
+    let mut rules = Vec::new();
+    for path in [
+        "/bin",
+        "/usr/bin",
+        "/sbin",
+        "/usr/sbin",
+        "/lib",
+        "/lib64",
+        "/usr/lib",
+        "/usr/lib64",
+    ] {
+        rules.push(linux_landlock_rule(
+            path,
+            read_execute.clone(),
+            "optional command runtime read/execute support path",
+            true,
+        ));
+    }
+    rules.push(linux_landlock_rule(
+        "/proc",
+        read_only,
+        "optional procfs read support for runner and diagnostics",
+        true,
+    ));
+    rules.push(linux_landlock_rule(
+        "/etc/ld.so.cache",
+        file_read_only,
+        "optional dynamic loader cache read support",
+        true,
+    ));
+    rules
 }
 
 #[cfg(target_os = "linux")]
@@ -977,7 +1036,16 @@ fn prepare_linux_landlock_ruleset(
         let path = std::ffi::CString::new(rule.path.as_str())?;
         let path_fd = unsafe { libc::open(path.as_ptr(), libc::O_PATH | libc::O_CLOEXEC) };
         if path_fd < 0 {
-            return Err(std::io::Error::last_os_error().into());
+            let err = std::io::Error::last_os_error();
+            if rule.optional
+                && matches!(
+                    err.raw_os_error(),
+                    Some(code) if code == libc::ENOENT || code == libc::ENOTDIR
+                )
+            {
+                continue;
+            }
+            return Err(err.into());
         }
         let path_file = unsafe { std::fs::File::from_raw_fd(path_fd) };
         let path_beneath = LandlockPathBeneathAttr {
@@ -2460,7 +2528,9 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn linux_landlock_filter_denies_child_writes_outside_workspace() {
+    fn linux_landlock_filter_enforces_read_write_execute_policy_fixture() {
+        use std::os::unix::fs::PermissionsExt;
+
         if let Err(err) = linux_landlock_abi_version() {
             eprintln!("skipping Landlock child proof: {err}");
             return;
@@ -2478,13 +2548,50 @@ mod tests {
         let outside = root.join("outside");
         std::fs::create_dir_all(&workspace).unwrap();
         std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(workspace.join("allowed-read"), "read-ok").unwrap();
+        std::fs::write(outside.join("denied-read"), "read-no").unwrap();
+        std::fs::write(
+            workspace.join("allowed-exec"),
+            "#!/bin/sh\nprintf allowed-exec\n",
+        )
+        .unwrap();
+        std::fs::write(
+            outside.join("denied-exec"),
+            "#!/bin/sh\nprintf denied-exec\n",
+        )
+        .unwrap();
+        for executable in [workspace.join("allowed-exec"), outside.join("denied-exec")] {
+            let mut permissions = std::fs::metadata(&executable).unwrap().permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(executable, permissions).unwrap();
+        }
 
         let spec = MinipodSpec::for_agent_task("hermes", &workspace);
         let plan = LinuxLandlockRuleset::plan(&spec).unwrap();
         let mut command = std::process::Command::new("sh");
         command
             .arg("-c")
-            .arg("printf ok > \"$WORKSPACE/allowed\"; printf no > \"$OUTSIDE/denied\"")
+            .arg(
+                r#"
+set -u
+cat "$WORKSPACE/allowed-read" || exit 10
+if cat "$OUTSIDE/denied-read"; then
+  echo "read denial failed"
+  exit 11
+fi
+"$WORKSPACE/allowed-exec" > "$WORKSPACE/exec-output" || exit 12
+if "$OUTSIDE/denied-exec"; then
+  echo "execute denial failed"
+  exit 13
+fi
+printf ok > "$WORKSPACE/write-allowed" || exit 14
+if printf no > "$OUTSIDE/write-denied"; then
+  echo "write denial failed"
+  exit 15
+fi
+printf landlock-policy-ok
+"#,
+            )
             .env("WORKSPACE", &workspace)
             .env("OUTSIDE", &outside)
             .stdout(std::process::Stdio::piped())
@@ -2493,13 +2600,24 @@ mod tests {
 
         let child = command.spawn().unwrap();
         let output = wait_for_child_output(child, Some(5)).unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
 
-        assert!(!output.status.success());
+        assert!(
+            output.status.success(),
+            "stdout={stdout:?} stderr={:?}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(stdout.contains("read-ok"));
+        assert!(stdout.contains("landlock-policy-ok"));
         assert_eq!(
-            std::fs::read_to_string(workspace.join("allowed")).unwrap(),
+            std::fs::read_to_string(workspace.join("exec-output")).unwrap(),
+            "allowed-exec"
+        );
+        assert_eq!(
+            std::fs::read_to_string(workspace.join("write-allowed")).unwrap(),
             "ok"
         );
-        assert!(!outside.join("denied").exists());
+        assert!(!outside.join("write-denied").exists());
 
         let _ = std::fs::remove_dir_all(root);
     }
@@ -2990,7 +3108,7 @@ mod tests {
     }
 
     #[test]
-    fn landlock_plan_allows_workspace_and_explicit_mounts_only() {
+    fn landlock_plan_allows_workspace_mounts_and_runtime_support_paths() {
         let mut spec = MinipodSpec::for_agent_task("hermes", "/tmp/agentbox-work");
         spec.filesystem.mounts.push(MountRule {
             host_path: PathBuf::from("/tmp/agentbox-fixtures"),
@@ -3004,39 +3122,54 @@ mod tests {
         assert_eq!(plan.schema_version, 1);
         assert!(plan.default_deny);
         assert!(plan.requires_loader);
-        assert_eq!(plan.rules.len(), 2);
-        assert_eq!(plan.rules[0].path, "/tmp/agentbox-work");
-        assert!(plan.rules[0]
+        assert!(plan.rules.len() > 2);
+        let workspace_rule = plan
+            .rules
+            .iter()
+            .find(|rule| rule.path == "/tmp/agentbox-work")
+            .unwrap();
+        assert!(!workspace_rule.optional);
+        assert!(workspace_rule
             .access
             .contains(&LinuxLandlockAccess::WriteFile));
         assert_eq!(
-            plan.rules[0].access_mask & LANDLOCK_ACCESS_FS_WRITE_FILE,
+            workspace_rule.access_mask & LANDLOCK_ACCESS_FS_WRITE_FILE,
             LANDLOCK_ACCESS_FS_WRITE_FILE
         );
         assert_eq!(
-            plan.rules[0].access_mask & LANDLOCK_ACCESS_FS_MAKE_REG,
+            workspace_rule.access_mask & LANDLOCK_ACCESS_FS_MAKE_REG,
             LANDLOCK_ACCESS_FS_MAKE_REG
         );
-        assert_eq!(plan.rules[1].path, "/tmp/agentbox-fixtures");
-        assert!(plan.rules[1]
+        assert!(workspace_rule
             .access
-            .contains(&LinuxLandlockAccess::ReadFile));
-        assert!(!plan.rules[1]
-            .access
-            .contains(&LinuxLandlockAccess::WriteFile));
+            .contains(&LinuxLandlockAccess::Execute));
+        let mount_rule = plan
+            .rules
+            .iter()
+            .find(|rule| rule.path == "/tmp/agentbox-fixtures")
+            .unwrap();
+        assert!(!mount_rule.optional);
+        assert!(mount_rule.access.contains(&LinuxLandlockAccess::ReadFile));
+        assert!(!mount_rule.access.contains(&LinuxLandlockAccess::WriteFile));
+        let runtime_rule = plan
+            .rules
+            .iter()
+            .find(|rule| rule.path == "/usr/bin")
+            .unwrap();
+        assert!(runtime_rule.optional);
+        assert!(runtime_rule.access.contains(&LinuxLandlockAccess::Execute));
         assert_eq!(
             plan.handled_access_mask,
-            LANDLOCK_PROTOTYPE_HANDLED_FS_ACCESS_MASK
+            LANDLOCK_AGENTPOD_HANDLED_FS_ACCESS_MASK
         );
         assert_eq!(
             plan.handled_access_mask & LANDLOCK_ACCESS_FS_EXECUTE,
-            0,
-            "prototype loader must not handle exec until it can run after the launcher starts"
+            LANDLOCK_ACCESS_FS_EXECUTE
         );
     }
 
     #[test]
-    fn landlock_path_policy_plan_separates_read_execute_from_loader_scope() {
+    fn landlock_path_policy_plan_marks_read_execute_as_enforced() {
         let spec = MinipodSpec::for_agent_task("hermes", "/tmp/agentbox-work");
 
         let plan = LinuxLandlockRuleset::plan(&spec).unwrap();
@@ -3045,10 +3178,10 @@ mod tests {
         assert!(plan
             .path_policy
             .claim_boundary
-            .contains("not enforced by the prototype loader"));
+            .contains("not a complete sandbox"));
         assert_eq!(
             plan.path_policy.current_loader_scope,
-            "write/create/remove path-beneath denial only"
+            "read/write/create/remove/execute path-beneath enforcement"
         );
 
         let read = plan
@@ -3058,7 +3191,7 @@ mod tests {
             .find(|class| class.class == "read")
             .unwrap();
         assert!(read.planned);
-        assert!(!read.enforced_by_prototype_loader);
+        assert!(read.enforced_by_prototype_loader);
         assert!(read.access.contains(&LinuxLandlockAccess::ReadFile));
         assert!(read.access.contains(&LinuxLandlockAccess::ReadDir));
 
@@ -3069,15 +3202,14 @@ mod tests {
             .find(|class| class.class == "execute")
             .unwrap();
         assert!(execute.planned);
-        assert!(!execute.enforced_by_prototype_loader);
+        assert!(execute.enforced_by_prototype_loader);
         assert!(execute.access.contains(&LinuxLandlockAccess::Execute));
         assert_eq!(
             plan.handled_access_mask & LANDLOCK_ACCESS_FS_EXECUTE,
-            0,
-            "execute is planned but still outside the prototype loader scope"
+            LANDLOCK_ACCESS_FS_EXECUTE
         );
 
-        for enforced_class in ["write", "create", "remove"] {
+        for enforced_class in ["read", "execute", "write", "create", "remove"] {
             let class = plan
                 .path_policy
                 .access_classes

@@ -74,10 +74,11 @@ combines rootless user namespace, mount namespace metadata, PID namespace,
 cgroup v2 resource writes, seccomp profile metadata, and Landlock ruleset
 metadata into one object. The gated executor also sets `PR_SET_NO_NEW_PRIVS`
 before exec and can install a prototype BPF seccomp filter for supported
-syscall deny rules and a prototype write-oriented Landlock path-beneath
-filesystem ruleset. The Landlock loader currently handles write/create/remove
-access only so launcher binaries, dynamic loaders, and host libraries are not
-accidentally blocked before the broader read/execute policy is ready. The
+syscall deny rules and a prototype read/write/execute Landlock path-beneath
+filesystem ruleset. The Landlock loader carries explicit workspace, mount,
+guest alias, and runtime support paths so launcher binaries, dynamic loaders,
+host libraries, and diagnostics can run without pretending to be a complete
+filesystem sandbox. The
 executor invokes `agentbox-linux-runner` inside `unshare`; the runner bind-mounts
 the host workspace at the guest workspace path for direct workspace mode, or
 mounts an overlayfs review workspace when the manifest carries upper/work

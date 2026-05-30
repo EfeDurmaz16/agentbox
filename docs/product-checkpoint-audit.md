@@ -41,7 +41,7 @@ Podman remains compatibility-only. These support levels must stay explicit.
 
 | Provider | Prototype behavior | Gate |
 | --- | --- | --- |
-| `agentpod-linux` | rootless namespace wrapper, mount namespace plan, PID namespace plan, no-new-privs, cgroups v2 planning/apply, write/create/remove Landlock loader with explicit read/execute gap model, targeted seccomp deny loader with OCI/libseccomp import descriptor, overlayfs review workspace apply, native runner phase evidence | `AGENTBOX_LINUX_NATIVE=1` on Linux plus host prerequisites: `unshare`, user namespaces, and a cgroups v2 root |
+| `agentpod-linux` | rootless namespace wrapper, mount namespace plan, PID namespace plan, no-new-privs, cgroups v2 planning/apply, read/write/execute Landlock path-beneath loader with explicit runtime support paths, targeted seccomp deny loader with OCI/libseccomp import descriptor, overlayfs review workspace apply, native runner phase evidence | `AGENTBOX_LINUX_NATIVE=1` on Linux plus host prerequisites: `unshare`, user namespaces, and a cgroups v2 root |
 | `remote-agentpod` | typed worker handshake/create/exec/destroy, workspace bundle handoff/export/apply, env/file credential handoff, command policy, approval-grant resolution, evidence upload/stream/status, lifecycle event journal, restart/status contract | HTTPS endpoint, or loopback HTTP only with `AGENTBOX_REMOTE_AGENTPOD_ALLOW_HTTP_LOOPBACK=1` |
 
 Prototype means the surface has code and tests, but it is not yet a full

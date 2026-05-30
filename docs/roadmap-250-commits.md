@@ -58,7 +58,7 @@ The sprint has moved past pure planning. The current working spine is:
 
 - Linux AgentPod has a gated prototype execution path through
   `agentbox-linux-runner`, `unshare`, workspace bind mounting, cgroup v2 attach,
-  write-oriented Landlock, supported seccomp deny filters, timeout handling,
+  read/write/execute Landlock, supported seccomp deny filters, timeout handling,
   stdout/stderr collection, and request/cgroup cleanup. It is still not a
   complete sandbox claim.
 - Linux runner request files are owned lifecycle artifacts: they are cleaned on

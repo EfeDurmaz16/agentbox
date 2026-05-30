@@ -52,7 +52,7 @@ cargo run -q -p agentbox-cli -- native-plan \
   jq -e '
     .provider == "agentpod-linux"
     and .live_env_var == "AGENTBOX_LINUX_NATIVE"
-    and .landlock.handled_access_mask == 434
+    and .landlock.handled_access_mask == 447
     and .mount_namespace.workspace_bind_mount_wired == true
     and (.mount_namespace.workspace_mount_claim | contains("agentbox-linux-runner"))
     and any(.runner_phases[]; .name == "bind-workspace" and .status == "prototype")
@@ -72,9 +72,26 @@ cargo run -q -p agentbox-cli -- native-plan \
 proof_outside="$(mktemp -d)"
 parallel_root=""
 trap 'rm -rf "$proof_outside" "$parallel_root"' EXIT
-proof_allowed="$workspace/agentbox-landlock-allowed"
-proof_denied="$proof_outside/agentbox-landlock-denied"
-rm -f "$proof_allowed" "$proof_denied"
+proof_policy_dir="$workspace/agentbox-landlock-policy"
+mkdir -p "$proof_policy_dir"
+proof_read_allowed="$proof_policy_dir/allowed-read"
+proof_read_denied="$proof_outside/denied-read"
+proof_exec_allowed="$proof_policy_dir/allowed-exec"
+proof_exec_denied="$proof_outside/denied-exec"
+proof_write_allowed="$proof_policy_dir/allowed-write"
+proof_write_denied="$proof_outside/denied-write"
+printf 'read-ok' >"$proof_read_allowed"
+printf 'read-no' >"$proof_read_denied"
+cat >"$proof_exec_allowed" <<'EOF'
+#!/bin/sh
+printf allowed-exec
+EOF
+cat >"$proof_exec_denied" <<'EOF'
+#!/bin/sh
+printf denied-exec
+EOF
+chmod +x "$proof_exec_allowed" "$proof_exec_denied"
+rm -f "$proof_write_allowed" "$proof_write_denied"
 
 set +e
 proof_output="$(
@@ -83,22 +100,50 @@ proof_output="$(
     --provider agentpod-linux \
     --workspace-mode direct \
     --timeout-seconds "$timeout_seconds" \
-    -- /bin/sh -c 'printf ok > "$1"; printf no > "$2"' sh "$proof_allowed" "$proof_denied" 2>&1
+    -- /bin/sh -c '
+      set -u
+      cat "$1" || exit 10
+      if cat "$2"; then
+        echo "read denial failed"
+        exit 11
+      fi
+      "$3" > "$7/exec-allowed-output" || exit 12
+      if "$4"; then
+        echo "execute denial failed"
+        exit 13
+      fi
+      printf ok > "$5" || exit 14
+      if printf no > "$6"; then
+        echo "write denial failed"
+        exit 15
+      fi
+      printf "landlock-policy-ok\n"
+    ' sh "$proof_read_allowed" "$proof_read_denied" "$proof_exec_allowed" "$proof_exec_denied" "$proof_write_allowed" "$proof_write_denied" "$proof_policy_dir" 2>&1
 )"
 proof_status=$?
 set -e
 
-if [[ "$proof_status" -eq 0 ]]; then
+if [[ "$proof_status" -ne 0 ]]; then
   printf '%s\n' "$proof_output" >&2
-  echo "expected Linux Landlock proof command to fail on outside-workspace write" >&2
+  echo "expected Linux Landlock read/write/execute proof command to succeed after observing denials" >&2
   exit 1
 fi
-if [[ "$(cat "$proof_allowed")" != "ok" ]]; then
+if [[ "$proof_output" != *"read-ok"* || "$proof_output" != *"landlock-policy-ok"* ]]; then
+  printf '%s\n' "$proof_output" >&2
+  echo "expected Linux Landlock proof command to read allowed workspace file" >&2
+  exit 1
+fi
+if [[ "$(cat "$proof_policy_dir/exec-allowed-output")" != "allowed-exec" ]]; then
+  printf '%s\n' "$proof_output" >&2
+  echo "expected Linux Landlock proof command to execute allowed workspace file" >&2
+  exit 1
+fi
+if [[ "$(cat "$proof_write_allowed")" != "ok" ]]; then
   printf '%s\n' "$proof_output" >&2
   echo "expected Linux Landlock proof command to write inside workspace" >&2
   exit 1
 fi
-if [[ -e "$proof_denied" ]]; then
+if [[ -e "$proof_write_denied" ]]; then
   printf '%s\n' "$proof_output" >&2
   echo "expected Linux Landlock proof command to deny outside-workspace write" >&2
   exit 1

@@ -350,7 +350,7 @@ impl RuntimeProvider for AgentPodProvider {
                             "gated cgroup v2 resource file writes, process attach, and cleanup"
                         }
                         AgentPodPrimitive::Landlock => {
-                            "gated prototype Landlock write-oriented path-beneath ruleset loader before exec"
+                            "gated prototype Landlock read/write/execute path-beneath ruleset loader before exec with explicit runtime support paths"
                         }
                         AgentPodPrimitive::Seccomp => {
                             "gated prototype BPF seccomp loader for supported syscall deny rules; not a complete libseccomp profile loader"

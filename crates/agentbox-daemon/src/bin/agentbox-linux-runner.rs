@@ -1,6 +1,7 @@
 use agentbox_daemon::runtime::providers::linux::{
-    LinuxAgentPodRunnerRequest, LinuxLandlockRule, LinuxLandlockRuleset, LinuxMountNamespaceMount,
-    LinuxMountNamespacePlan, LinuxOverlayFsWorkspacePlan, LinuxSeccompProfileLoader,
+    LinuxAgentPodRunnerRequest, LinuxLandlockPlan, LinuxLandlockRule, LinuxLandlockRuleset,
+    LinuxMountNamespaceMount, LinuxMountNamespacePlan, LinuxOverlayFsWorkspacePlan,
+    LinuxSeccompProfileLoader,
 };
 use agentbox_daemon::runtime::types::{AgentPodWorkspaceMode, WorkspaceOverlayMode};
 use std::path::{Path, PathBuf};
@@ -151,25 +152,47 @@ fn validate_overlayfs(
     Ok(())
 }
 
-fn landlock_with_guest_workspace_alias(
-    request: &LinuxAgentPodRunnerRequest,
-) -> agentbox_daemon::runtime::providers::linux::LinuxLandlockPlan {
+fn landlock_with_guest_workspace_alias(request: &LinuxAgentPodRunnerRequest) -> LinuxLandlockPlan {
     let mut plan = request.landlock.clone();
-    if request.mount_namespace.workspace_host_path != request.mount_namespace.workspace_guest_path {
-        if let Some(workspace_rule) = plan
-            .rules
-            .iter()
-            .find(|rule| rule.path == request.mount_namespace.workspace_host_path)
-            .cloned()
-        {
-            plan.rules.push(LinuxLandlockRule {
-                path: request.mount_namespace.workspace_guest_path.clone(),
-                reason: "guest workspace bind-mount alias".into(),
-                ..workspace_rule
-            });
-        }
+    append_landlock_alias_rule(
+        &mut plan,
+        &request.mount_namespace.workspace_host_path,
+        &request.mount_namespace.workspace_guest_path,
+        "guest workspace bind-mount alias",
+    );
+    for mount in &request.mount_namespace.read_only_mounts {
+        append_landlock_alias_rule(
+            &mut plan,
+            &mount.host_path,
+            &mount.guest_path,
+            "guest read-only bind-mount alias",
+        );
     }
     plan
+}
+
+fn append_landlock_alias_rule(
+    plan: &mut LinuxLandlockPlan,
+    source_path: &str,
+    alias_path: &str,
+    reason: &str,
+) {
+    if source_path == alias_path {
+        return;
+    }
+    if let Some(source_rule) = plan
+        .rules
+        .iter()
+        .find(|rule| rule.path == source_path)
+        .cloned()
+    {
+        plan.rules.push(LinuxLandlockRule {
+            path: alias_path.to_string(),
+            reason: reason.to_string(),
+            optional: false,
+            ..source_rule
+        });
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -364,8 +387,9 @@ mod tests {
                     access: vec![LinuxLandlockAccess::WriteFile],
                     reason: "workspace".into(),
                     access_mask: 1,
+                    optional: false,
                 }],
-                path_policy: LinuxLandlockPathPolicyPlan::prototype_loader_scope(),
+                path_policy: LinuxLandlockPathPolicyPlan::runner_loader_scope(),
                 handled_access_mask: 1,
                 default_deny: true,
                 requires_loader: true,
@@ -384,6 +408,32 @@ mod tests {
 
         assert!(plan.rules.iter().any(|rule| {
             rule.path == "/workspace" && rule.reason == "guest workspace bind-mount alias"
+        }));
+    }
+
+    #[test]
+    fn landlock_alias_adds_guest_read_only_mount_rules() {
+        let mut request = request();
+        request
+            .mount_namespace
+            .read_only_mounts
+            .push(LinuxMountNamespaceMount {
+                host_path: "/tmp/agentbox-fixtures".into(),
+                guest_path: "/fixtures".into(),
+                read_only: true,
+            });
+        request.landlock.rules.push(LinuxLandlockRule {
+            path: "/tmp/agentbox-fixtures".into(),
+            access: vec![LinuxLandlockAccess::ReadFile],
+            reason: "fixtures".into(),
+            access_mask: 4,
+            optional: false,
+        });
+
+        let plan = landlock_with_guest_workspace_alias(&request);
+
+        assert!(plan.rules.iter().any(|rule| {
+            rule.path == "/fixtures" && rule.reason == "guest read-only bind-mount alias"
         }));
     }
 
