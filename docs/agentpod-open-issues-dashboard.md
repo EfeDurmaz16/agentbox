@@ -1,9 +1,9 @@
 # AgentPod Productization Execution Dashboard
-Generated: 2026-05-30T21:22:41.560220+00:00
-Open issues: 55
+Generated: 2026-05-30T21:23:13.909791+00:00
+Open issues: 54
 
 ## Coverage
-- Mapped into 100-issue AgentPod plan: 37
+- Mapped into 100-issue AgentPod plan: 36
 - Outside mapped plan (legacy/epic-level tasks): 18
 
 ## Open Issue Surface (sorted by priority, then plan id)
@@ -18,7 +18,6 @@ Open issues: 55
 | #6 | Epic 6: Credential boundary | p0 | l | policy | feature | n/a | n/a | no |
 | #7 | Epic 7: Policy and approval | p0 | l | policy | feature | n/a | n/a | no |
 | #8 | Epic 8: Evidence and audit | p0 | l | evidence | feature | n/a | n/a | no |
-| #175 | AgentPod 016: Add machine-readable CLI output mode | p1 | m | cli | feature | cli-ux | n/a | yes |
 | #176 | AgentPod 017: Add session selection UX | p1 | m | runtime | feature | cli-ux | n/a | yes |
 | #177 | AgentPod 018: Add evidence path surfacing to every run | p1 | m | evidence | infra | cli-ux | n/a | yes |
 | #178 | AgentPod 019: Add concise command risk labels | p1 | m | policy | infra | cli-ux | n/a | yes |
@@ -68,7 +67,7 @@ Open issues: 55
 
 ## Priority and area buckets (open issues)
 
-- p0=8 | p1=25 | p2=22 | n/a=0
+- p0=8 | p1=24 | p2=22 | n/a=0
 
 ```text
 runtime                      17
@@ -76,7 +75,7 @@ policy                       10
 docs                         9
 evidence                     7
 security                     4
-cli                          3
+cli                          2
 n/a                          2
 remote                       2
 install                      1
@@ -84,15 +83,15 @@ install                      1
 
 ## Recommended next 12 execution items (p0/p1 first)
 
-1. #175: AgentPod 016: Add machine-readable CLI output mode
-2. #176: AgentPod 017: Add session selection UX
-3. #177: AgentPod 018: Add evidence path surfacing to every run
-4. #178: AgentPod 019: Add concise command risk labels
-5. #185: AgentPod 026: Add direct-host sensitive-path deny defaults
-6. #186: AgentPod 027: Add direct-host audit parity with AgentPod runs
-7. #194: AgentPod 035: Add explicit mount policy for Podman
-8. #195: AgentPod 036: Add Podman credential isolation checks
-9. #196: AgentPod 037: Add Podman network mode reporting
-10. #197: AgentPod 038: Add Podman image provenance pinning
-11. #203: AgentPod 044: Add remote capability attestation placeholder
-12. #204: AgentPod 045: Add remote workspace packaging plan
+1. #176: AgentPod 017: Add session selection UX
+2. #177: AgentPod 018: Add evidence path surfacing to every run
+3. #178: AgentPod 019: Add concise command risk labels
+4. #185: AgentPod 026: Add direct-host sensitive-path deny defaults
+5. #186: AgentPod 027: Add direct-host audit parity with AgentPod runs
+6. #194: AgentPod 035: Add explicit mount policy for Podman
+7. #195: AgentPod 036: Add Podman credential isolation checks
+8. #196: AgentPod 037: Add Podman network mode reporting
+9. #197: AgentPod 038: Add Podman image provenance pinning
+10. #203: AgentPod 044: Add remote capability attestation placeholder
+11. #204: AgentPod 045: Add remote workspace packaging plan
+12. #205: AgentPod 046: Add remote evidence return contract
