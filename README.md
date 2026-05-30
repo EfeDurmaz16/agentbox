@@ -296,8 +296,9 @@ tests exist.
 
 **How AgentPods work today:**
 - `direct-host` runs commands on the host with Agentbox shims, daemon policy,
-  approvals, and hash-chained audit/evidence. It is not a filesystem, process,
-  or packet sandbox.
+  approvals, explicit environment/credential grants, and hash-chained
+  audit/evidence. It clears the ambient daemon environment before exec; it is
+  not a filesystem, process, or packet sandbox.
 - Podman compatibility can run container-backed sessions where available, but
   it does not prove Agentbox-owned native isolation.
 - Native Linux execution is prototype-gated. macOS and Windows native providers

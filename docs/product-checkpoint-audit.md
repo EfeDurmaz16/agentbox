@@ -30,6 +30,7 @@ Podman remains compatibility-only. These support levels must stay explicit.
 | --- | --- | --- |
 | Direct host governed command execution | Shipped | `agentbox run --provider direct-host --risk low --json -- echo ok` |
 | Direct host policy, approval, credential, audit, and evidence path | Shipped | `cargo test -p agentbox-daemon` |
+| Direct host default environment boundary | Shipped | ambient daemon env is cleared; only explicit `ExecCommand.env` and approved credential env grants are injected |
 | Provider truth and bridge health reports | Shipped | `agentbox providers --json`, `agentbox bridge-health --json`, `agentbox provider-gaps --json` |
 | Run-plan preview without execution | Shipped | `agentbox run --plan --json -- <cmd>` |
 | Session evidence bundle and AgentPod native receipt rendering | Shipped | `agentbox evidence --session <id> --bundle <dir>`, `agentbox evidence --session <id> --agentpod-receipt` |
@@ -67,6 +68,8 @@ metadata, but it must not imply enforcement.
 - macOS and Windows native providers intentionally remain unavailable without
   platform lifecycle proof.
 - Release signing is still an explicit unsigned placeholder.
+- Direct-host env clearing reduces ambient credential exposure, but direct-host
+  still has a weak/no OS sandbox boundary.
 
 ## Operator Commands
 
@@ -106,6 +109,18 @@ gaps:
    weakening current credential restrictions.
 5. Installer UX: turn provider gap reports and bridge health into guided setup
    output for first-run operators.
+
+## Product Credibility Gates
+
+Paid-product readiness needs a tested installer and recovery path, supportable
+diagnostics, evidence verification before support decisions, rollback guidance
+for daemon/shim/provider setup, and explicit platform/provider limits wherever
+claims appear.
+
+OSS-proud readiness needs reproducible fresh-checkout setup, documented tests
+and smokes with honest skip behavior, examples tied to runnable behavior,
+contribution/issue labeling for real work, and provider status that does not
+overclaim native support.
 
 ## Claim Boundary
 

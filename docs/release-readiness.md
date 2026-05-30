@@ -68,6 +68,9 @@ doctor report without mutating host state.
 - [ ] Any installer or package follows
       [installer packaging](installer-packaging.md) and was tested on a clean
       host for that platform.
+- [ ] Installer output clearly reports which providers are shipped,
+      experimental, prototype-gated, descriptor-only, or unavailable on that
+      host.
 - [ ] `signing.json` says `signed: false` unless real artifact signing and
       verification are configured for the release.
 - [ ] `agentbox install` creates shims in `~/.agentbox/shims`.
@@ -90,6 +93,9 @@ doctor report without mutating host state.
 - [ ] Approval-bucket commands request approval or deny on timeout.
 - [ ] Block-bucket commands deny without notification.
 - [ ] Absolute-path and direct-syscall bypass limits are documented.
+- [ ] Direct-host execution is documented as clearing the ambient daemon
+      environment and injecting only explicit `ExecCommand.env` entries plus
+      approved credential environment grants.
 - [ ] ntfy config is generated and documented.
 - [ ] Failure modes are clear when the daemon is unavailable.
 
@@ -115,6 +121,8 @@ doctor report without mutating host state.
 ## Policy Boundaries
 
 - [x] Host environment inheritance is rejected.
+- [x] Direct-host child processes do not inherit the daemon's ambient
+      environment by default.
 - [x] Host network mode is rejected.
 - [x] Protected paths require explicit file grants.
 - [x] Denied domains win before allowlists or approval grants.
@@ -144,6 +152,33 @@ doctor report without mutating host state.
 - [ ] `docs/glossary.md` defines public vocabulary.
 - [ ] `docs/installer-packaging.md` matches the actual package state.
 - [ ] Release notes say what is shipped, experimental, prototype, and planned.
+
+## Paid Product Credibility
+
+- [ ] Clean install, upgrade, uninstall, and recovery flows are tested on each
+      claimed platform.
+- [ ] Support artifacts are actionable: doctor output, setup plan, provider
+      gaps, bridge health, logs, and evidence bundle paths can be collected
+      without exposing secrets.
+- [ ] Evidence verification is part of the support playbook before trusting a
+      session bundle or receipt.
+- [ ] Rollback is documented for daemon state, shims, config, and failed
+      provider setup.
+- [ ] Platform and provider limits are shown in product UI, CLI output, README,
+      and release notes without implying native support that is not live-tested.
+
+## OSS-Proud Credibility
+
+- [ ] Fresh checkout setup is reproducible with documented commands and no
+      private services.
+- [ ] Unit tests, contract tests, and relevant smoke scripts are documented with
+      skip conditions that do not count as passes.
+- [ ] Examples exercise shipped or explicitly experimental behavior, not
+      roadmap-only provider claims.
+- [ ] Contribution docs, issue templates or labels, and maintainer expectations
+      help contributors find real work.
+- [ ] Provider status is honest in docs and CLI output: shipped, experimental,
+      prototype-gated, descriptor-only, unavailable, or planned.
 
 ## Public Claim Check
 

@@ -8,12 +8,20 @@ public boundary for what Agentbox can and cannot currently claim.
 Shipped direct-host mode governs commands that enter through Agentbox shims.
 It can approve, block, and audit common shell actions.
 
+Environment behavior is intentionally narrow. Direct-host command execution
+does not inherit the ambient daemon environment. The child process receives only
+the explicit environment attached to the `ExecCommand` request and any approved
+credential environment grants. This limits accidental credential bleed, but it
+does not turn direct-host mode into an OS sandbox.
+
 Limitations:
 
 - absolute paths can bypass PATH shims
 - direct syscalls are not intercepted
 - code running inside an interpreter can perform work without spawning a
   shimmed command
+- explicit environment or credential grants can still be read, copied, printed,
+  or exfiltrated by the process that receives them
 - browser, keychain, wallet, and cloud SDK APIs are not fully mediated
 - a local user with access to the same account can alter config, DB files, or
   process state
