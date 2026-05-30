@@ -90,8 +90,12 @@ native plan exposes ordered `runner_phases` so the namespace, workspace bind,
 overlayfs, Landlock, seccomp, and exec stages can be reviewed separately;
 each phase carries a stable `agentpod.linux.runner.*` evidence event name so
 plans and post-run evidence use the same lifecycle vocabulary. Workspace bind,
-overlayfs, Landlock, and seccomp are prototype phases. This is still a
-prototype primitive: live execution must be explicitly gated with
+overlayfs, Landlock, and seccomp are prototype phases. The Linux eBPF descriptor
+also exposes observability receipt templates for process exec, process exit,
+and network connect events; each template identifies provider, session, cgroup
+path, PID/TGID fallback fields, and event identity fields while staying
+`descriptor-only-or-unobserved` and `observed-only`. This is still a prototype
+primitive: live execution must be explicitly gated with
 `AGENTBOX_LINUX_NATIVE`, and it is not a complete sandbox claim until the
 remaining loaders and provider lifecycle are wired and tested on Linux.
 Session evidence bundles for AgentPod providers include an optional native

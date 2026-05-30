@@ -1466,6 +1466,7 @@ pub struct LinuxEbpfObservabilityPlan {
     pub provider: String,
     pub correlation: LinuxEbpfCorrelationPlan,
     pub event_sources: Vec<LinuxEbpfEventSourcePlan>,
+    pub receipts: Vec<LinuxEbpfObservabilityReceiptPlan>,
     pub required_capabilities: Vec<String>,
     pub required_maps: Vec<String>,
     pub enforcement: LinuxEbpfEnforcementMode,
@@ -1490,6 +1491,22 @@ pub struct LinuxEbpfEventSourcePlan {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LinuxEbpfObservabilityReceiptPlan {
+    pub schema_version: i64,
+    pub provider: String,
+    pub session_id: String,
+    pub event_type: String,
+    pub source: String,
+    pub evidence_stream: String,
+    pub correlation: LinuxEbpfCorrelationPlan,
+    pub process_identity_fields: Vec<String>,
+    pub event_identity_fields: Vec<String>,
+    pub status: String,
+    pub enforcement: String,
+    pub claim_boundary: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LinuxEbpfEnforcementMode {
     ObservedOnly,
 }
@@ -1504,33 +1521,41 @@ impl LinuxEbpfObserverDescriptor {
             ));
         }
 
+        let provider = "agentpod-linux".to_string();
+        let session_id = spec.id.clone();
+        let correlation = LinuxEbpfCorrelationPlan {
+            preferred_key: "cgroup_path".into(),
+            cgroup_path: format!("/sys/fs/cgroup/agentbox-{}", spec.id),
+            pid_fallback: true,
+            manifest_label_keys: sorted_label_keys(spec),
+        };
+        let event_sources = vec![
+            LinuxEbpfEventSourcePlan {
+                event_type: "linux.process.exec".into(),
+                source: "tracepoint:sched:sched_process_exec".into(),
+                evidence_use: "command lineage and binary path evidence".into(),
+            },
+            LinuxEbpfEventSourcePlan {
+                event_type: "linux.process.exit".into(),
+                source: "tracepoint:sched:sched_process_exit".into(),
+                evidence_use: "process lifetime and exit correlation".into(),
+            },
+            LinuxEbpfEventSourcePlan {
+                event_type: "linux.network.connect".into(),
+                source: "cgroup/connect observer".into(),
+                evidence_use: "destination metadata for network boundary evidence".into(),
+            },
+        ];
+        let receipts =
+            linux_ebpf_observability_receipts(&provider, &session_id, &correlation, &event_sources);
+
         Ok(LinuxEbpfObservabilityPlan {
             schema_version: 1,
-            session_id: spec.id.clone(),
-            provider: "agentpod-linux".into(),
-            correlation: LinuxEbpfCorrelationPlan {
-                preferred_key: "cgroup_path".into(),
-                cgroup_path: format!("/sys/fs/cgroup/agentbox-{}", spec.id),
-                pid_fallback: true,
-                manifest_label_keys: sorted_label_keys(spec),
-            },
-            event_sources: vec![
-                LinuxEbpfEventSourcePlan {
-                    event_type: "linux.process.exec".into(),
-                    source: "tracepoint:sched:sched_process_exec".into(),
-                    evidence_use: "command lineage and binary path evidence".into(),
-                },
-                LinuxEbpfEventSourcePlan {
-                    event_type: "linux.process.exit".into(),
-                    source: "tracepoint:sched:sched_process_exit".into(),
-                    evidence_use: "process lifetime and exit correlation".into(),
-                },
-                LinuxEbpfEventSourcePlan {
-                    event_type: "linux.network.connect".into(),
-                    source: "cgroup/connect observer".into(),
-                    evidence_use: "destination metadata for network boundary evidence".into(),
-                },
-            ],
+            session_id,
+            provider,
+            correlation,
+            event_sources,
+            receipts,
             required_capabilities: vec!["CAP_BPF".into(), "CAP_PERFMON".into()],
             required_maps: vec![
                 "agentbox_session_correlation".into(),
@@ -1542,6 +1567,48 @@ impl LinuxEbpfObserverDescriptor {
             evidence_claim:
                 "eBPF observer descriptor only; observed events are not enforcement proof".into(),
         })
+    }
+}
+
+fn linux_ebpf_observability_receipts(
+    provider: &str,
+    session_id: &str,
+    correlation: &LinuxEbpfCorrelationPlan,
+    event_sources: &[LinuxEbpfEventSourcePlan],
+) -> Vec<LinuxEbpfObservabilityReceiptPlan> {
+    event_sources
+        .iter()
+        .map(|source| LinuxEbpfObservabilityReceiptPlan {
+            schema_version: 1,
+            provider: provider.to_string(),
+            session_id: session_id.to_string(),
+            event_type: source.event_type.clone(),
+            source: source.source.clone(),
+            evidence_stream: format!("{provider}/{session_id}/ebpf-observability"),
+            correlation: correlation.clone(),
+            process_identity_fields: vec![
+                "provider".into(),
+                "session_id".into(),
+                "pid".into(),
+                "tgid".into(),
+                "cgroup_path".into(),
+            ],
+            event_identity_fields: linux_ebpf_event_identity_fields(&source.event_type),
+            status: "descriptor-only-or-unobserved".into(),
+            enforcement: "observed-only".into(),
+            claim_boundary:
+                "eBPF observability receipt schema only; event observation identifies process/session and is not enforcement proof"
+                    .into(),
+        })
+        .collect()
+}
+
+fn linux_ebpf_event_identity_fields(event_type: &str) -> Vec<String> {
+    match event_type {
+        "linux.process.exec" => vec!["binary".into(), "argv_redacted".into()],
+        "linux.process.exit" => vec!["exit_code".into(), "duration_ms".into()],
+        "linux.network.connect" => vec!["destination".into(), "protocol".into()],
+        _ => Vec::new(),
     }
 }
 
@@ -3806,10 +3873,78 @@ printf landlock-policy-ok
             .event_sources
             .iter()
             .any(|source| source.event_type == "linux.network.connect"));
+        assert_eq!(plan.receipts.len(), plan.event_sources.len());
+        assert!(plan.receipts.iter().all(|receipt| {
+            receipt.provider == "agentpod-linux"
+                && receipt.session_id == plan.session_id
+                && receipt.correlation.cgroup_path == plan.correlation.cgroup_path
+                && receipt.status == "descriptor-only-or-unobserved"
+                && receipt.enforcement == "observed-only"
+        }));
         assert!(plan.required_capabilities.contains(&"CAP_BPF".into()));
         assert_eq!(plan.enforcement, LinuxEbpfEnforcementMode::ObservedOnly);
         assert!(plan.requires_loader);
         assert!(plan.evidence_claim.contains("not enforcement proof"));
+    }
+
+    #[test]
+    fn ebpf_observability_receipts_identify_session_process_without_enforcement_claim() {
+        let mut spec = MinipodSpec::for_agent_task("hermes", "/tmp/agentbox-work");
+        spec.id = "session-ebpf".into();
+        spec.labels.insert("risk".into(), "high".into());
+
+        let plan = LinuxEbpfObserverDescriptor::plan(&spec).unwrap();
+        let exec_receipt = plan
+            .receipts
+            .iter()
+            .find(|receipt| receipt.event_type == "linux.process.exec")
+            .expect("process exec receipt is part of the eBPF contract");
+        let network_receipt = plan
+            .receipts
+            .iter()
+            .find(|receipt| receipt.event_type == "linux.network.connect")
+            .expect("network connect receipt is part of the eBPF contract");
+
+        assert_eq!(exec_receipt.schema_version, 1);
+        assert_eq!(exec_receipt.provider, "agentpod-linux");
+        assert_eq!(exec_receipt.session_id, "session-ebpf");
+        assert_eq!(
+            exec_receipt.evidence_stream,
+            "agentpod-linux/session-ebpf/ebpf-observability"
+        );
+        assert_eq!(exec_receipt.correlation.preferred_key, "cgroup_path");
+        assert_eq!(
+            exec_receipt.correlation.cgroup_path,
+            "/sys/fs/cgroup/agentbox-session-ebpf"
+        );
+        assert!(exec_receipt.correlation.pid_fallback);
+        assert!(exec_receipt
+            .correlation
+            .manifest_label_keys
+            .contains(&"risk".to_string()));
+        assert!(exec_receipt
+            .process_identity_fields
+            .contains(&"session_id".to_string()));
+        assert!(exec_receipt
+            .process_identity_fields
+            .contains(&"pid".to_string()));
+        assert!(exec_receipt
+            .process_identity_fields
+            .contains(&"tgid".to_string()));
+        assert!(exec_receipt
+            .process_identity_fields
+            .contains(&"cgroup_path".to_string()));
+        assert!(exec_receipt
+            .event_identity_fields
+            .contains(&"binary".to_string()));
+        assert!(network_receipt
+            .event_identity_fields
+            .contains(&"destination".to_string()));
+        assert_eq!(network_receipt.enforcement, "observed-only");
+        assert_eq!(network_receipt.status, "descriptor-only-or-unobserved");
+        assert!(network_receipt
+            .claim_boundary
+            .contains("not enforcement proof"));
     }
 
     #[test]
@@ -3884,6 +4019,12 @@ printf landlock-policy-ok
             plan.ebpf.enforcement,
             LinuxEbpfEnforcementMode::ObservedOnly
         );
+        assert!(plan.ebpf.receipts.iter().any(|receipt| {
+            receipt.event_type == "linux.process.exec"
+                && receipt.session_id == spec.id
+                && receipt.correlation.pid_fallback
+                && receipt.claim_boundary.contains("not enforcement proof")
+        }));
     }
 
     #[test]

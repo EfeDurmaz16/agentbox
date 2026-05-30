@@ -92,12 +92,30 @@ The `enforcement` field must stay explicit:
 - `blocked-by-bpf`: only valid after a live test proves the exact hook denied
   the action.
 
+## Receipt Contract
+
+The Linux native plan now carries eBPF observability receipt templates before any
+loader is wired. Each template is deliberately marked
+`descriptor-only-or-unobserved` and `observed-only`. It identifies:
+
+- provider and session id
+- preferred cgroup path correlation key
+- PID/TGID fallback fields for short-lived process trees
+- manifest label keys used to join policy metadata
+- event identity fields for process exec, process exit, or network connect
+
+These receipts are evidence schemas, not observed kernel events. A session can
+use them to explain how a future collector will join kernel events back to an
+AgentPod process/session, but the receipts must not be interpreted as denial or
+policy enforcement proof.
+
 ## Implementation Path
 
 1. Keep `agentpod-linux` unavailable.
 2. Add a Linux-only `EbpfObserverPlan` model with program names, required
-   capabilities, map names, and event schemas. The native execution plan now
-   carries this observed-only descriptor without adding a live loader.
+   capabilities, map names, event schemas, and descriptor-only observability
+   receipts. The native execution plan now carries this observed-only descriptor
+   without adding a live loader.
 3. Add a userspace collector interface that can ingest events from a future eBPF
    loader without depending on the loader in the core runtime.
 4. Add session evidence export for observed process and network events.
