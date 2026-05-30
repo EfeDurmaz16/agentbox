@@ -4027,7 +4027,7 @@ fn default_linux_agentpod_pids_max_for_risk(risk: &AgentPodRiskLevel) -> u32 {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(test, target_os = "linux"))]
 fn wait_for_child_output(
     child: std::process::Child,
     timeout_seconds: Option<u64>,
