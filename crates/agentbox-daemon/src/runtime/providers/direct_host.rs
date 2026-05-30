@@ -69,8 +69,7 @@ impl RuntimeProvider for DirectHostRuntimeProvider {
                 status: ProviderImplementationStatus::Shipped,
                 active: true,
                 requires_gate: None,
-                enforcement_scope:
-                    "weak dev/fallback command mediation only; no OS sandbox boundary",
+                enforcement_scope: "weak dev/fallback command mediation only; absolute-path calls can bypass PATH shims; no OS sandbox boundary",
             },
             BoundaryPrimitiveStatus {
                 primitive: "daemon-policy",
@@ -241,8 +240,7 @@ mod tests {
                     status: ProviderImplementationStatus::Shipped,
                     active: true,
                     requires_gate: None,
-                    enforcement_scope:
-                        "weak dev/fallback command mediation only; no OS sandbox boundary",
+                    enforcement_scope: "weak dev/fallback command mediation only; absolute-path calls can bypass PATH shims; no OS sandbox boundary",
                 },
                 BoundaryPrimitiveStatus {
                     primitive: "daemon-policy",
@@ -289,6 +287,62 @@ mod tests {
             result.stdout.trim(),
             std::fs::canonicalize(&workspace).unwrap().to_string_lossy()
         );
+        std::fs::remove_dir_all(&workspace).ok();
+    }
+
+    #[tokio::test]
+    async fn direct_host_provider_does_not_expand_shell_syntax_without_shell() {
+        let provider = DirectHostRuntimeProvider::new();
+        let result = provider
+            .exec(
+                "session",
+                &ExecCommand {
+                    argv: vec!["echo".into(), "agentbox-$(pwd)".into()],
+                    working_dir: None,
+                    env: HashMap::new(),
+                    timeout_seconds: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(result.stdout.trim(), "agentbox-$(pwd)");
+    }
+
+    #[tokio::test]
+    async fn direct_host_absolute_path_execution_is_documented_as_shim_bypass() {
+        let workspace = std::env::temp_dir().join(format!(
+            "agentbox-direct-host-absolute-path-test-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&workspace).unwrap();
+        let spec = MinipodSpec::for_agent_task("direct", &workspace);
+        let provider = DirectHostRuntimeProvider::new();
+        let session = provider.create(&spec).await.unwrap();
+        let result = provider
+            .exec_session(
+                &session,
+                &ExecCommand {
+                    argv: vec!["/bin/pwd".into()],
+                    working_dir: Some("/workspace".into()),
+                    env: HashMap::new(),
+                    timeout_seconds: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(
+            result.stdout.trim(),
+            std::fs::canonicalize(&workspace).unwrap().to_string_lossy()
+        );
+        assert!(provider
+            .boundary_primitive_statuses()
+            .iter()
+            .any(|status| status.primitive == "path-shim"
+                && status.enforcement_scope.contains("absolute-path")));
         std::fs::remove_dir_all(&workspace).ok();
     }
 
