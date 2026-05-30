@@ -111,7 +111,7 @@ check_contract_mode() {
 
   "${CLI[@]}" setup-plan --provider podman --json >"$TMP/setup-plan-podman.json"
   validate_json "$TMP/setup-plan-podman.json" \
-    "data.get('schema_version') == 1 and data.get('provider') == 'podman' and any(step.get('check') in ['podman provider', 'podman CLI'] for step in data.get('steps', []))"
+    "data.get('schema_version') == 1 and data.get('provider') == 'podman' and data.get('required_failed') == 0 and data.get('ready_for_required_setup') == True and all(step.get('severity') == 'advisory' and step.get('check') in ['podman CLI', 'podman machine', 'podman host bridge'] for step in data.get('steps', []))"
 
   log "Podman lifecycle contract smoke passed"
 }
