@@ -4,6 +4,11 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
+CLI=(cargo run --locked -q -p agentbox-cli --)
+CONTRACT_ONLY="${AGENTBOX_PODMAN_BRIDGE_CONTRACT_ONLY:-0}"
+INTENDED_BRIDGE_PATH="/run/agentbox.sock"
+SHIM_SOCKET_LINK="/root/.agentbox/agentbox.sock"
+
 log() {
   printf '\n==> %s\n' "$*"
 }
@@ -16,6 +21,47 @@ skip() {
 require() {
   command -v "$1" >/dev/null 2>&1 || skip "$1 is not installed"
 }
+
+validate_json() {
+  local file="$1"
+  local expression="$2"
+  python3 - "$file" "$expression" <<'PY'
+import json
+import sys
+
+path, expression = sys.argv[1], sys.argv[2]
+with open(path, "r", encoding="utf-8") as fh:
+    data = json.load(fh)
+
+safe_globals = {"__builtins__": {}, "all": all, "any": any, "len": len}
+if not eval(expression, safe_globals, {"data": data}):
+    raise SystemExit(f"JSON contract failed for {path}: {expression}")
+PY
+}
+
+check_contract_mode() {
+  local tmp
+  tmp="$(mktemp -d "${TMPDIR:-/tmp}/agentbox-podman-bridge-contract.XXXXXX")"
+  trap 'rm -rf "$tmp"' RETURN
+
+  log "checking Podman bridge metadata contract without live provider"
+  "${CLI[@]}" bridge-health --provider podman --json >"$tmp/bridge-health-podman.json"
+  validate_json "$tmp/bridge-health-podman.json" \
+    "len(data) == 1 and data[0].get('provider') == 'podman' and data[0].get('readiness', {}).get('verdict') in ['active-if-podman-available', 'needs-podman-prereqs'] and data[0].get('readiness', {}).get('next_command') == 'agentbox setup-plan --provider podman' and data[0].get('bridge_health', {}).get('policy', {}).get('supported') == True and data[0].get('bridge_health', {}).get('approval', {}).get('supported') == True and data[0].get('bridge_health', {}).get('credentials', {}).get('supported') == True and data[0].get('bridge_health', {}).get('evidence', {}).get('supported') == True and data[0].get('bridge_health', {}).get('kill_switch', {}).get('supported') == True and data[0].get('bridge_health', {}).get('network', {}).get('supported') == False and 'UnixSocket' in data[0].get('bridge_health', {}).get('transports', []) and data[0].get('verification_command') == 'agentbox run --provider podman -- <cmd>'"
+
+  "${CLI[@]}" setup-plan --provider podman --json >"$tmp/setup-plan-podman.json"
+  validate_json "$tmp/setup-plan-podman.json" \
+    "data.get('schema_version') == 1 and data.get('provider') == 'podman' and data.get('required_failed') == 0 and data.get('ready_for_required_setup') == True and all(step.get('severity') == 'advisory' for step in data.get('steps', [])) and any(step.get('check') == 'podman host bridge' and 'compatibility bridge' in step.get('action', '') for step in data.get('steps', []))"
+
+  log "Podman bridge contract smoke passed"
+}
+
+if [[ "$CONTRACT_ONLY" = "1" ]]; then
+  require cargo
+  require python3
+  check_contract_mode
+  exit 0
+fi
 
 require cargo
 require podman
@@ -62,7 +108,6 @@ log "resolving Linux guest shim artifact"
 SHIM="$(resolve_linux_shim)"
 
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/agentbox-podman-bridge.XXXXXX")"
-HOME_IN_CONTAINER="/tmp/agentbox-home"
 SOCKET_DIR="$TMP/home/.agentbox"
 SOCKET="$SOCKET_DIR/agentbox.sock"
 SERVER_PID=""
@@ -117,17 +162,17 @@ done
 
 log "proving daemon socket is visible inside a Podman minipod"
 podman run --rm \
-  -v "$SOCKET:$HOME_IN_CONTAINER/.agentbox/agentbox.sock:ro" \
+  -v "$SOCKET:$INTENDED_BRIDGE_PATH:ro" \
   alpine:3.20 \
-  sh -c "test -S '$HOME_IN_CONTAINER/.agentbox/agentbox.sock'"
+  sh -c "test -S '$INTENDED_BRIDGE_PATH' && ! test -e '$SHIM_SOCKET_LINK'"
 
-log "proving injected shim can execute and reach the mounted socket"
+log "proving injected shim can execute through the provider bridge path"
 podman run --rm \
-  -e "HOME=$HOME_IN_CONTAINER" \
+  -e "HOME=/root" \
   -e "AGENTBOX_FAIL_MODE=closed" \
-  -v "$SOCKET:$HOME_IN_CONTAINER/.agentbox/agentbox.sock:ro" \
+  -v "$SOCKET:$INTENDED_BRIDGE_PATH:ro" \
   -v "$SHIM:/usr/local/bin/agentbox-shim:ro" \
   alpine:3.20 \
-  sh -c 'ln -sf /usr/local/bin/agentbox-shim /usr/local/bin/git && PATH="/usr/local/bin:/bin:/usr/bin" git push origin main 2>/tmp/agentbox-shim.err; test "$?" -ne 0 && grep -qi "blocked\\|denied\\|podman bridge smoke" /tmp/agentbox-shim.err'
+  sh -c "mkdir -p /root/.agentbox && ln -sf '$INTENDED_BRIDGE_PATH' '$SHIM_SOCKET_LINK' && test \"\$(readlink '$SHIM_SOCKET_LINK')\" = '$INTENDED_BRIDGE_PATH' && ln -sf /usr/local/bin/agentbox-shim /usr/local/bin/git && PATH=\"/usr/local/bin:/bin:/usr/bin\" git push origin main 2>/tmp/agentbox-shim.err; test \"\$?\" -ne 0 && grep -qi \"blocked\\|denied\\|podman bridge smoke\" /tmp/agentbox-shim.err"
 
 log "podman daemon socket and shim bridge smoke passed"
