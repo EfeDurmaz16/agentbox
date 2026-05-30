@@ -3316,7 +3316,15 @@ async fn cmd_run(options: RunOptions) {
             risk: risk.clone(),
         })
         .unwrap_or_else(|e| {
-            eprintln!("Error: failed to select runtime provider: {}", e);
+            eprintln!(
+                "{}",
+                format_actionable_provider_unavailable(
+                    "agentbox run",
+                    provider_hint.as_deref(),
+                    &risk,
+                    &e.to_string(),
+                )
+            );
             std::process::exit(1);
         });
     // 2. Build governed AgentPod manifest.
@@ -3569,27 +3577,17 @@ async fn cmd_run(options: RunOptions) {
             );
         } else {
             eprintln!(
-                "Error: provider `{}` is not runnable in this build yet.",
-                selection.selected_provider
+                "{}",
+                format_actionable_provider_unavailable(
+                    "agentbox run",
+                    Some(&selection.selected_provider),
+                    &spec.risk,
+                    &runtime_provider_unavailable_reason(
+                        &selection.selected_provider,
+                        &selection.reason
+                    ),
+                )
             );
-            eprintln!("reason: {}", selection.reason);
-            if selection.selected_provider == "agentpod-linux" {
-                eprintln!(
-                "hint: inspect the native prototype plan with `agentbox native-plan --provider agentpod-linux -- <cmd>`"
-            );
-                eprintln!(
-                "hint: Linux prototype execution runs through `agentbox run` only on Linux with AGENTBOX_LINUX_NATIVE=1"
-            );
-            } else if selection.selected_provider == "remote-agentpod" {
-                eprintln!(
-                    "hint: set AGENTBOX_REMOTE_AGENTPOD_ENDPOINT=https://... for a production worker"
-                );
-                eprintln!(
-                    "hint: loopback HTTP workers require AGENTBOX_REMOTE_AGENTPOD_ALLOW_HTTP_LOOPBACK=1"
-                );
-            } else {
-                eprintln!("hint: use `--provider podman` for the current compatibility backend");
-            }
             std::process::exit(1);
         }
     }
@@ -3602,12 +3600,15 @@ async fn cmd_run(options: RunOptions) {
                 eprintln!("Using {}", ver.trim());
             }
             _ => {
-                eprintln!("Error: no runnable AgentPod backend is available yet.");
-                eprintln!("The current compatibility backend requires Podman:");
                 eprintln!(
-                    "  macOS: brew install podman && podman machine init && podman machine start"
+                    "{}",
+                    format_actionable_provider_unavailable(
+                        "agentbox run",
+                        Some("podman"),
+                        &spec.risk,
+                        "podman --version failed; Podman is required before the podman compatibility provider can run",
+                    )
                 );
-                eprintln!("  Linux: https://podman.io/docs/installation");
                 std::process::exit(1);
             }
         }
@@ -3716,7 +3717,22 @@ async fn cmd_run(options: RunOptions) {
             session
         }
         Err(e) => {
-            eprintln!("Error: failed to create minipod: {}", e);
+            if matches!(
+                e.kind(),
+                agentbox_daemon::runtime::provider::RuntimeErrorKind::Unavailable
+            ) {
+                eprintln!(
+                    "{}",
+                    format_actionable_provider_unavailable(
+                        "agentbox run",
+                        Some(&selection.selected_provider),
+                        &spec.risk,
+                        &e.to_string(),
+                    )
+                );
+            } else {
+                eprintln!("Error: failed to create minipod: {}", e);
+            }
             std::process::exit(1);
         }
     };
@@ -3797,7 +3813,22 @@ async fn cmd_run(options: RunOptions) {
                 }
             }
             Err(e) => {
-                eprintln!("Error: failed to run command: {}", e);
+                if matches!(
+                    e.kind(),
+                    agentbox_daemon::runtime::provider::RuntimeErrorKind::Unavailable
+                ) {
+                    eprintln!(
+                        "{}",
+                        format_actionable_provider_unavailable(
+                            "agentbox run",
+                            Some(&selection.selected_provider),
+                            &spec.risk,
+                            &e.to_string(),
+                        )
+                    );
+                } else {
+                    eprintln!("Error: failed to run command: {}", e);
+                }
                 std::process::exit(1);
             }
         }
@@ -6154,17 +6185,26 @@ fn cmd_minipod_spec(options: MinipodSpecOptions) {
     let mut spec =
         MinipodSpec::for_agent_task_with_profile(options.agent, workspace, options.agent_profile);
     spec.risk = parse_agentpod_risk(&options.risk);
+    let provider_hint = parse_provider_hint(&options.provider);
     spec.labels
         .insert("agentbox.risk".to_string(), spec.risk.label().to_string());
 
     let registry = RuntimeProviderRegistry::with_local_providers(String::new(), String::new());
     let selection = registry
         .explain_selection(&ProviderSelectionRequest {
-            preferred_provider: parse_provider_hint(&options.provider),
+            preferred_provider: provider_hint.clone(),
             risk: spec.risk.clone(),
         })
         .unwrap_or_else(|e| {
-            eprintln!("error: failed to select provider: {}", e);
+            eprintln!(
+                "{}",
+                format_actionable_provider_unavailable(
+                    "agentbox minipod-spec",
+                    provider_hint.as_deref(),
+                    &spec.risk,
+                    &e.to_string(),
+                )
+            );
             std::process::exit(1);
         });
     spec.labels.insert(
@@ -6321,6 +6361,180 @@ fn parse_provider_hint(raw: &str) -> Option<String> {
         None
     } else {
         Some(provider.to_string())
+    }
+}
+
+fn format_actionable_provider_unavailable(
+    operation: &str,
+    provider: Option<&str>,
+    risk: &agentbox_daemon::runtime::types::AgentPodRiskLevel,
+    reason: &str,
+) -> String {
+    let provider = provider
+        .map(str::trim)
+        .filter(|provider| !provider.is_empty());
+    let mut lines = vec![
+        format!("error: runtime provider unavailable for {operation}"),
+        format!(
+            "context: provider={}, risk={}",
+            provider.unwrap_or("auto"),
+            risk.label()
+        ),
+        format!("reason: {}", reason.trim()),
+        format!(
+            "required gate: {}",
+            actionable_provider_required_gate(provider, reason)
+        ),
+        "next commands:".to_string(),
+    ];
+
+    for command in actionable_provider_next_commands(provider, reason) {
+        lines.push(format!("next: {command}"));
+    }
+
+    lines.join("\n")
+}
+
+fn actionable_provider_required_gate(provider: Option<&str>, reason: &str) -> String {
+    match provider {
+        Some("agentpod-linux") => "AGENTBOX_LINUX_NATIVE=1".to_string(),
+        Some("agentpod-macos") => "AGENTBOX_MACOS_NATIVE=1".to_string(),
+        Some("agentpod-windows") => "AGENTBOX_WINDOWS_NATIVE=1".to_string(),
+        Some("remote-agentpod") => {
+            "AGENTBOX_REMOTE_AGENTPOD_ENDPOINT=https://worker.example.com/agentpod".to_string()
+        }
+        Some("podman") => "podman --version".to_string(),
+        Some("direct-host") => "agentbox daemon socket and shim PATH".to_string(),
+        _ if reason.contains("AGENTBOX_LINUX_NATIVE=1") => "AGENTBOX_LINUX_NATIVE=1".to_string(),
+        _ if reason.contains("AGENTBOX_MACOS_NATIVE=1") => "AGENTBOX_MACOS_NATIVE=1".to_string(),
+        _ if reason.contains("AGENTBOX_WINDOWS_NATIVE=1") => {
+            "AGENTBOX_WINDOWS_NATIVE=1".to_string()
+        }
+        _ if reason.contains("AGENTBOX_REMOTE_AGENTPOD_ENDPOINT") => {
+            "AGENTBOX_REMOTE_AGENTPOD_ENDPOINT=https://worker.example.com/agentpod".to_string()
+        }
+        _ if reason.contains("provider not registered") => {
+            "registered runtime provider".to_string()
+        }
+        _ => "provider readiness".to_string(),
+    }
+}
+
+fn actionable_provider_next_commands(provider: Option<&str>, reason: &str) -> Vec<String> {
+    let mut commands = Vec::new();
+    match provider {
+        Some("direct-host") => {
+            push_unique_command(
+                &mut commands,
+                "agentbox provider-readiness --provider direct-host",
+            );
+            push_unique_command(&mut commands, "agentbox setup-plan");
+            push_unique_command(&mut commands, "agentbox start");
+        }
+        Some("podman") => {
+            push_unique_command(
+                &mut commands,
+                "agentbox provider-readiness --provider podman",
+            );
+            push_unique_command(&mut commands, "agentbox setup-plan --provider podman");
+            push_unique_command(&mut commands, "podman machine init && podman machine start");
+        }
+        Some("agentpod-linux") => {
+            push_unique_command(
+                &mut commands,
+                "agentbox provider-readiness --provider agentpod-linux",
+            );
+            push_unique_command(
+                &mut commands,
+                "agentbox native-plan --provider agentpod-linux -- <cmd>",
+            );
+            push_unique_command(
+                &mut commands,
+                "AGENTBOX_LINUX_NATIVE=1 agentbox run --provider agentpod-linux -- <cmd>",
+            );
+        }
+        Some("agentpod-macos") => {
+            push_unique_command(
+                &mut commands,
+                "agentbox provider-readiness --provider agentpod-macos",
+            );
+            push_unique_command(
+                &mut commands,
+                "agentbox native-plan --provider agentpod-macos -- <cmd>",
+            );
+            push_unique_command(
+                &mut commands,
+                "AGENTBOX_MACOS_NATIVE=1 agentbox run --provider agentpod-macos -- <cmd>",
+            );
+        }
+        Some("agentpod-windows") => {
+            push_unique_command(
+                &mut commands,
+                "agentbox provider-readiness --provider agentpod-windows",
+            );
+            push_unique_command(
+                &mut commands,
+                "agentbox native-plan --provider agentpod-windows -- <cmd>",
+            );
+            push_unique_command(
+                &mut commands,
+                "AGENTBOX_WINDOWS_NATIVE=1 agentbox run --provider agentpod-windows -- <cmd>",
+            );
+        }
+        Some("remote-agentpod") => {
+            push_unique_command(
+                &mut commands,
+                "agentbox provider-readiness --provider remote-agentpod",
+            );
+            push_unique_command(
+                &mut commands,
+                "agentbox setup-plan --provider remote-agentpod",
+            );
+            push_unique_command(
+                &mut commands,
+                "export AGENTBOX_REMOTE_AGENTPOD_ENDPOINT=https://worker.example.com/agentpod",
+            );
+            push_unique_command(
+                &mut commands,
+                "agentbox remote-handshake --endpoint https://worker.example.com/agentpod",
+            );
+            if reason.contains("loopback") {
+                push_unique_command(
+                    &mut commands,
+                    "export AGENTBOX_REMOTE_AGENTPOD_ALLOW_HTTP_LOOPBACK=1",
+                );
+            }
+        }
+        Some(_) | None => {
+            push_unique_command(&mut commands, "agentbox provider-readiness");
+            push_unique_command(&mut commands, "agentbox setup-plan");
+        }
+    }
+    commands
+}
+
+fn push_unique_command(commands: &mut Vec<String>, command: &str) {
+    if !commands.iter().any(|existing| existing == command) {
+        commands.push(command.to_string());
+    }
+}
+
+fn runtime_provider_unavailable_reason(provider: &str, selection_reason: &str) -> String {
+    match provider {
+        "agentpod-linux" => {
+            "agentpod-linux prototype execution requires Linux and AGENTBOX_LINUX_NATIVE=1"
+                .to_string()
+        }
+        "agentpod-macos" => {
+            "agentpod-macos VM-backed execution requires macOS and AGENTBOX_MACOS_NATIVE=1; provider execution remains descriptor-gated".to_string()
+        }
+        "agentpod-windows" => {
+            "agentpod-windows execution requires Windows and AGENTBOX_WINDOWS_NATIVE=1; provider execution is not wired in this build".to_string()
+        }
+        "remote-agentpod" => {
+            "remote-agentpod requires AGENTBOX_REMOTE_AGENTPOD_ENDPOINT=https://worker.example.com/agentpod".to_string()
+        }
+        _ => selection_reason.to_string(),
     }
 }
 
@@ -9764,6 +9978,46 @@ mod tests {
         assert!(linux["gated"].as_array().unwrap().iter().any(|gate| {
             gate["primitive"] == "seccomp" && gate["requires_gate"] == "AGENTBOX_LINUX_NATIVE=1"
         }));
+    }
+
+    #[test]
+    fn actionable_provider_error_includes_native_gate_and_commands() {
+        let message = format_actionable_provider_unavailable(
+            "agentbox run",
+            Some("agentpod-linux"),
+            &AgentPodRiskLevel::High,
+            "provider unavailable: agentpod-linux prototype execution requires Linux and AGENTBOX_LINUX_NATIVE=1",
+        );
+
+        assert!(message.contains("error: runtime provider unavailable for agentbox run"));
+        assert!(message.contains("context: provider=agentpod-linux, risk=high"));
+        assert!(message.contains(
+            "reason: provider unavailable: agentpod-linux prototype execution requires Linux and AGENTBOX_LINUX_NATIVE=1"
+        ));
+        assert!(message.contains("required gate: AGENTBOX_LINUX_NATIVE=1"));
+        assert!(message.contains("next: agentbox provider-readiness --provider agentpod-linux"));
+        assert!(message.contains("next: agentbox native-plan --provider agentpod-linux -- <cmd>"));
+        assert!(message.contains(
+            "next: AGENTBOX_LINUX_NATIVE=1 agentbox run --provider agentpod-linux -- <cmd>"
+        ));
+    }
+
+    #[test]
+    fn actionable_provider_error_keeps_unknown_provider_generic() {
+        let message = format_actionable_provider_unavailable(
+            "agentbox minipod-spec",
+            Some("wasm"),
+            &AgentPodRiskLevel::Medium,
+            "provider unavailable: provider not registered: wasm",
+        );
+
+        assert!(message.contains("error: runtime provider unavailable for agentbox minipod-spec"));
+        assert!(message.contains("context: provider=wasm, risk=medium"));
+        assert!(message.contains("reason: provider unavailable: provider not registered: wasm"));
+        assert!(message.contains("required gate: registered runtime provider"));
+        assert!(message.contains("next: agentbox provider-readiness"));
+        assert!(message.contains("next: agentbox setup-plan"));
+        assert!(!message.contains("provider-readiness --provider wasm"));
     }
 
     #[test]
