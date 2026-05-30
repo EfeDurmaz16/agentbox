@@ -70,6 +70,9 @@ if not eval(expression, safe_globals, {}):
 PY
 }
 
+log "checking AgentPod release smoke suite"
+bash scripts/smoke-agentpod-release-suite.sh
+
 log "checking AgentPod crate visibility"
 cargo metadata --format-version 1 --no-deps >"$TMPDIR/cargo-metadata.json"
 validate_json "$TMPDIR/cargo-metadata.json" \
