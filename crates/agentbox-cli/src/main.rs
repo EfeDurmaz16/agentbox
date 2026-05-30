@@ -4899,7 +4899,7 @@ fn evidence_legacy_skip_suffix(skipped_legacy_events: usize) -> String {
     }
 }
 
-fn cmd_evidence(
+struct EvidenceOptions {
     limit: usize,
     verify: bool,
     session: Option<String>,
@@ -4908,7 +4908,20 @@ fn cmd_evidence(
     bundle_dir: Option<PathBuf>,
     agentpod_receipt: bool,
     command: Option<EvidenceCommands>,
-) {
+}
+
+fn cmd_evidence(options: EvidenceOptions) {
+    let EvidenceOptions {
+        limit,
+        verify,
+        session,
+        credentials,
+        network,
+        bundle_dir,
+        agentpod_receipt,
+        command,
+    } = options;
+
     if let Some(EvidenceCommands::Verify {
         bundle_dir: verify_bundle_dir,
     }) = command
@@ -8976,7 +8989,7 @@ async fn main() {
                 bundle_dir,
                 agentpod_receipt,
                 command,
-            } => cmd_evidence(
+            } => cmd_evidence(EvidenceOptions {
                 limit,
                 verify,
                 session,
@@ -8985,7 +8998,7 @@ async fn main() {
                 bundle_dir,
                 agentpod_receipt,
                 command,
-            ),
+            }),
             AgentPodCommands::Plan {
                 provider,
                 workspace,
@@ -9151,7 +9164,7 @@ async fn main() {
             bundle_dir,
             agentpod_receipt,
             command,
-        } => cmd_evidence(
+        } => cmd_evidence(EvidenceOptions {
             limit,
             verify,
             session,
@@ -9160,7 +9173,7 @@ async fn main() {
             bundle_dir,
             agentpod_receipt,
             command,
-        ),
+        }),
         Commands::MinipodSpec {
             agent,
             workspace,
