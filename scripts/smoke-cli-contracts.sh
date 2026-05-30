@@ -199,6 +199,42 @@ log "checking high-risk provider recommendation truth"
 validate_json "$TMPDIR/run-plan-high.json" \
   "data.get('schema_version') == 1 and data.get('selected_provider', {}).get('name', '').startswith('agentpod-') and len(data.get('selected_provider', {}).get('boundary_primitives', [])) >= 1 and any(s.get('active') == False and s.get('requires_gate') and s.get('enforcement_scope') for s in data.get('selected_provider', {}).get('boundary_primitive_statuses', [])) and any('not generally runnable' in warning for warning in data.get('warnings', []))"
 
+log "checking AgentPod grouped CLI aliases"
+"${CLI[@]}" agentpod --help >"$TMPDIR/agentpod-help.txt"
+grep -F "First-class AgentPod lifecycle commands" "$TMPDIR/agentpod-help.txt" >/dev/null
+grep -F "run" "$TMPDIR/agentpod-help.txt" >/dev/null
+grep -F "list" "$TMPDIR/agentpod-help.txt" >/dev/null
+grep -F "review" "$TMPDIR/agentpod-help.txt" >/dev/null
+"${CLI[@]}" agentpod list --json >"$TMPDIR/agentpod-list.json"
+validate_json "$TMPDIR/agentpod-list.json" \
+  "data == [] or all(item.get('id') and item.get('provider') for item in data)"
+"${CLI[@]}" agentpod inspect --help >"$TMPDIR/agentpod-inspect-help.txt"
+grep -F "Inspect persisted minipod session metadata" "$TMPDIR/agentpod-inspect-help.txt" >/dev/null
+"${CLI[@]}" agentpod evidence --help >"$TMPDIR/agentpod-evidence-help.txt"
+grep -F "Export tamper-evident audit events as JSONL" "$TMPDIR/agentpod-evidence-help.txt" >/dev/null
+"${CLI[@]}" agentpod run --plan --json -- echo agentbox-contract >"$TMPDIR/agentpod-run-plan.json"
+validate_json "$TMPDIR/agentpod-run-plan.json" \
+  "data.get('schema_version') == 1 and data.get('manifest', {}).get('kind') == 'AgentPod' and data.get('command') == ['echo', 'agentbox-contract']"
+"${CLI[@]}" agentpod plan \
+  --workspace "$TMPDIR" \
+  -- /bin/true >"$TMPDIR/agentpod-native-plan.json"
+validate_json "$TMPDIR/agentpod-native-plan.json" \
+  "data.get('schema_version') == 1 and data.get('provider') in ['agentpod-linux', 'agentpod-macos', 'agentpod-windows'] and data.get('live_execution_enabled') == False"
+"${CLI[@]}" agentpod review --help >"$TMPDIR/agentpod-review-help.txt"
+grep -F "Review workspace output for an AgentPod session" "$TMPDIR/agentpod-review-help.txt" >/dev/null
+grep -F "apply" "$TMPDIR/agentpod-review-help.txt" >/dev/null
+"${CLI[@]}" agentpod review apply --help >"$TMPDIR/agentpod-review-apply-help.txt"
+grep -F "Apply projected workspace output to the lower workspace" \
+  "$TMPDIR/agentpod-review-apply-help.txt" >/dev/null
+"${CLI[@]}" agentpod review discard --help >"$TMPDIR/agentpod-review-discard-help.txt"
+grep -F "Discard projected workspace output for an AgentPod session" \
+  "$TMPDIR/agentpod-review-discard-help.txt" >/dev/null
+"${CLI[@]}" agentpod review commit --help >"$TMPDIR/agentpod-review-commit-help.txt"
+grep -F "Apply projected workspace output and commit it in the lower workspace" \
+  "$TMPDIR/agentpod-review-commit-help.txt" >/dev/null
+grep -F "Commit message for the lower workspace" \
+  "$TMPDIR/agentpod-review-commit-help.txt" >/dev/null
+
 log "checking macOS native plan compiler truth"
 AGENTBOX_MACOS_NATIVE= "${CLI[@]}" native-plan \
   --provider agentpod-macos \

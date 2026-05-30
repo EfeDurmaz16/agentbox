@@ -61,6 +61,11 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// First-class AgentPod lifecycle commands
+    Agentpod {
+        #[command(subcommand)]
+        command: AgentPodCommands,
+    },
     /// Start the daemon in background
     Start,
     /// Remove stale daemon pid and socket files
@@ -881,6 +886,248 @@ enum Commands {
         /// Number of trailing lines to show
         #[arg(long)]
         tail: Option<usize>,
+    },
+}
+
+#[derive(Subcommand)]
+enum AgentPodCommands {
+    /// Run a command inside an isolated Agentbox minipod
+    Run {
+        /// Command to run (e.g., "openclaw start" or "npm test")
+        command: Vec<String>,
+
+        /// Runtime image (node, python, rust, go, ruby)
+        #[arg(long)]
+        runtime: Option<String>,
+
+        /// Agent policy profile (general, coding, research, deploy, or custom)
+        #[arg(long = "agent-profile", default_value = "general")]
+        agent_profile: String,
+
+        /// AgentPod task risk: low, medium, high, very-high
+        #[arg(long = "risk", default_value = "medium")]
+        risk: String,
+
+        /// Runtime provider: auto, direct-host, podman, agentpod-macos, agentpod-linux, agentpod-windows, remote-agentpod
+        #[arg(long = "provider", default_value = "auto")]
+        provider: String,
+
+        /// Print the AgentPod run plan without starting a backend
+        #[arg(long = "plan")]
+        plan: bool,
+
+        /// Emit machine-readable JSON for session/run output
+        #[arg(long)]
+        json: bool,
+
+        /// Add a service sidecar (postgres, redis, mysql, mongo)
+        #[arg(long = "with", num_args = 1..)]
+        services: Vec<String>,
+
+        /// Mount current directory into the minipod workspace (default: true)
+        #[arg(long, default_value = "true")]
+        mount_cwd: bool,
+
+        /// Workspace write mode: direct, overlay-review, ephemeral, commit-gated
+        #[arg(long = "workspace-mode")]
+        workspace_mode: Option<String>,
+
+        /// Enable a writable workspace overlay rooted at this host directory
+        #[arg(long = "workspace-overlay-dir")]
+        workspace_overlay_dir: Option<PathBuf>,
+
+        /// Resource limit: memory in MB (default: 1024)
+        #[arg(long, default_value = "1024")]
+        memory: u64,
+
+        /// Optional Linux cgroup pids.max process limit
+        #[arg(long = "max-processes")]
+        max_processes: Option<u32>,
+
+        /// Optional command timeout in seconds
+        #[arg(long = "timeout-seconds")]
+        timeout_seconds: Option<u64>,
+
+        /// Deny a Linux syscall through the AgentPod seccomp profile; repeatable
+        #[arg(long = "deny-syscall")]
+        deny_syscalls: Vec<String>,
+
+        /// Add a read-only host mount as host_path:guest_path
+        #[arg(long = "mount-ro")]
+        read_only_mounts: Vec<String>,
+
+        /// Add an explicit credential file grant as name=host_path:guest_path
+        #[arg(long = "credential-file")]
+        credential_files: Vec<String>,
+
+        /// Add an explicit environment credential grant as name=ENV_VAR
+        #[arg(long = "credential-env")]
+        credential_env: Vec<String>,
+
+        /// Add an explicit socket credential grant as name=/path/to/socket
+        #[arg(long = "credential-socket")]
+        credential_sockets: Vec<String>,
+
+        /// Add an explicit provider token grant as name=provider:token-id
+        #[arg(long = "credential-token")]
+        credential_tokens: Vec<String>,
+
+        /// Expire newly added credential grants after this many seconds
+        #[arg(long = "credential-ttl-seconds")]
+        credential_ttl_seconds: Option<i64>,
+
+        /// Load a task-scoped policy bundle JSON file
+        #[arg(long = "policy-bundle")]
+        policy_bundles: Vec<PathBuf>,
+
+        /// Network domain allowed without first-contact approval
+        #[arg(long = "allow-domain")]
+        allow_domains: Vec<String>,
+
+        /// Network policy mode: deny-by-default, allowlisted, first-contact, open-with-guardrails
+        #[arg(long = "network-mode")]
+        network_mode: Option<String>,
+
+        /// Network domain blocked for this minipod task
+        #[arg(long = "deny-domain")]
+        deny_domains: Vec<String>,
+
+        /// Disable localhost/loopback service access for this minipod task
+        #[arg(long = "deny-localhost")]
+        deny_localhost: bool,
+    },
+    /// List persisted AgentPod sessions
+    List {
+        /// Emit JSON
+        #[arg(long)]
+        json: bool,
+
+        /// Refresh the session list until interrupted
+        #[arg(long)]
+        watch: bool,
+
+        /// Watch refresh interval in seconds
+        #[arg(long = "interval-seconds", default_value_t = 2)]
+        interval_seconds: u64,
+
+        /// Filter by provider
+        #[arg(long)]
+        provider: Option<String>,
+
+        /// Filter by status substring, e.g. running, stopped, failed
+        #[arg(long)]
+        status: Option<String>,
+    },
+    /// Inspect persisted minipod session metadata
+    Inspect {
+        /// Session id to inspect; omit to list all persisted sessions
+        session_id: Option<String>,
+
+        /// Emit JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Export tamper-evident audit events as JSONL
+    Evidence {
+        /// Number of events to export
+        #[arg(long, default_value_t = 100)]
+        limit: usize,
+
+        /// Verify the audit hash chain instead of exporting rows
+        #[arg(long)]
+        verify: bool,
+
+        /// Export a session-scoped evidence bundle with redacted command transcripts
+        #[arg(long)]
+        session: Option<String>,
+
+        /// Export only session credential grants/events as JSONL
+        #[arg(long)]
+        credentials: bool,
+
+        /// Export only network boundary audit events as JSONL
+        #[arg(long)]
+        network: bool,
+
+        /// Write a session evidence bundle directory instead of printing JSON
+        #[arg(long = "bundle")]
+        bundle_dir: Option<PathBuf>,
+
+        /// Show only the AgentPod native receipt summary from a session or bundle
+        #[arg(long = "agentpod-receipt")]
+        agentpod_receipt: bool,
+    },
+    /// Generate a native provider execution plan without running it
+    Plan {
+        /// Native provider: auto, agentpod-linux, agentpod-macos, or agentpod-windows
+        #[arg(long = "provider", default_value = "auto")]
+        provider: String,
+
+        /// Workspace directory for the AgentPod plan
+        #[arg(long)]
+        workspace: Option<PathBuf>,
+
+        /// Agent policy profile (general, coding, research, deploy, or custom)
+        #[arg(long = "agent-profile", default_value = "general")]
+        agent_profile: String,
+
+        /// AgentPod task risk: low, medium, high, very-high
+        #[arg(long = "risk", default_value = "medium")]
+        risk: String,
+
+        /// Deny a Linux syscall through the AgentPod seccomp profile; repeatable
+        #[arg(long = "deny-syscall")]
+        deny_syscalls: Vec<String>,
+
+        /// Optional Linux cgroup pids.max process limit
+        #[arg(long = "max-processes")]
+        max_processes: Option<u32>,
+
+        /// Command to plan; use `--` before command flags
+        command: Vec<String>,
+    },
+    /// Review workspace output for an AgentPod session
+    Review {
+        /// Session id to review
+        session_id: Option<String>,
+
+        /// Emit JSON
+        #[arg(long)]
+        json: bool,
+
+        /// Emit only the workspace patch
+        #[arg(long)]
+        patch: bool,
+
+        /// Print a keyboard-style review command menu after the summary
+        #[arg(long)]
+        tui: bool,
+
+        #[command(subcommand)]
+        command: Option<AgentPodReviewCommands>,
+    },
+}
+
+#[derive(Subcommand)]
+enum AgentPodReviewCommands {
+    /// Apply projected workspace output to the lower workspace
+    Apply {
+        /// Session id whose projected review workspace should be applied
+        session_id: String,
+    },
+    /// Discard projected workspace output for an AgentPod session
+    Discard {
+        /// Session id whose projected review workspace should be discarded
+        session_id: String,
+    },
+    /// Apply projected workspace output and commit it in the lower workspace
+    Commit {
+        /// Session id whose projected review workspace should be committed
+        session_id: String,
+
+        /// Commit message for the lower workspace
+        #[arg(short = 'm', long = "message")]
+        message: String,
     },
 }
 
@@ -8508,6 +8755,134 @@ async fn main() {
     let cli = Cli::parse();
 
     match cli.command {
+        Commands::Agentpod { command } => match command {
+            AgentPodCommands::Run {
+                command,
+                runtime,
+                agent_profile,
+                risk,
+                provider,
+                plan,
+                json,
+                services,
+                mount_cwd,
+                workspace_mode,
+                workspace_overlay_dir,
+                memory,
+                max_processes,
+                timeout_seconds,
+                deny_syscalls,
+                read_only_mounts,
+                credential_files,
+                credential_env,
+                credential_sockets,
+                credential_tokens,
+                credential_ttl_seconds,
+                policy_bundles,
+                allow_domains,
+                network_mode,
+                deny_domains,
+                deny_localhost,
+            } => {
+                cmd_run(RunOptions {
+                    command,
+                    runtime,
+                    agent_profile,
+                    risk,
+                    provider,
+                    plan,
+                    json,
+                    services,
+                    mount_cwd,
+                    workspace_mode,
+                    workspace_overlay_dir,
+                    memory,
+                    max_processes,
+                    timeout_seconds,
+                    deny_syscalls,
+                    read_only_mounts,
+                    credential_files,
+                    credential_env,
+                    credential_sockets,
+                    credential_tokens,
+                    credential_ttl_seconds,
+                    policy_bundles,
+                    allow_domains,
+                    network_mode,
+                    deny_domains,
+                    deny_localhost,
+                })
+                .await
+            }
+            AgentPodCommands::List {
+                json,
+                watch,
+                interval_seconds,
+                provider,
+                status,
+            } => cmd_pods(json, watch, interval_seconds, provider, status).await,
+            AgentPodCommands::Inspect { session_id, json } => cmd_minipod_inspect(session_id, json),
+            AgentPodCommands::Evidence {
+                limit,
+                verify,
+                session,
+                credentials,
+                network,
+                bundle_dir,
+                agentpod_receipt,
+            } => cmd_evidence(
+                limit,
+                verify,
+                session,
+                credentials,
+                network,
+                bundle_dir,
+                agentpod_receipt,
+            ),
+            AgentPodCommands::Plan {
+                provider,
+                workspace,
+                agent_profile,
+                risk,
+                deny_syscalls,
+                max_processes,
+                command,
+            } => cmd_native_plan(
+                provider,
+                workspace,
+                agent_profile,
+                risk,
+                deny_syscalls,
+                max_processes,
+                command,
+            ),
+            AgentPodCommands::Review {
+                session_id,
+                json,
+                patch,
+                tui,
+                command,
+            } => match command {
+                Some(AgentPodReviewCommands::Apply { session_id }) => cmd_review_apply(session_id),
+                Some(AgentPodReviewCommands::Discard { session_id }) => {
+                    cmd_review_discard(session_id)
+                }
+                Some(AgentPodReviewCommands::Commit {
+                    session_id,
+                    message,
+                }) => cmd_review_commit(session_id, message),
+                None => {
+                    let Some(session_id) = session_id else {
+                        eprintln!("error: missing required argument <SESSION_ID>");
+                        eprintln!(
+                            "hint: use `agentbox agentpod review <SESSION_ID>` or `agentbox agentpod review apply|discard|commit <SESSION_ID>`"
+                        );
+                        std::process::exit(2);
+                    };
+                    cmd_review(session_id, json, patch, tui)
+                }
+            },
+        },
         Commands::Start => cmd_start(),
         Commands::Clean => cmd_clean(),
         Commands::Setup {
@@ -10319,6 +10694,67 @@ mod tests {
         assert_eq!(payload["actions"][1]["label"], "apply changes");
         assert_eq!(payload["actions"][1]["mutates_workspace"], true);
         assert_eq!(payload["actions"][4]["command"], "no mutation");
+    }
+
+    #[test]
+    fn agentpod_run_alias_parses_existing_run_options() {
+        run_cli_parse_test(|| {
+            let cli = Cli::try_parse_from([
+                "agentbox", "agentpod", "run", "--plan", "--json", "--risk", "low", "--", "echo",
+                "contract",
+            ])
+            .unwrap();
+
+            let Commands::Agentpod {
+                command:
+                    AgentPodCommands::Run {
+                        plan,
+                        json,
+                        risk,
+                        command,
+                        ..
+                    },
+            } = cli.command
+            else {
+                panic!("expected agentpod run command");
+            };
+
+            assert!(plan);
+            assert!(json);
+            assert_eq!(risk, "low");
+            assert_eq!(command, vec!["echo", "contract"]);
+        });
+    }
+
+    #[test]
+    fn agentpod_review_aliases_parse_nested_actions() {
+        run_cli_parse_test(|| {
+            let cli =
+                Cli::try_parse_from(["agentbox", "agentpod", "review", "apply", "session-123"])
+                    .unwrap();
+
+            let Commands::Agentpod {
+                command:
+                    AgentPodCommands::Review {
+                        command: Some(AgentPodReviewCommands::Apply { session_id }),
+                        ..
+                    },
+            } = cli.command
+            else {
+                panic!("expected agentpod review apply command");
+            };
+
+            assert_eq!(session_id, "session-123");
+        });
+    }
+
+    fn run_cli_parse_test(test: impl FnOnce() + Send + 'static) {
+        std::thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(test)
+            .expect("failed to spawn CLI parse test")
+            .join()
+            .expect("CLI parse test panicked");
     }
 
     fn remote_workspace_file(path: &str, contents: &str) -> RemoteAgentPodWorkspaceFile {
