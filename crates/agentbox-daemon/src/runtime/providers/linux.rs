@@ -4321,9 +4321,25 @@ printf landlock-policy-ok
             .path_policy
             .claim_boundary
             .contains("not a complete sandbox"));
+        assert!(plan
+            .path_policy
+            .current_loader_scope
+            .starts_with("read/write/create/remove/execute path-beneath enforcement"));
         assert_eq!(
-            plan.path_policy.current_loader_scope,
-            "read/write/create/remove/execute path-beneath enforcement"
+            plan.path_policy
+                .current_loader_scope
+                .contains("ABI v2 refer/rename mediation"),
+            plan.abi
+                .supported_access
+                .contains(&LinuxLandlockAccess::Refer)
+        );
+        assert_eq!(
+            plan.path_policy
+                .current_loader_scope
+                .contains("ABI v3 truncate mediation"),
+            plan.abi
+                .supported_access
+                .contains(&LinuxLandlockAccess::Truncate)
         );
 
         let read = plan
