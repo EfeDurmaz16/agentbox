@@ -4026,9 +4026,11 @@ mod tests {
         assert_eq!(response.worker_session_id, "worker-session-1");
         assert_eq!(response.workspace_bundle.files.len(), 1);
         assert_eq!(response.workspace_bundle.files[0].path, "README.md");
-        assert!(response
-            .lifecycle_events
-            .contains(&RemoteAgentPodLifecycleEvent::EvidenceSealed));
+        assert!(
+            response
+                .lifecycle_events
+                .contains(&RemoteAgentPodLifecycleEvent::EvidenceSealed)
+        );
         response.workspace_bundle.validate().unwrap();
     }
 
@@ -4046,20 +4048,26 @@ mod tests {
         assert!(descriptor.kill_switch_required);
         assert!(!descriptor.secret_material_included);
         assert_eq!(descriptor.endpoint, "https://worker.example.com/agentpod");
-        assert!(descriptor
-            .lifecycle
-            .required_events
-            .contains(&RemoteAgentPodLifecycleEvent::EvidenceSealed));
-        assert!(descriptor
-            .lifecycle
-            .required_events
-            .contains(&RemoteAgentPodLifecycleEvent::KillSwitchAck));
+        assert!(
+            descriptor
+                .lifecycle
+                .required_events
+                .contains(&RemoteAgentPodLifecycleEvent::EvidenceSealed)
+        );
+        assert!(
+            descriptor
+                .lifecycle
+                .required_events
+                .contains(&RemoteAgentPodLifecycleEvent::KillSwitchAck)
+        );
         assert!(descriptor.lifecycle.kill_switch_required);
         assert_eq!(descriptor.event_stream.delivery, "http-polling-contract");
-        assert!(descriptor
-            .event_stream
-            .claim_boundary
-            .contains("not a live bidirectional event bus"));
+        assert!(
+            descriptor
+                .event_stream
+                .claim_boundary
+                .contains("not a live bidirectional event bus")
+        );
     }
 
     #[test]
@@ -4103,15 +4111,21 @@ mod tests {
         assert!(descriptor.transport_security.embedded_credentials_forbidden);
         assert!(descriptor.worker_identity.required);
         assert!(descriptor.worker_identity.signed_challenge_required);
-        assert!(descriptor
-            .capabilities
-            .contains(&RuntimeCapability::ApprovalBridge));
-        assert!(descriptor
-            .capabilities
-            .contains(&RuntimeCapability::EvidenceExport));
-        assert!(descriptor
-            .evidence_modes
-            .contains(&RemoteAgentPodEvidenceMode::AppendOnlyStream));
+        assert!(
+            descriptor
+                .capabilities
+                .contains(&RuntimeCapability::ApprovalBridge)
+        );
+        assert!(
+            descriptor
+                .capabilities
+                .contains(&RuntimeCapability::EvidenceExport)
+        );
+        assert!(
+            descriptor
+                .evidence_modes
+                .contains(&RemoteAgentPodEvidenceMode::AppendOnlyStream)
+        );
         assert!(descriptor.approvals_supported);
         assert!(descriptor.kill_switch_supported);
         assert_eq!(
@@ -4120,10 +4134,12 @@ mod tests {
         );
         assert_eq!(descriptor.expires_at, expires_at);
         assert!(!descriptor.secret_material_included);
-        assert!(descriptor
-            .non_claims
-            .iter()
-            .any(|claim| claim.contains("remote worker isolation is not complete")));
+        assert!(
+            descriptor
+                .non_claims
+                .iter()
+                .any(|claim| claim.contains("remote worker isolation is not complete"))
+        );
 
         descriptor.validate_at(Utc::now()).unwrap();
     }
@@ -4176,11 +4192,10 @@ mod tests {
         assert!(validate_remote_endpoint_with_loopback(loopback, true).is_ok());
         assert!(validate_remote_endpoint_with_loopback(localhost, true).is_ok());
         assert!(validate_remote_endpoint_with_loopback(external, true).is_err());
-        assert!(validate_remote_endpoint_with_loopback(
-            "http://token@127.0.0.1:63000/agentpod",
-            true
-        )
-        .is_err());
+        assert!(
+            validate_remote_endpoint_with_loopback("http://token@127.0.0.1:63000/agentpod", true)
+                .is_err()
+        );
     }
 
     #[test]
@@ -4232,12 +4247,16 @@ mod tests {
         assert!(!descriptor.secret_material_included);
         assert_eq!(descriptor.challenge_nonce_sha256.len(), 64);
         assert!(descriptor.expires_at > descriptor.created_at);
-        assert!(descriptor
-            .required_response_fields
-            .contains(&RemoteAgentPodHandshakeResponseField::SignedChallenge));
-        assert!(descriptor
-            .required_response_fields
-            .contains(&RemoteAgentPodHandshakeResponseField::LifecycleAck));
+        assert!(
+            descriptor
+                .required_response_fields
+                .contains(&RemoteAgentPodHandshakeResponseField::SignedChallenge)
+        );
+        assert!(
+            descriptor
+                .required_response_fields
+                .contains(&RemoteAgentPodHandshakeResponseField::LifecycleAck)
+        );
     }
 
     #[test]
@@ -4601,16 +4620,20 @@ mod tests {
             lifecycle_events: vec![RemoteAgentPodLifecycleEvent::WorkerDestroyed],
         };
 
-        assert!(running_response
-            .validate_for(&request)
-            .unwrap_err()
-            .to_string()
-            .contains("stopped"));
-        assert!(mismatched_response
-            .validate_for(&request)
-            .unwrap_err()
-            .to_string()
-            .contains("session ids"));
+        assert!(
+            running_response
+                .validate_for(&request)
+                .unwrap_err()
+                .to_string()
+                .contains("stopped")
+        );
+        assert!(
+            mismatched_response
+                .validate_for(&request)
+                .unwrap_err()
+                .to_string()
+                .contains("session ids")
+        );
     }
 
     #[test]
@@ -4665,19 +4688,23 @@ mod tests {
         request.validate().unwrap();
 
         request.bundle_sha256 = "not-a-sha".into();
-        assert!(request
-            .validate()
-            .unwrap_err()
-            .to_string()
-            .contains("SHA-256"));
+        assert!(
+            request
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("SHA-256")
+        );
 
         request.bundle_sha256 = "b".repeat(64);
         request.secret_material_included = true;
-        assert!(request
-            .validate()
-            .unwrap_err()
-            .to_string()
-            .contains("secret material"));
+        assert!(
+            request
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("secret material")
+        );
     }
 
     #[test]
@@ -4698,19 +4725,23 @@ mod tests {
         request.validate().unwrap();
 
         request.bundle_root_sha256 = Some("e".repeat(64));
-        assert!(request
-            .validate()
-            .unwrap_err()
-            .to_string()
-            .contains("bundle_root_sha256"));
+        assert!(
+            request
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("bundle_root_sha256")
+        );
 
         request.bundle_root_sha256 = Some("f".repeat(64));
         request.bundle_id = Some(" ".into());
-        assert!(request
-            .validate()
-            .unwrap_err()
-            .to_string()
-            .contains("bundle id"));
+        assert!(
+            request
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("bundle id")
+        );
     }
 
     #[test]
@@ -4974,9 +5005,10 @@ mod tests {
             .unwrap();
 
         assert_eq!(exec.result.exit_code, 0);
-        assert!(exec
-            .lifecycle_events
-            .contains(&RemoteAgentPodLifecycleEvent::EvidenceSealed));
+        assert!(
+            exec.lifecycle_events
+                .contains(&RemoteAgentPodLifecycleEvent::EvidenceSealed)
+        );
         let destroyed = fake
             .destroy_session(RemoteAgentPodDestroySessionRequest {
                 session_id: create.session_id,
@@ -4988,9 +5020,11 @@ mod tests {
             .unwrap();
 
         assert_eq!(destroyed.status, RuntimeStatus::Stopped);
-        assert!(destroyed
-            .lifecycle_events
-            .contains(&RemoteAgentPodLifecycleEvent::KillSwitchAck));
+        assert!(
+            destroyed
+                .lifecycle_events
+                .contains(&RemoteAgentPodLifecycleEvent::KillSwitchAck)
+        );
         let evidence = fake
             .upload_evidence(RemoteAgentPodEvidenceUploadRequest {
                 session_id: destroyed.session_id,
@@ -5008,9 +5042,11 @@ mod tests {
             .unwrap();
 
         assert_eq!(evidence.accepted_event_count, 4);
-        assert!(evidence
-            .lifecycle_events
-            .contains(&RemoteAgentPodLifecycleEvent::EvidenceSealed));
+        assert!(
+            evidence
+                .lifecycle_events
+                .contains(&RemoteAgentPodLifecycleEvent::EvidenceSealed)
+        );
         let bundle_json = r#"{"session_id":"session-1","events":[]}"#.to_string();
         let bundle = fake
             .upload_evidence_bundle(RemoteAgentPodEvidenceBundleUploadRequest {
@@ -5024,9 +5060,11 @@ mod tests {
             .unwrap();
 
         assert!(bundle.storage_path.ends_with(".json"));
-        assert!(bundle
-            .lifecycle_events
-            .contains(&RemoteAgentPodLifecycleEvent::EvidenceSealed));
+        assert!(
+            bundle
+                .lifecycle_events
+                .contains(&RemoteAgentPodLifecycleEvent::EvidenceSealed)
+        );
         let status = fake
             .evidence_status(RemoteAgentPodEvidenceStatusRequest {
                 session_id: evidence.session_id,
@@ -5077,11 +5115,13 @@ mod tests {
             heartbeat_interval_seconds: 0,
             ..RemoteAgentPodLifecycleDescriptor::default()
         };
-        assert!(invalid
-            .validate()
-            .unwrap_err()
-            .to_string()
-            .contains("timeouts"));
+        assert!(
+            invalid
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("timeouts")
+        );
     }
 
     #[test]
