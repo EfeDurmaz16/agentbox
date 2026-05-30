@@ -1,5 +1,7 @@
 use async_trait::async_trait;
 use std::collections::HashMap;
+#[cfg(target_os = "linux")]
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use crate::runtime::bridge::HostBridgeTransportKind;
@@ -7,6 +9,8 @@ use crate::runtime::provider::{
     BoundaryPrimitiveStatus, ProviderFamily, ProviderImplementationStatus, RuntimeError,
     RuntimeProvider,
 };
+#[cfg(target_os = "linux")]
+use crate::runtime::providers::linux::linux_cgroup_v2_root;
 use crate::runtime::providers::linux::{
     linux_native_execution_enabled, LinuxAgentPodPrototypeExecutor,
 };
@@ -211,8 +215,11 @@ impl AgentPodProvider {
 
     fn linux_prototype_available(&self) -> bool {
         matches!(self.kind, AgentPodProviderKind::Linux)
-            && cfg!(target_os = "linux")
-            && linux_native_execution_enabled()
+            && linux_prototype_available_for(
+                linux_native_execution_enabled(),
+                cfg!(target_os = "linux"),
+                linux_prototype_host_prerequisites_ready(),
+            )
     }
 
     fn gated_invocation_available(&self) -> bool {
@@ -221,9 +228,61 @@ impl AgentPodProvider {
 
     fn linux_prototype_unavailable(&self) -> RuntimeError {
         RuntimeError::Unavailable(
-            "agentpod-linux prototype execution requires Linux and AGENTBOX_LINUX_NATIVE=1".into(),
+            "agentpod-linux prototype execution requires Linux and AGENTBOX_LINUX_NATIVE=1 plus host prerequisites: unshare, user namespaces, and a cgroups v2 root".into(),
         )
     }
+}
+
+fn linux_prototype_available_for(
+    native_gate_enabled: bool,
+    target_is_linux: bool,
+    host_prerequisites_ready: bool,
+) -> bool {
+    native_gate_enabled && target_is_linux && host_prerequisites_ready
+}
+
+fn linux_prototype_host_prerequisites_ready() -> bool {
+    linux_unshare_available() && linux_user_namespace_ready() && linux_cgroup_v2_root_ready()
+}
+
+#[cfg(target_os = "linux")]
+fn linux_unshare_available() -> bool {
+    std::env::var_os("PATH")
+        .and_then(|paths| {
+            std::env::split_paths(&paths)
+                .map(|path| path.join("unshare"))
+                .find(|path| path.is_file())
+        })
+        .is_some()
+}
+
+#[cfg(not(target_os = "linux"))]
+fn linux_unshare_available() -> bool {
+    false
+}
+
+#[cfg(target_os = "linux")]
+fn linux_user_namespace_ready() -> bool {
+    Path::new("/proc/self/ns/user").exists()
+}
+
+#[cfg(not(target_os = "linux"))]
+fn linux_user_namespace_ready() -> bool {
+    false
+}
+
+#[cfg(target_os = "linux")]
+fn linux_cgroup_v2_root_ready() -> bool {
+    let root = linux_cgroup_v2_root();
+    if std::env::var_os("AGENTBOX_LINUX_CGROUP_ROOT").is_some() {
+        return root.is_dir();
+    }
+    root.join("cgroup.controllers").is_file()
+}
+
+#[cfg(not(target_os = "linux"))]
+fn linux_cgroup_v2_root_ready() -> bool {
+    false
 }
 
 #[async_trait]
@@ -654,10 +713,19 @@ mod tests {
         assert!(err.to_string().contains("AGENTBOX_LINUX_NATIVE"));
     }
 
+    #[test]
+    fn linux_prototype_availability_requires_gate_target_and_host_prereqs() {
+        assert!(!linux_prototype_available_for(false, true, true));
+        assert!(!linux_prototype_available_for(true, false, true));
+        assert!(!linux_prototype_available_for(true, true, false));
+        assert!(linux_prototype_available_for(true, true, true));
+    }
+
     #[tokio::test]
     async fn linux_agentpod_provider_lifecycle_is_gated_to_native_hosts() {
         if !(cfg!(target_os = "linux")
-            && matches!(std::env::var("AGENTBOX_LINUX_NATIVE").as_deref(), Ok("1")))
+            && matches!(std::env::var("AGENTBOX_LINUX_NATIVE").as_deref(), Ok("1"))
+            && linux_prototype_host_prerequisites_ready())
         {
             return;
         }

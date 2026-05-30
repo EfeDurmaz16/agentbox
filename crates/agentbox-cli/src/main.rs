@@ -2839,7 +2839,7 @@ fn linux_native_doctor_checks() -> Vec<DoctorCheck> {
         doctor_advisory_check(
             "Linux native plan",
             true,
-            "compiler available; gated prototype execution requires AGENTBOX_LINUX_NATIVE=1"
+            "compiler available; gated prototype execution requires Linux, AGENTBOX_LINUX_NATIVE=1, unshare, user namespaces, and a cgroups v2 root"
                 .to_string(),
             "inspect with `agentbox native-plan --provider agentpod-linux -- <cmd>`",
         ),
@@ -6611,7 +6611,7 @@ fn push_unique_command(commands: &mut Vec<String>, command: &str) {
 fn runtime_provider_unavailable_reason(provider: &str, selection_reason: &str) -> String {
     match provider {
         "agentpod-linux" => {
-            "agentpod-linux prototype execution requires Linux and AGENTBOX_LINUX_NATIVE=1"
+            "agentpod-linux prototype execution requires Linux and AGENTBOX_LINUX_NATIVE=1 plus host prerequisites: unshare, user namespaces, and a cgroups v2 root"
                 .to_string()
         }
         "agentpod-macos" => {
@@ -7432,7 +7432,7 @@ fn bridge_readiness(row: &serde_json::Value) -> serde_json::Value {
         "agentpod-linux" => (
             "prototype-gated",
             "Linux native primitive prototype",
-            "requires Linux and AGENTBOX_LINUX_NATIVE=1; not a complete sandbox claim",
+            "requires Linux, AGENTBOX_LINUX_NATIVE=1, unshare, user namespaces, and a cgroups v2 root; not a complete sandbox claim",
             verification,
         ),
         "remote-agentpod" => (
@@ -10137,13 +10137,13 @@ mod tests {
             "agentbox run",
             Some("agentpod-linux"),
             &AgentPodRiskLevel::High,
-            "provider unavailable: agentpod-linux prototype execution requires Linux and AGENTBOX_LINUX_NATIVE=1",
+            "provider unavailable: agentpod-linux prototype execution requires Linux and AGENTBOX_LINUX_NATIVE=1 plus host prerequisites: unshare, user namespaces, and a cgroups v2 root",
         );
 
         assert!(message.contains("error: runtime provider unavailable for agentbox run"));
         assert!(message.contains("context: provider=agentpod-linux, risk=high"));
         assert!(message.contains(
-            "reason: provider unavailable: agentpod-linux prototype execution requires Linux and AGENTBOX_LINUX_NATIVE=1"
+            "reason: provider unavailable: agentpod-linux prototype execution requires Linux and AGENTBOX_LINUX_NATIVE=1 plus host prerequisites: unshare, user namespaces, and a cgroups v2 root"
         ));
         assert!(message.contains("required gate: AGENTBOX_LINUX_NATIVE=1"));
         assert!(message.contains("next: agentbox provider-readiness --provider agentpod-linux"));
