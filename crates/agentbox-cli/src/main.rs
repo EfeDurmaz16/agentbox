@@ -17,6 +17,7 @@ use sha2::{Digest, Sha256};
 
 const REMOTE_LABEL_ENDPOINT: &str = "agentbox.remote.endpoint";
 const REMOTE_LABEL_WORKER_SESSION: &str = "agentbox.remote.worker_session";
+const DIRECT_HOST_DEV_MODE_LABEL: &str = "agentbox.direct_host.dev_mode";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 struct ReviewJsonOutput {
@@ -203,6 +204,10 @@ enum Commands {
         /// Runtime provider: auto, direct-host, podman, agentpod-macos, agentpod-linux, agentpod-windows, remote-agentpod
         #[arg(long = "provider", default_value = "auto")]
         provider: String,
+
+        /// Allow high-risk direct-host execution as an explicit dev/fallback mode
+        #[arg(long = "direct-host-dev-mode")]
+        direct_host_dev_mode: bool,
 
         /// Print the AgentPod run plan without starting a backend
         #[arg(long = "plan")]
@@ -915,6 +920,10 @@ enum AgentPodCommands {
         /// Runtime provider: auto, direct-host, podman, agentpod-macos, agentpod-linux, agentpod-windows, remote-agentpod
         #[arg(long = "provider", default_value = "auto")]
         provider: String,
+
+        /// Allow high-risk direct-host execution as an explicit dev/fallback mode
+        #[arg(long = "direct-host-dev-mode")]
+        direct_host_dev_mode: bool,
 
         /// Print the AgentPod run plan without starting a backend
         #[arg(long = "plan")]
@@ -3204,6 +3213,7 @@ struct RunOptions {
     agent_profile: String,
     risk: String,
     provider: String,
+    direct_host_dev_mode: bool,
     plan: bool,
     json: bool,
     services: Vec<String>,
@@ -3288,7 +3298,7 @@ async fn cmd_run(options: RunOptions) {
     use agentbox_daemon::runtime::registry::{ProviderSelectionRequest, RuntimeProviderRegistry};
     use agentbox_daemon::runtime::session::RuntimeSessionStore;
     use agentbox_daemon::runtime::types::{
-        ExecCommand, MinipodSpec, NetworkMode, ResourcePolicy, SeccompProfile,
+        AgentPodRiskLevel, ExecCommand, MinipodSpec, NetworkMode, ResourcePolicy, SeccompProfile,
     };
     use agentbox_daemon::runtime::workspace::WorkspaceProjectionMaterializer;
 
@@ -3355,6 +3365,10 @@ async fn cmd_run(options: RunOptions) {
         "agentbox.provider.selection_reason".to_string(),
         selection.reason.clone(),
     );
+    if options.direct_host_dev_mode {
+        spec.labels
+            .insert(DIRECT_HOST_DEV_MODE_LABEL.to_string(), "true".to_string());
+    }
     let workspace_mode_risk = spec.risk.clone();
     apply_workspace_mode(
         &mut spec,
@@ -3471,6 +3485,18 @@ async fn cmd_run(options: RunOptions) {
             "plan output does not start a backend, create a session, hydrate credentials, or run the command"
                 .to_string(),
         ];
+        if selection.selected_provider == "direct-host"
+            && matches!(
+                spec.risk,
+                AgentPodRiskLevel::High | AgentPodRiskLevel::VeryHigh
+            )
+            && !options.direct_host_dev_mode
+        {
+            warnings.push(
+                "direct-host high-risk execution will be denied unless --direct-host-dev-mode or an explicit session approval is present"
+                    .to_string(),
+            );
+        }
         if !matches!(
             selection.selected_provider.as_str(),
             "podman" | "direct-host"
@@ -9081,6 +9107,7 @@ async fn main() {
                 agent_profile,
                 risk,
                 provider,
+                direct_host_dev_mode,
                 plan,
                 json,
                 services,
@@ -9109,6 +9136,7 @@ async fn main() {
                     agent_profile,
                     risk,
                     provider,
+                    direct_host_dev_mode,
                     plan,
                     json,
                     services,
@@ -9169,6 +9197,7 @@ async fn main() {
                     agent_profile,
                     risk,
                     provider,
+                    direct_host_dev_mode: false,
                     plan: true,
                     json,
                     services: Vec::new(),
@@ -9297,6 +9326,7 @@ async fn main() {
             agent_profile,
             risk,
             provider,
+            direct_host_dev_mode,
             plan,
             json,
             services,
@@ -9325,6 +9355,7 @@ async fn main() {
                 agent_profile,
                 risk,
                 provider,
+                direct_host_dev_mode,
                 plan,
                 json,
                 services,
@@ -11138,6 +11169,41 @@ mod tests {
             assert!(plan);
             assert!(json);
             assert_eq!(risk, "low");
+            assert_eq!(command, vec!["echo", "contract"]);
+        });
+    }
+
+    #[test]
+    fn run_parses_direct_host_dev_mode_flag() {
+        run_cli_parse_test(|| {
+            let cli = Cli::try_parse_from([
+                "agentbox",
+                "run",
+                "--provider",
+                "direct-host",
+                "--risk",
+                "high",
+                "--direct-host-dev-mode",
+                "--",
+                "echo",
+                "contract",
+            ])
+            .unwrap();
+
+            let Commands::Run {
+                provider,
+                risk,
+                direct_host_dev_mode,
+                command,
+                ..
+            } = cli.command
+            else {
+                panic!("expected run command");
+            };
+
+            assert_eq!(provider, "direct-host");
+            assert_eq!(risk, "high");
+            assert!(direct_host_dev_mode);
             assert_eq!(command, vec!["echo", "contract"]);
         });
     }

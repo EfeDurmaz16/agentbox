@@ -10,7 +10,7 @@ for stronger enforcement than Agentbox currently proves.
 
 | Provider | Current boundary | Risk | Operator check / handling |
 |----------|------------------|------|---------------------------|
-| `direct-host` | Weak fallback/dev command governance through shims, approvals, explicit grants, audit, and evidence. | High for untrusted agents; acceptable only for low-risk trusted commands. | Mitigation: use for low-risk or development fallback flows, keep credential grants explicit and short-lived, and inspect evidence. Non-goal: filesystem, process, browser, wallet, keychain, or packet isolation. |
+| `direct-host` | Weak fallback/dev command governance through shims, approvals, explicit grants, audit, and evidence. | High for untrusted agents; acceptable only for low-risk trusted commands. | Mitigation: use for low-risk or development fallback flows. High and very-high risk sessions require `--direct-host-dev-mode` or explicit session approval. Keep credential grants explicit and short-lived, and inspect evidence. Non-goal: filesystem, process, browser, wallet, keychain, or packet isolation. |
 | `podman` | Podman compatibility backend for container-backed sessions when the target host passes live smoke. | Medium to high when host mounts, daemon sockets, or VM layers are treated as Agentbox-owned native enforcement. | Operator check: run `bash scripts/smoke-podman-bridge.sh` on the target host. Mitigation: treat it as compatibility only. Non-goal: paid-product isolation center or uniform cross-platform enforcement. |
 | `agentpod-linux` | Gated native prototype with Linux namespace, cgroup, Landlock, seccomp, overlayfs, and runner prerequisites. | High until denial, cleanup, workspace, credential, network, and evidence gates pass live on Linux. | Operator check: run `AGENTBOX_LINUX_NATIVE=1 bash scripts/smoke-linux-native.sh` on Linux. Mitigation: use only for prototype validation. Non-goal: default paid-product backend or complete sandbox. |
 | `agentpod-macos` | Descriptor and gated runner contract; native execution remains unavailable until live VM, entitlement, denial, evidence, and cleanup gates pass. | High if descriptors are read as shipped macOS enforcement. | Operator check: inspect provider truth and future macOS live smoke results before any public claim. Non-goal: native macOS AgentPod execution or enforcement today. |
@@ -30,6 +30,10 @@ does not turn direct-host mode into an OS sandbox.
 
 Limitations and handling:
 
+- high and very-high risk sessions are denied unless the operator passes
+  `--direct-host-dev-mode` or provides an explicit session approval in the
+  manifest. Mitigation: prefer a stronger live-gated AgentPod provider for
+  untrusted or paid-product workflows.
 - absolute paths can bypass PATH shims. Mitigation: use direct-host only for
   low-risk trusted commands and review evidence for the actual argv executed.
 - direct syscalls are not intercepted. Non-goal: direct-host is not kernel or

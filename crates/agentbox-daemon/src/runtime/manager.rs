@@ -12,8 +12,9 @@ use crate::runtime::provider::{RuntimeError, RuntimeProvider};
 use crate::runtime::providers::linux::LinuxAgentPodExecutionPlan;
 use crate::runtime::session::RuntimeSessionStore;
 use crate::runtime::types::{
-    ApprovalGrant, CommandResult, CommandTranscript, CredentialGrant, CredentialGrantKind,
-    ExecCommand, MinipodSpec, RuntimeSession, RuntimeStatus, SessionEvidenceBundle,
+    AgentPodRiskLevel, ApprovalGrant, ApprovalScope, CommandResult, CommandTranscript,
+    CredentialGrant, CredentialGrantKind, ExecCommand, MinipodSpec, RuntimeSession, RuntimeStatus,
+    SessionEvidenceBundle,
 };
 use crate::runtime::workspace::{
     WorkspaceDiffSnapshot, WorkspaceDiffSnapshotter, WorkspaceProjectionApplier,
@@ -22,6 +23,7 @@ use crate::runtime::workspace::{
 };
 
 const DEFAULT_SESSION_EVIDENCE_LIMIT: usize = 10_000;
+const DIRECT_HOST_DEV_MODE_LABEL: &str = "agentbox.direct_host.dev_mode";
 
 pub struct RuntimeManager {
     provider: Arc<dyn RuntimeProvider>,
@@ -50,6 +52,11 @@ impl RuntimeManager {
 
         if !self.provider.is_available().await {
             return Err(RuntimeError::Unavailable(self.provider.name().to_string()));
+        }
+
+        if let Err(error) = self.enforce_direct_host_create_policy(spec) {
+            self.audit_manifest_rejection(spec, &error)?;
+            return Err(error);
         }
 
         if self
@@ -522,6 +529,26 @@ impl RuntimeManager {
         }
     }
 
+    fn enforce_direct_host_create_policy(&self, spec: &MinipodSpec) -> Result<(), RuntimeError> {
+        if self.provider.name() != "direct-host" {
+            return Ok(());
+        }
+        if !matches!(
+            spec.risk,
+            AgentPodRiskLevel::High | AgentPodRiskLevel::VeryHigh
+        ) {
+            return Ok(());
+        }
+        if direct_host_dev_mode_enabled(spec) || has_active_session_approval(spec) {
+            return Ok(());
+        }
+
+        Err(RuntimeError::PolicyDenied(format!(
+            "direct-host {}-risk sessions require --direct-host-dev-mode or an explicit session approval; direct-host is weak dev/fallback command mediation, not an AgentPod sandbox",
+            spec.risk.label()
+        )))
+    }
+
     fn audit_network_boundary_if_needed(
         &self,
         session: &RuntimeSession,
@@ -680,6 +707,24 @@ impl RuntimeManager {
     }
 }
 
+fn direct_host_dev_mode_enabled(spec: &MinipodSpec) -> bool {
+    spec.labels
+        .get(DIRECT_HOST_DEV_MODE_LABEL)
+        .is_some_and(|value| matches!(value.as_str(), "true" | "1" | "yes" | "on"))
+}
+
+fn has_active_session_approval(spec: &MinipodSpec) -> bool {
+    let now = Utc::now();
+    spec.approvals.iter().any(|grant| {
+        !grant.is_expired_at(now)
+            && matches!(
+                &grant.scope,
+                ApprovalScope::Session { session_id }
+                    if session_id.is_empty() || session_id == &spec.id
+            )
+    })
+}
+
 fn is_network_http_command(command: &ExecCommand) -> bool {
     matches!(
         command.argv.first().map(String::as_str),
@@ -738,6 +783,7 @@ mod tests {
     use std::fs;
     use std::future::Future;
 
+    use crate::runtime::providers::direct_host::DirectHostRuntimeProvider;
     use crate::runtime::types::{
         ApprovalScope, CredentialGrant, CredentialGrantKind, RuntimeCapability,
     };
@@ -961,6 +1007,14 @@ mod tests {
         )
     }
 
+    fn direct_host_manager(name: &str) -> RuntimeManager {
+        RuntimeManager::new(
+            Arc::new(DirectHostRuntimeProvider::new()),
+            session_store(name),
+            AuditStore::in_memory().unwrap(),
+        )
+    }
+
     async fn temp_env_var<F, Fut>(key: &str, value: Option<&str>, body: F)
     where
         F: FnOnce() -> Fut,
@@ -996,6 +1050,59 @@ mod tests {
         assert_eq!(audit[0].bucket, "runtime");
         assert_eq!(audit[0].decision, "created");
         assert!(audit[0].event_hash.is_some());
+    }
+
+    #[tokio::test]
+    async fn direct_host_rejects_high_risk_session_without_dev_mode_or_approval() {
+        let manager = direct_host_manager("direct-host-high-risk-deny");
+        let mut spec = MinipodSpec::for_agent_task("deploy-agent", "/tmp/agentbox-work");
+        spec.risk = AgentPodRiskLevel::High;
+
+        let err = manager.create(&spec).await.unwrap_err();
+
+        assert!(matches!(err, RuntimeError::PolicyDenied(_)));
+        assert!(err.to_string().contains("--direct-host-dev-mode"));
+        assert!(manager.list_sessions().unwrap().is_empty());
+        let audit = manager.audit.recent(1).unwrap();
+        assert_eq!(audit[0].bucket, "filesystem");
+        assert!(audit[0].decision.contains("direct-host high-risk"));
+    }
+
+    #[tokio::test]
+    async fn direct_host_allows_high_risk_session_with_dev_mode_label() {
+        let manager = direct_host_manager("direct-host-high-risk-dev-mode");
+        let mut spec = MinipodSpec::for_agent_task("deploy-agent", "/tmp/agentbox-work");
+        spec.risk = AgentPodRiskLevel::High;
+        spec.labels
+            .insert(DIRECT_HOST_DEV_MODE_LABEL.into(), "true".into());
+
+        let session = manager.create(&spec).await.unwrap();
+
+        assert_eq!(session.provider, "direct-host");
+        assert_eq!(
+            session.spec.labels.get(DIRECT_HOST_DEV_MODE_LABEL),
+            Some(&"true".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn direct_host_allows_high_risk_session_with_explicit_session_approval() {
+        let manager = direct_host_manager("direct-host-high-risk-approval");
+        let mut spec = MinipodSpec::for_agent_task("deploy-agent", "/tmp/agentbox-work");
+        spec.risk = AgentPodRiskLevel::VeryHigh;
+        spec.approvals.push(ApprovalGrant {
+            id: "approve-direct-host-dev".into(),
+            scope: ApprovalScope::Session {
+                session_id: spec.id.clone(),
+            },
+            reason: "operator accepted direct-host weak isolation for this session".into(),
+            expires_at: None,
+        });
+
+        let session = manager.create(&spec).await.unwrap();
+
+        assert_eq!(session.provider, "direct-host");
+        assert_eq!(session.approval_grants.len(), 1);
     }
 
     #[tokio::test]
