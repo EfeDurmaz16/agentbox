@@ -2,9 +2,14 @@ use serde::{Deserialize, Serialize};
 
 use crate::runtime::provider::RuntimeError;
 use crate::runtime::types::{
-    CommandResult, ExecCommand, MinipodSpec, MountMode, NetworkMode, ResourcePolicy, SeccompAction,
-    SeccompProfile, WorkspaceOverlayMode,
+    AgentPodRiskLevel, CommandResult, ExecCommand, MinipodSpec, MountMode, NetworkMode,
+    ResourcePolicy, SeccompAction, SeccompProfile, WorkspaceOverlayMode,
 };
+
+const LINUX_AGENTPOD_PIDS_MAX_LOW_RISK: u32 = 256;
+const LINUX_AGENTPOD_PIDS_MAX_MEDIUM_RISK: u32 = 128;
+const LINUX_AGENTPOD_PIDS_MAX_HIGH_RISK: u32 = 64;
+const LINUX_AGENTPOD_PIDS_MAX_VERY_HIGH_RISK: u32 = 32;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LinuxUserNamespacePlan {
@@ -1895,7 +1900,7 @@ fn linux_seccomp_audit_arch() -> Option<u32> {
 
 fn linux_pids_max_from_spec(spec: &MinipodSpec) -> Result<Option<u32>, RuntimeError> {
     let Some(raw) = spec.labels.get("agentbox.resources.pids_max") else {
-        return Ok(None);
+        return Ok(Some(default_linux_agentpod_pids_max_for_risk(&spec.risk)));
     };
     let value = raw.parse::<u32>().map_err(|_| {
         RuntimeError::ManifestRejected("agentbox.resources.pids_max must be a u32".into())
@@ -1906,6 +1911,17 @@ fn linux_pids_max_from_spec(spec: &MinipodSpec) -> Result<Option<u32>, RuntimeEr
         ));
     }
     Ok(Some(value))
+}
+
+fn default_linux_agentpod_pids_max_for_risk(risk: &AgentPodRiskLevel) -> u32 {
+    // Keep Linux AgentPod process creation bounded even when callers omit the
+    // explicit label; explicit agentbox.resources.pids_max labels override this.
+    match risk {
+        AgentPodRiskLevel::Low => LINUX_AGENTPOD_PIDS_MAX_LOW_RISK,
+        AgentPodRiskLevel::Medium => LINUX_AGENTPOD_PIDS_MAX_MEDIUM_RISK,
+        AgentPodRiskLevel::High => LINUX_AGENTPOD_PIDS_MAX_HIGH_RISK,
+        AgentPodRiskLevel::VeryHigh => LINUX_AGENTPOD_PIDS_MAX_VERY_HIGH_RISK,
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -2448,6 +2464,7 @@ mod tests {
     #[test]
     fn agentpod_execution_plan_maps_pids_max_label_to_cgroup_limit() {
         let mut spec = MinipodSpec::for_agent_task("hermes", "/tmp/agentbox-work");
+        spec.risk = AgentPodRiskLevel::VeryHigh;
         spec.labels
             .insert("agentbox.resources.pids_max".into(), "64".into());
         let command = command(&["/bin/true"]);
@@ -2463,15 +2480,38 @@ mod tests {
     }
 
     #[test]
+    fn agentpod_execution_plan_defaults_pids_max_from_risk() {
+        for (risk, expected_pids_max) in [
+            (AgentPodRiskLevel::Low, 256),
+            (AgentPodRiskLevel::Medium, 128),
+            (AgentPodRiskLevel::High, 64),
+            (AgentPodRiskLevel::VeryHigh, 32),
+        ] {
+            let mut spec = MinipodSpec::for_agent_task("hermes", "/tmp/agentbox-work");
+            spec.risk = risk;
+            let command = command(&["/bin/true"]);
+
+            let plan = LinuxAgentPodExecutionPlan::from_minipod_spec(&spec, &command).unwrap();
+
+            assert_eq!(plan.cgroup.pids_max, Some(expected_pids_max));
+            assert!(plan.cgroup.writes().iter().any(|write| {
+                write.file == "pids.max" && write.value == expected_pids_max.to_string()
+            }));
+        }
+    }
+
+    #[test]
     fn agentpod_execution_plan_rejects_invalid_pids_max_label() {
-        let mut spec = MinipodSpec::for_agent_task("hermes", "/tmp/agentbox-work");
-        spec.labels
-            .insert("agentbox.resources.pids_max".into(), "not-a-number".into());
-        let command = command(&["/bin/true"]);
+        for raw in ["not-a-number", "0"] {
+            let mut spec = MinipodSpec::for_agent_task("hermes", "/tmp/agentbox-work");
+            spec.labels
+                .insert("agentbox.resources.pids_max".into(), raw.into());
+            let command = command(&["/bin/true"]);
 
-        let err = LinuxAgentPodExecutionPlan::from_minipod_spec(&spec, &command).unwrap_err();
+            let err = LinuxAgentPodExecutionPlan::from_minipod_spec(&spec, &command).unwrap_err();
 
-        assert!(matches!(err, RuntimeError::ManifestRejected(_)));
+            assert!(matches!(err, RuntimeError::ManifestRejected(_)));
+        }
     }
 
     #[test]
