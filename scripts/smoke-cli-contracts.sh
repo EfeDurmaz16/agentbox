@@ -80,6 +80,9 @@ run_cli_with_home() {
     "${CLI[@]}" "$@"
 }
 
+log "checking install upgrade rollback smoke"
+bash scripts/smoke-install-upgrade-rollback.sh
+
 log "checking AgentPod release smoke suite"
 bash scripts/smoke-agentpod-release-suite.sh
 

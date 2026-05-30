@@ -121,11 +121,46 @@ agentbox start
 agentbox doctor
 ```
 
-## Rollback and Uninstall
+## Upgrade, Rollback, and Uninstall
 
-There is no packaged uninstaller yet. For a local source install, rollback is
-limited to files created by the commands above. Use the same prefix you used
-for installation:
+`scripts/install-agentbox-local.sh` backs up existing local binaries before it
+installs a new set. It does not mutate `~/.agentbox/config.toml`, `audit.db`,
+`runtime-sessions.json`, AgentPod state, or evidence directories during
+upgrade or rollback.
+
+Upgrade from this checkout or from a verified release archive using the same
+prefix you used before:
+
+```sh
+scripts/install-agentbox-local.sh --prefix "$HOME/.local"
+```
+
+If the previous prefix contained Agentbox binaries, the script writes a backup
+under:
+
+```text
+$HOME/.local/.agentbox-backups/<timestamp>/bin
+```
+
+Rollback restores the previous binary set from the latest backup:
+
+```sh
+scripts/install-agentbox-local.sh --prefix "$HOME/.local" --rollback
+```
+
+To restore a specific backup:
+
+```sh
+scripts/install-agentbox-local.sh \
+  --prefix "$HOME/.local" \
+  --rollback-from "$HOME/.local/.agentbox-backups/<timestamp>"
+```
+
+The rollback path restores `agentbox`, `agentbox-cli`, `agentbox-daemon`, and
+`agentbox-shim`. It preserves config and evidence state.
+
+For a local source install, manual binary removal is still possible. Use the
+same prefix you used for installation:
 
 ```sh
 AGENTBOX_LOCAL_PREFIX="$HOME/.local"
@@ -133,10 +168,18 @@ rm -f "$AGENTBOX_LOCAL_PREFIX/bin/agentbox" \
       "$AGENTBOX_LOCAL_PREFIX/bin/agentbox-cli" \
       "$AGENTBOX_LOCAL_PREFIX/bin/agentbox-daemon" \
       "$AGENTBOX_LOCAL_PREFIX/bin/agentbox-shim"
-rm -f "$HOME/.agentbox/shims/"*
 ```
 
-Then remove the Agentbox path entries from your shell profile.
+Use the CLI uninstall path to remove command shims and daemon pid/socket
+artifacts while preserving evidence by default:
+
+```sh
+agentbox uninstall --dry-run
+agentbox uninstall
+```
+
+Then remove Agentbox path entries from your shell profile if you no longer want
+the prefix or shim directory on `PATH`.
 
 The rollback commands intentionally preserve `~/.agentbox/config.toml`, audit
 data, evidence, sessions, and other local state. Remove those only after

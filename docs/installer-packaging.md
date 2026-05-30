@@ -65,6 +65,10 @@ Rules:
 - run `agentbox doctor` after installation and report daemon, shim, PATH,
   audit, and provider readiness
 - keep shim installation explicit through `agentbox install`
+- preserve `~/.agentbox` config, audit, runtime sessions, and AgentPod
+  evidence during upgrade and rollback
+- create a restorable backup of the previous CLI, daemon, and shim binaries
+  before overwriting a local prefix
 - avoid changing shell startup files without an explicit operator step
 - keep Podman compatibility detection separate from Agentbox installation
 - do not claim Endpoint Security, Network Extension, or Virtualization
