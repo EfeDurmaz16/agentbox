@@ -1,5 +1,6 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use ulid::Ulid;
@@ -862,6 +863,8 @@ pub struct SessionEvidenceEvent {
     pub bucket: String,
     pub decision: String,
     pub command: String,
+    #[serde(default)]
+    pub previous_event_hash: Option<String>,
     pub event_hash: Option<String>,
 }
 
@@ -873,9 +876,31 @@ impl From<&AuditEvent> for SessionEvidenceEvent {
             bucket: event.bucket.clone(),
             decision: event.decision.clone(),
             command: event.command.clone(),
+            previous_event_hash: event.prev_hash.clone(),
             event_hash: event.event_hash.clone(),
         }
     }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionEvidenceHashChain {
+    pub schema_version: i64,
+    pub algorithm: String,
+    pub event_count: usize,
+    pub first_event_hash: Option<String>,
+    pub last_event_hash: Option<String>,
+    pub events: Vec<SessionEvidenceHashChainEvent>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionEvidenceHashChainEvent {
+    pub schema_version: i64,
+    pub sequence: i64,
+    pub audit_event_id: String,
+    pub audit_previous_event_hash: Option<String>,
+    pub audit_event_hash: Option<String>,
+    pub bundle_previous_event_hash: Option<String>,
+    pub bundle_event_hash: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -907,6 +932,8 @@ pub struct SessionEvidenceBundle {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agentpod_receipt: Option<AgentPodNativeReceiptSummary>,
     pub replay: SessionReplayMetadata,
+    #[serde(default)]
+    pub hash_chain: SessionEvidenceHashChain,
     pub generated_at: DateTime<Utc>,
 }
 
@@ -1017,6 +1044,7 @@ impl SessionEvidenceBundle {
         }
 
         let replay = SessionReplayMetadata::from_session_events(session, events);
+        let hash_chain = SessionEvidenceHashChain::from_replay(&replay);
         let evidence_refs = evidence_refs_for_events(events);
         let integration_descriptors = evidence_integration_descriptors(&evidence_refs);
         let agentpod_receipt = agentpod_native_receipt_summary(session, events);
@@ -1054,9 +1082,137 @@ impl SessionEvidenceBundle {
             integration_descriptors,
             agentpod_receipt,
             replay,
+            hash_chain,
             generated_at: Utc::now(),
         }
     }
+
+    pub fn verify_hash_chain(&self) -> Result<(), String> {
+        let expected = SessionEvidenceHashChain::from_replay(&self.replay);
+        if self.hash_chain != expected {
+            return Err("session evidence hash chain does not match replay steps".to_string());
+        }
+
+        let grouped_events = self.grouped_evidence_events();
+        if grouped_events.len() != self.replay.steps.len() {
+            return Err(format!(
+                "session evidence event count mismatch: replay has {}, grouped events have {}",
+                self.replay.steps.len(),
+                grouped_events.len()
+            ));
+        }
+
+        for step in &self.replay.steps {
+            let Some((category, event)) = grouped_events
+                .iter()
+                .find(|(_, event)| event.audit_event_id == step.audit_event_id)
+            else {
+                return Err(format!(
+                    "replay step {} is missing grouped evidence event {}",
+                    step.sequence, step.audit_event_id
+                ));
+            };
+            if event.bucket != step.policy_bucket
+                || event.decision != step.decision
+                || event.command != step.command
+                || event.event_hash != step.event_hash
+                || event.previous_event_hash != step.previous_event_hash
+            {
+                return Err(format!(
+                    "grouped {category} evidence event {} does not match replay step {}",
+                    event.audit_event_id, step.sequence
+                ));
+            }
+        }
+
+        Ok(())
+    }
+
+    fn grouped_evidence_events(&self) -> Vec<(&'static str, &SessionEvidenceEvent)> {
+        self.lifecycle_events
+            .iter()
+            .map(|event| ("lifecycle_events", event))
+            .chain(self.approvals.iter().map(|event| ("approvals", event)))
+            .chain(self.commands.iter().map(|event| ("commands", event)))
+            .chain(
+                self.boundary_events
+                    .iter()
+                    .map(|event| ("boundary_events", event)),
+            )
+            .chain(
+                self.credential_events
+                    .iter()
+                    .map(|event| ("credential_events", event)),
+            )
+            .collect()
+    }
+}
+
+impl SessionEvidenceHashChain {
+    pub fn from_replay(replay: &SessionReplayMetadata) -> Self {
+        let mut previous_bundle_hash = None;
+        let mut events = Vec::with_capacity(replay.steps.len());
+
+        for step in &replay.steps {
+            let bundle_event_hash =
+                session_evidence_bundle_event_hash(previous_bundle_hash.as_deref(), step);
+            events.push(SessionEvidenceHashChainEvent {
+                schema_version: 1,
+                sequence: step.sequence,
+                audit_event_id: step.audit_event_id.clone(),
+                audit_previous_event_hash: step.previous_event_hash.clone(),
+                audit_event_hash: step.event_hash.clone(),
+                bundle_previous_event_hash: previous_bundle_hash.clone(),
+                bundle_event_hash: bundle_event_hash.clone(),
+            });
+            previous_bundle_hash = Some(bundle_event_hash);
+        }
+
+        Self {
+            schema_version: 1,
+            algorithm: "sha256-session-replay-step-v1".to_string(),
+            event_count: events.len(),
+            first_event_hash: events.first().map(|event| event.bundle_event_hash.clone()),
+            last_event_hash: events.last().map(|event| event.bundle_event_hash.clone()),
+            events,
+        }
+    }
+}
+
+fn session_evidence_bundle_event_hash(
+    previous_bundle_hash: Option<&str>,
+    step: &SessionReplayStep,
+) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"agentbox-session-evidence-event-v1\0");
+    hash_field(&mut hasher, previous_bundle_hash);
+    hash_field(&mut hasher, Some(&step.sequence.to_string()));
+    hash_field(&mut hasher, Some(&step.timestamp));
+    hash_field(&mut hasher, Some(&step.audit_event_id));
+    hash_field(&mut hasher, step.event_hash.as_deref());
+    hash_field(&mut hasher, step.previous_event_hash.as_deref());
+    hash_field(&mut hasher, Some(&step.command));
+    hash_field(&mut hasher, Some(&step.working_dir));
+    hash_field(&mut hasher, Some(&step.policy_bucket));
+    hash_field(&mut hasher, Some(&step.decision));
+    hash_field(&mut hasher, step.parent_process.as_deref());
+    hex_digest(hasher.finalize().as_slice())
+}
+
+fn hash_field(hasher: &mut Sha256, value: Option<&str>) {
+    match value {
+        Some(value) => {
+            hasher.update(value.len().to_string().as_bytes());
+            hasher.update(b":");
+            hasher.update(value.as_bytes());
+        }
+        None => hasher.update(b"null"),
+    }
+    hasher.update(b"\0");
+}
+
+fn hex_digest(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 fn agentpod_native_receipt_summary(
@@ -1846,6 +2002,13 @@ mod tests {
         assert!(!bundle.replay.replayable);
         assert_eq!(bundle.replay.steps[0].sequence, 1);
         assert_eq!(bundle.replay.steps[1].policy_bucket, "approve");
+        assert_eq!(bundle.hash_chain.event_count, 4);
+        assert_eq!(bundle.hash_chain.events[0].sequence, 1);
+        assert_eq!(
+            bundle.hash_chain.events[1].bundle_previous_event_hash,
+            Some(bundle.hash_chain.events[0].bundle_event_hash.clone())
+        );
+        assert!(bundle.verify_hash_chain().is_ok());
         assert_eq!(bundle.manifest.agent.name, "openclaw");
     }
 
@@ -1959,6 +2122,58 @@ mod tests {
             .limitations
             .iter()
             .any(|limitation| limitation.contains("metadata-only")));
+    }
+
+    #[test]
+    fn session_evidence_bundle_verification_rejects_tampered_replay_or_grouped_events() {
+        let spec = MinipodSpec::for_agent_task("openclaw", "/tmp/agentbox-work");
+        let session = RuntimeSession::new(
+            spec.name.clone(),
+            "direct-host".into(),
+            "macos".into(),
+            spec,
+        );
+        let mut create_event = AuditEvent::new(
+            1,
+            Some("openclaw".into()),
+            format!("runtime.create {}", session.id),
+            "/tmp/agentbox-work".into(),
+            "runtime".into(),
+            "created".into(),
+            None,
+            Some("direct-host".into()),
+        );
+        create_event.event_hash = Some("hash-create".into());
+        let mut exec_event = AuditEvent::new(
+            1,
+            Some("openclaw".into()),
+            format!("runtime.exec {} echo ok", session.id),
+            "/tmp/agentbox-work".into(),
+            "runtime".into(),
+            "exit_code:0".into(),
+            None,
+            Some("direct-host".into()),
+        );
+        exec_event.prev_hash = create_event.event_hash.clone();
+        exec_event.event_hash = Some("hash-exec".into());
+        let bundle =
+            SessionEvidenceBundle::from_session_events(&session, &[create_event, exec_event]);
+
+        assert!(bundle.verify_hash_chain().is_ok());
+
+        let mut tampered_replay = bundle.clone();
+        tampered_replay.replay.steps[1].decision = "exit_code:1".into();
+        assert!(tampered_replay
+            .verify_hash_chain()
+            .unwrap_err()
+            .contains("hash chain"));
+
+        let mut tampered_grouped_event = bundle;
+        tampered_grouped_event.lifecycle_events[0].command = "runtime.create other-session".into();
+        assert!(tampered_grouped_event
+            .verify_hash_chain()
+            .unwrap_err()
+            .contains("grouped"));
     }
 
     #[test]

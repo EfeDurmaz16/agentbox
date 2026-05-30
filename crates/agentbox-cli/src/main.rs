@@ -2338,9 +2338,7 @@ fn setup_first_run_provider_plan(provider: Option<&str>) -> SetupFirstRunProvide
                 "agentpod-linux" => {
                     "AGENTBOX_LINUX_NATIVE=1 agentbox run --provider agentpod-linux -- <cmd>"
                 }
-                "agentpod-windows" => {
-                    "AGENTBOX_WINDOWS_NATIVE=1 agentbox run --provider agentpod-windows -- <cmd>"
-                }
+                "agentpod-windows" => "agentbox native-plan --provider agentpod-windows -- <cmd>",
                 "remote-agentpod" => "agentbox run --provider remote-agentpod -- <cmd>",
                 _ => "agentbox run -- <cmd>",
             }
@@ -5640,8 +5638,32 @@ fn verify_evidence_bundle_dir(bundle_dir: &Path) -> Result<usize, String> {
             ));
         }
     }
+    verify_session_evidence_hash_chain_if_present(bundle_dir, &index)?;
 
     Ok(index.files.len())
+}
+
+fn verify_session_evidence_hash_chain_if_present(
+    bundle_dir: &Path,
+    index: &EvidenceBundleIndex,
+) -> Result<(), String> {
+    if !index.files.iter().any(|file| file.path == "bundle.json") {
+        return Ok(());
+    }
+    let bundle_path = bundle_dir.join("bundle.json");
+    let bytes = fs::read(&bundle_path)
+        .map_err(|e| format!("failed to read {}: {e}", bundle_path.display()))?;
+    let value: serde_json::Value = serde_json::from_slice(&bytes)
+        .map_err(|e| format!("failed to parse {}: {e}", bundle_path.display()))?;
+    if value.get("hash_chain").is_none() {
+        return Ok(());
+    }
+    let bundle: agentbox_daemon::runtime::types::SessionEvidenceBundle =
+        serde_json::from_value(value)
+            .map_err(|e| format!("failed to parse canonical bundle hash chain: {e}"))?;
+    bundle
+        .verify_hash_chain()
+        .map_err(|e| format!("session evidence hash chain invalid: {e}"))
 }
 
 fn read_evidence_bundle_index(bundle_dir: &Path) -> Result<EvidenceBundleIndex, String> {
@@ -6425,7 +6447,7 @@ fn actionable_provider_required_gate(provider: Option<&str>, reason: &str) -> St
     match provider {
         Some("agentpod-linux") => "AGENTBOX_LINUX_NATIVE=1".to_string(),
         Some("agentpod-macos") => "AGENTBOX_MACOS_NATIVE=1".to_string(),
-        Some("agentpod-windows") => "AGENTBOX_WINDOWS_NATIVE=1".to_string(),
+        Some("agentpod-windows") => "live Windows lifecycle/enforcement gates".to_string(),
         Some("remote-agentpod") => {
             "AGENTBOX_REMOTE_AGENTPOD_ENDPOINT=https://worker.example.com/agentpod".to_string()
         }
@@ -6434,7 +6456,7 @@ fn actionable_provider_required_gate(provider: Option<&str>, reason: &str) -> St
         _ if reason.contains("AGENTBOX_LINUX_NATIVE=1") => "AGENTBOX_LINUX_NATIVE=1".to_string(),
         _ if reason.contains("AGENTBOX_MACOS_NATIVE=1") => "AGENTBOX_MACOS_NATIVE=1".to_string(),
         _ if reason.contains("AGENTBOX_WINDOWS_NATIVE=1") => {
-            "AGENTBOX_WINDOWS_NATIVE=1".to_string()
+            "live Windows lifecycle/enforcement gates".to_string()
         }
         _ if reason.contains("AGENTBOX_REMOTE_AGENTPOD_ENDPOINT") => {
             "AGENTBOX_REMOTE_AGENTPOD_ENDPOINT=https://worker.example.com/agentpod".to_string()
@@ -6502,10 +6524,6 @@ fn actionable_provider_next_commands(provider: Option<&str>, reason: &str) -> Ve
                 &mut commands,
                 "agentbox native-plan --provider agentpod-windows -- <cmd>",
             );
-            push_unique_command(
-                &mut commands,
-                "AGENTBOX_WINDOWS_NATIVE=1 agentbox run --provider agentpod-windows -- <cmd>",
-            );
         }
         Some("remote-agentpod") => {
             push_unique_command(
@@ -6555,7 +6573,7 @@ fn runtime_provider_unavailable_reason(provider: &str, selection_reason: &str) -
             "agentpod-macos VM-backed execution requires macOS and AGENTBOX_MACOS_NATIVE=1; provider execution remains descriptor-gated".to_string()
         }
         "agentpod-windows" => {
-            "agentpod-windows execution requires Windows and AGENTBOX_WINDOWS_NATIVE=1; provider execution is not wired in this build".to_string()
+            "agentpod-windows is descriptor-only; provider execution, process assignment, cleanup, AppContainer/WFP/ETW enforcement, and live limit enforcement are not wired in this build".to_string()
         }
         "remote-agentpod" => {
             "remote-agentpod requires AGENTBOX_REMOTE_AGENTPOD_ENDPOINT=https://worker.example.com/agentpod".to_string()
@@ -9662,6 +9680,7 @@ async fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use agentbox_daemon::audit::AuditEvent;
     use agentbox_daemon::runtime::providers::remote::{
         RemoteAgentPodEventStreamDescriptor, RemoteAgentPodEvidenceReceiptStatus,
         RemoteAgentPodEvidenceStatusResponse, RemoteAgentPodEvidenceStreamStatus,
@@ -9858,7 +9877,17 @@ mod tests {
                 );
             }
             if provider == "agentpod-windows" {
+                assert_eq!(plan["live_execution_enabled"], false);
                 assert!(plan["job_object"]["process_limit"].as_u64().unwrap() > 0);
+                assert_eq!(
+                    plan["job_object"]["live_smoke"]["env_var"],
+                    "AGENTBOX_WINDOWS_JOB_OBJECT"
+                );
+                assert_eq!(plan["job_object"]["live_smoke"]["enabled"], false);
+                assert!(plan["job_object"]["live_smoke"]["lifecycle_claim"]
+                    .as_str()
+                    .unwrap()
+                    .contains("process assignment and limit enforcement are not proven"));
                 assert!(plan["job_object"]["resource_claim"]
                     .as_str()
                     .unwrap()
@@ -10012,6 +10041,31 @@ mod tests {
     }
 
     #[test]
+    fn provider_readiness_keeps_windows_descriptor_only() {
+        let rows = provider_readiness_rows(Some("agentpod-windows"));
+        assert_eq!(rows.len(), 1);
+        let windows = &rows[0];
+
+        assert_eq!(windows["provider"], serde_json::json!("agentpod-windows"));
+        assert_eq!(windows["status"], serde_json::json!("descriptor-only"));
+        assert_eq!(
+            windows["readiness_verdict"],
+            serde_json::json!("metadata-only")
+        );
+        assert_eq!(
+            windows["next_command"],
+            serde_json::json!("agentbox native-plan --provider agentpod-windows -- <cmd>")
+        );
+        assert_eq!(windows["counts"]["active"], serde_json::json!(0));
+        assert!(windows["counts"]["descriptor_only"].as_u64().unwrap() >= 1);
+        assert!(json_string_array(&windows["descriptor_only"]).contains(&"job-objects".to_string()));
+        assert!(windows["gated"].as_array().unwrap().iter().any(|gate| {
+            gate["primitive"] == "job-objects"
+                && gate["requires_gate"] == "live Windows lifecycle/enforcement gates"
+        }));
+    }
+
+    #[test]
     fn actionable_provider_error_includes_native_gate_and_commands() {
         let message = format_actionable_provider_unavailable(
             "agentbox run",
@@ -10031,6 +10085,22 @@ mod tests {
         assert!(message.contains(
             "next: AGENTBOX_LINUX_NATIVE=1 agentbox run --provider agentpod-linux -- <cmd>"
         ));
+    }
+
+    #[test]
+    fn actionable_provider_error_does_not_offer_windows_run_gate() {
+        let message = format_actionable_provider_unavailable(
+            "agentbox run",
+            Some("agentpod-windows"),
+            &AgentPodRiskLevel::High,
+            "provider unavailable: agentpod-windows is descriptor-only",
+        );
+
+        assert!(message.contains("context: provider=agentpod-windows, risk=high"));
+        assert!(message.contains("required gate: live Windows lifecycle/enforcement gates"));
+        assert!(message.contains("next: agentbox provider-readiness --provider agentpod-windows"));
+        assert!(message.contains("next: agentbox native-plan --provider agentpod-windows -- <cmd>"));
+        assert!(!message.contains("AGENTBOX_WINDOWS_NATIVE=1 agentbox run"));
     }
 
     #[test]
@@ -10084,6 +10154,28 @@ mod tests {
         assert!(linux.recommended);
         assert_eq!(linux.readiness_verdict, "prototype-gated");
         assert!(linux.first_run_command.contains("AGENTBOX_LINUX_NATIVE=1"));
+    }
+
+    #[test]
+    fn setup_first_run_provider_plan_does_not_offer_windows_run_command() {
+        let plan = setup_first_run_provider_plan(Some("agentpod-windows"));
+
+        assert_eq!(plan.recommended_provider, "agentpod-windows");
+        let windows = plan
+            .options
+            .iter()
+            .find(|option| option.provider == "agentpod-windows")
+            .unwrap();
+        assert!(windows.recommended);
+        assert_eq!(windows.readiness_verdict, "metadata-only");
+        assert_eq!(
+            windows.first_run_command,
+            "agentbox native-plan --provider agentpod-windows -- <cmd>"
+        );
+        assert!(!windows
+            .first_run_command
+            .contains("AGENTBOX_WINDOWS_NATIVE=1"));
+        assert!(!windows.first_run_command.contains(" agentbox run "));
     }
 
     #[test]
@@ -10798,6 +10890,75 @@ mod tests {
 
         let err = verify_evidence_bundle_dir(&output_dir).unwrap_err();
         assert!(err.contains("mismatch"), "{err}");
+
+        let _ = fs::remove_dir_all(output_dir);
+    }
+
+    #[test]
+    fn evidence_bundle_dir_verification_detects_hash_chain_tampering() {
+        let spec = MinipodSpec::for_agent_task("codex", "/tmp/agentbox-work");
+        let session = RuntimeSession::new(
+            spec.name.clone(),
+            "direct-host".into(),
+            "macos".into(),
+            spec,
+        );
+        let mut create_event = AuditEvent::new(
+            1,
+            Some("codex".into()),
+            format!("runtime.create {}", session.id),
+            "/tmp/agentbox-work".into(),
+            "runtime".into(),
+            "created".into(),
+            None,
+            Some("direct-host".into()),
+        );
+        create_event.event_hash = Some("hash-create".into());
+        let mut exec_event = AuditEvent::new(
+            1,
+            Some("codex".into()),
+            format!("runtime.exec {} echo ok", session.id),
+            "/tmp/agentbox-work".into(),
+            "runtime".into(),
+            "exit_code:0".into(),
+            None,
+            Some("direct-host".into()),
+        );
+        exec_event.prev_hash = create_event.event_hash.clone();
+        exec_event.event_hash = Some("hash-exec".into());
+        let bundle =
+            SessionEvidenceBundle::from_session_events(&session, &[create_event, exec_event]);
+        let output_dir = std::env::temp_dir().join(format!(
+            "agentbox-evidence-bundle-chain-tamper-test-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&output_dir);
+        write_session_evidence_bundle_dir(&bundle, &output_dir).unwrap();
+
+        let bundle_path = output_dir.join("bundle.json");
+        let mut bundle_json: serde_json::Value =
+            serde_json::from_slice(&fs::read(&bundle_path).unwrap()).unwrap();
+        bundle_json["replay"]["steps"][1]["decision"] = "exit_code:1".into();
+        let bundle_bytes = serde_json::to_vec_pretty(&bundle_json).unwrap();
+        fs::write(&bundle_path, &bundle_bytes).unwrap();
+
+        let mut index = read_evidence_bundle_index(&output_dir).unwrap();
+        let bundle_file = index
+            .files
+            .iter_mut()
+            .find(|file| file.path == "bundle.json")
+            .unwrap();
+        bundle_file.sha256 = sha256_hex(&bundle_bytes);
+        bundle_file.bytes = bundle_bytes.len();
+        index.root_sha256 = evidence_bundle_root_sha256(&index.files);
+        fs::write(
+            output_dir.join("index.json"),
+            serde_json::to_vec_pretty(&index).unwrap(),
+        )
+        .unwrap();
+
+        let err = verify_evidence_bundle_dir(&output_dir).unwrap_err();
+        assert!(err.contains("hash chain"), "{err}");
 
         let _ = fs::remove_dir_all(output_dir);
     }

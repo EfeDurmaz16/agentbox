@@ -195,6 +195,17 @@ All JSONL files contain one JSON object per line. Lines are ordered by
 - `event_hash`: SHA-256 of the canonical serialized event with
   `event_hash` omitted
 
+The current CLI bundle exporter also writes a `hash_chain` object into
+`bundle.json`. This is a session-local chain over `replay.steps`, separate from
+the global audit database chain. Each entry records `sequence`,
+`audit_event_id`, `audit_previous_event_hash`, `audit_event_hash`,
+`bundle_previous_event_hash`, and `bundle_event_hash`.
+
+`agentbox evidence verify --bundle <dir>` verifies file checksums first, then
+recomputes this session-local chain when `hash_chain` is present. A clean bundle
+passes; changing replay or grouped evidence event content without regenerating a
+coherent bundle fails verification.
+
 ### Policy Decisions
 
 `policy-decisions.jsonl` events record the decision trace before execution or
