@@ -36,7 +36,7 @@ installers, but they are never enforcement by themselves.
 |----------|----------------|----------------|
 | `direct-host` | `shipped` | Useful command mediation, approval, audit, and evidence. Weak isolation; no OS sandbox. |
 | `podman-compat` | `experimental` | Compatibility backend. Useful when live smoke passes on the target host; not the AgentPod product center. Legacy `podman` remains a deprecated CLI alias. |
-| `agentpod-linux` | `prototype primitive` | Gated native prototype primitives exist. Do not claim complete sandboxing until live denial, cleanup, and evidence gates pass. |
+| `agentpod-linux` | `prototype primitive` | Gated native prototype primitives exist. Do not claim complete sandboxing until the issue-mapped [Linux hardening gaps](linux-hardening-gaps.md) pass live denial, cleanup, filesystem, network, and evidence gates. |
 | `agentpod-macos` | `descriptor only` plus gated runner contract | VM, Endpoint Security, and Network Extension shapes exist, but execution remains unavailable until lifecycle and entitlement proof exists. |
 | `agentpod-windows` | `prototype primitive` / descriptor surfaces | Job Object, AppContainer, WFP, ETW, and VM-boundary descriptors exist. Provider execution remains unavailable until Windows live tests pass. |
 | `remote-agentpod` | `experimental` | Runnable only with an explicit HTTPS worker endpoint or gated loopback dev transport. Trust depends on worker identity, capability reporting, and returned evidence. |

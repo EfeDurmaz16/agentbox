@@ -56,6 +56,11 @@ sandbox or release-grade isolation claim.
 | FIDES / AGIT / OAPS integrations | evidence and authority descriptors | no external authority adapter or live publisher configured |
 | Linux network/eBPF/nftables | coarse connect-deny seccomp bridge for deny-all modes, eBPF observability receipts, egress policy descriptors, plus gated nftables table lifecycle smoke | no probe loading, no live eBPF event capture, no domain allowlist enforcement, no packet firewall denial proof |
 
+Linux hardening gaps are issue-mapped in
+[Linux hardening gaps](linux-hardening-gaps.md); until those issues pass live
+proof, checkpoint language must stay at prototype, descriptor-only, or
+observed-only.
+
 Descriptor-only means the product can explain the boundary and emit typed
 metadata, but it must not imply enforcement.
 

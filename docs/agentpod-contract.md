@@ -104,7 +104,8 @@ path, PID/TGID fallback fields, and event identity fields while staying
 `descriptor-only-or-unobserved` and `observed-only`. This is still a prototype
 primitive: live execution must be explicitly gated with
 `AGENTBOX_LINUX_NATIVE`, and it is not a complete sandbox claim until the
-remaining loaders and provider lifecycle are wired and tested on Linux.
+issue-mapped [Linux hardening gaps](linux-hardening-gaps.md) are wired and
+tested on Linux.
 Session evidence bundles for AgentPod providers include an optional native
 receipt summary that lists the provider, observed runner phase evidence,
 enforcement status, skipped planned primitives, and evidence references.
@@ -160,6 +161,9 @@ scripts/smoke-linux-native.sh
 
 The smoke script requires Linux, `unshare`, and `jq`; it enables
 `AGENTBOX_LINUX_NATIVE=1` only for the gated run.
+Remaining Linux sandbox hardening gaps are mapped in
+[Linux hardening gaps](linux-hardening-gaps.md); those gaps must not be
+presented as shipped enforcement.
 
 ## Adaptive Runtime Selection
 

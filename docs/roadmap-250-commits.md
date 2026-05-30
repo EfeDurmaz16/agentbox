@@ -60,7 +60,8 @@ The sprint has moved past pure planning. The current working spine is:
   `agentbox-linux-runner`, `unshare`, workspace bind mounting, cgroup v2 attach,
   read/write/execute Landlock, supported seccomp deny filters, timeout handling,
   stdout/stderr collection, and request/cgroup cleanup. It is still not a
-  complete sandbox claim.
+  complete sandbox claim; the remaining Linux boundary is mapped in
+  [Linux hardening gaps](linux-hardening-gaps.md).
 - Linux runner request files are owned lifecycle artifacts: they are cleaned on
   early returns and use path-safe, collision-resistant filenames for parallel
   exec attempts.

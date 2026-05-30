@@ -127,6 +127,8 @@ See [safe credential patterns](safe-credential-patterns.md) for task-scoped
 credential grants, redaction limits, and FIDES authority handoff.
 See [Linux eBPF observability](linux-ebpf-observability.md) for kernel event
 evidence design that is not yet enforcement.
+See [Linux hardening gaps](linux-hardening-gaps.md) for the issue-mapped line
+between the gated prototype and future Linux sandbox claims.
 See [network enforcement limits](network-enforcement-limits.md) for the
 platform-specific line between classification, observation, provider network
 mode, and packet/domain enforcement.
