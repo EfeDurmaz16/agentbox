@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "snapshot_id": "diff-snapshot-1",
+  "session_id": "01agentboxsession",
+  "workspace": "/tmp/agentbox-work",
+  "patch_ref": "workspace-diff.patch",
+  "patch_sha256": "sha256:ad233596931db62e18f5f3ed86c79e740d975bd498384af244cff2fcf779cf7e",
+  "patch_bytes": 45,
+  "evidence_hash": "event-hash-1",
+  "live_support": false,
+  "requires_external_adapter": true
+}

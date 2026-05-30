@@ -1,7 +1,48 @@
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::audit::AuditEvent;
 use crate::runtime::types::RuntimeSession;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgitEvidenceAdapterDescriptor {
+    pub schema_version: i64,
+    pub integration: String,
+    pub descriptor_kind: String,
+    pub status: String,
+    pub live_support: bool,
+    pub requires_external_adapter: bool,
+    pub supported_refs: Vec<String>,
+    pub claim_boundary: String,
+    pub verification_command: String,
+}
+
+impl Default for AgitEvidenceAdapterDescriptor {
+    fn default() -> Self {
+        Self {
+            schema_version: 1,
+            integration: "agit".to_string(),
+            descriptor_kind: "workspace-diff-evidence-boundary".to_string(),
+            status: "external-adapter-required".to_string(),
+            live_support: false,
+            requires_external_adapter: true,
+            supported_refs: vec![
+                "audit-event".to_string(),
+                "commit-id".to_string(),
+                "workspace-diff-ref".to_string(),
+                "patch-sha256".to_string(),
+            ],
+            claim_boundary:
+                "Agentbox can reference workspace diff snapshots for AGIT lineage, but it does not publish commits or lineage records without an external AGIT adapter."
+                    .to_string(),
+            verification_command: "cargo test --locked -p agentbox-daemon agit".to_string(),
+        }
+    }
+}
+
+pub fn agit_evidence_adapter_descriptor() -> AgitEvidenceAdapterDescriptor {
+    AgitEvidenceAdapterDescriptor::default()
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AgitLineageKind {
@@ -65,12 +106,60 @@ impl AgitEvidenceLineageRecord {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgitWorkspaceDiffEvidenceRef {
+    pub schema_version: i64,
+    pub snapshot_id: String,
+    pub session_id: String,
+    pub workspace: String,
+    pub patch_ref: String,
+    pub patch_sha256: String,
+    pub patch_bytes: usize,
+    pub evidence_hash: String,
+    pub live_support: bool,
+    pub requires_external_adapter: bool,
+}
+
+impl AgitWorkspaceDiffEvidenceRef {
+    pub fn from_patch(
+        session: &RuntimeSession,
+        snapshot_id: impl Into<String>,
+        patch_ref: impl Into<String>,
+        patch: &str,
+        evidence_hash: impl Into<String>,
+    ) -> Self {
+        let mut hasher = Sha256::new();
+        hasher.update(patch.as_bytes());
+        Self {
+            schema_version: 1,
+            snapshot_id: snapshot_id.into(),
+            session_id: session.id.clone(),
+            workspace: session
+                .spec
+                .filesystem
+                .workspace_host_path
+                .display()
+                .to_string(),
+            patch_ref: patch_ref.into(),
+            patch_sha256: format!("sha256:{:x}", hasher.finalize()),
+            patch_bytes: patch.len(),
+            evidence_hash: evidence_hash.into(),
+            live_support: false,
+            requires_external_adapter: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AgitEvidencePublishDecision {
     Published { record_id: String },
     RequiresExternalAdapter { reason: String },
 }
 
 pub trait AgitEvidencePublisher: Send + Sync {
+    fn descriptor(&self) -> AgitEvidenceAdapterDescriptor {
+        agit_evidence_adapter_descriptor()
+    }
+
     fn publish_lineage(&self, record: &AgitEvidenceLineageRecord) -> AgitEvidencePublishDecision;
 }
 
@@ -115,6 +204,23 @@ mod tests {
             started_at: Utc::now(),
             stopped_at: None,
         }
+    }
+
+    #[test]
+    fn agit_descriptor_never_claims_live_publication() {
+        let descriptor = agit_evidence_adapter_descriptor();
+
+        assert_eq!(descriptor.schema_version, 1);
+        assert_eq!(descriptor.integration, "agit");
+        assert_eq!(descriptor.status, "external-adapter-required");
+        assert!(!descriptor.live_support);
+        assert!(descriptor.requires_external_adapter);
+        assert!(descriptor
+            .supported_refs
+            .contains(&"workspace-diff-ref".to_string()));
+        assert!(descriptor
+            .claim_boundary
+            .contains("does not publish commits"));
     }
 
     #[test]
@@ -179,6 +285,49 @@ mod tests {
     }
 
     #[test]
+    fn agit_workspace_diff_ref_can_point_to_local_patch_without_service() {
+        let session = session();
+        let diff_ref = AgitWorkspaceDiffEvidenceRef::from_patch(
+            &session,
+            "diff-snapshot-1",
+            "workspace-diff.patch",
+            "diff --git a/README.md b/README.md\n+agentbox\n",
+            "event-hash-1",
+        );
+
+        assert_eq!(diff_ref.schema_version, 1);
+        assert_eq!(diff_ref.session_id, session.id);
+        assert_eq!(diff_ref.workspace, "/tmp/agentbox-work");
+        assert_eq!(diff_ref.patch_ref, "workspace-diff.patch");
+        assert_eq!(
+            diff_ref.patch_sha256,
+            "sha256:ad233596931db62e18f5f3ed86c79e740d975bd498384af244cff2fcf779cf7e"
+        );
+        assert_eq!(diff_ref.patch_bytes, 45);
+        assert_eq!(diff_ref.evidence_hash, "event-hash-1");
+        assert!(!diff_ref.live_support);
+        assert!(diff_ref.requires_external_adapter);
+    }
+
+    #[test]
+    fn agit_workspace_diff_fixture_contains_patch_hash_boundary() {
+        let diff_ref: AgitWorkspaceDiffEvidenceRef =
+            serde_json::from_str(include_str!("../../fixtures/agit-workspace-diff-ref.json"))
+                .unwrap();
+
+        assert_eq!(diff_ref.snapshot_id, "diff-snapshot-1");
+        assert_eq!(diff_ref.patch_ref, "workspace-diff.patch");
+        assert_eq!(diff_ref.patch_bytes, 45);
+        assert_eq!(
+            diff_ref.patch_sha256,
+            "sha256:ad233596931db62e18f5f3ed86c79e740d975bd498384af244cff2fcf779cf7e"
+        );
+        assert_eq!(diff_ref.evidence_hash, "event-hash-1");
+        assert!(!diff_ref.live_support);
+        assert!(diff_ref.requires_external_adapter);
+    }
+
+    #[test]
     fn noop_agit_publisher_never_claims_live_integration() {
         let session = session();
         let event = AuditEvent::new(
@@ -194,8 +343,11 @@ mod tests {
         let record = AgitEvidenceLineageRecord::from_audit_event(&session, &event);
         let publisher = NoopAgitEvidencePublisher;
 
+        let descriptor = publisher.descriptor();
         let decision = publisher.publish_lineage(&record);
 
+        assert!(!descriptor.live_support);
+        assert!(descriptor.requires_external_adapter);
         assert!(matches!(
             decision,
             AgitEvidencePublishDecision::RequiresExternalAdapter { .. }
