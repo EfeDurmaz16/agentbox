@@ -243,11 +243,12 @@ impl RemoteAgentPodHandshakeVerifierSet {
         ack: &RemoteAgentPodHandshakeAck,
         now: DateTime<Utc>,
     ) -> Result<RemoteAgentPodVerifiedHandshake, RuntimeError> {
-        if ack.signed_challenge.starts_with("ed25519:") {
-            Ed25519HandshakeVerifier.verify(descriptor, ack, now)
-        } else {
-            ChallengeBindingHandshakeVerifier.verify(descriptor, ack, now)
+        if !ack.signed_challenge.starts_with("ed25519:") {
+            return Err(RuntimeError::ManifestRejected(
+                "remote AgentPod handshake requires an Ed25519 signed worker identity".into(),
+            ));
         }
+        Ed25519HandshakeVerifier.verify(descriptor, ack, now)
     }
 }
 
@@ -3468,22 +3469,8 @@ mod tests {
             &self,
             descriptor: &RemoteAgentPodHandshakeDescriptor,
         ) -> Result<RemoteAgentPodHandshakeAck, RuntimeError> {
-            let mut ack = RemoteAgentPodHandshakeAck {
-                worker_identity: "worker.local/test".into(),
-                worker_public_key: "ed25519:test-public-key".into(),
-                signed_challenge: String::new(),
-                capabilities: vec![
-                    RuntimeCapability::ApprovalBridge,
-                    RuntimeCapability::EvidenceExport,
-                ],
-                evidence_endpoint: "https://worker.example.com/agentpod/evidence".into(),
-                lifecycle_ack: true,
-                secret_material_included: false,
-                expires_at: descriptor.created_at + Duration::seconds(60),
-            };
-            ack.signed_challenge =
-                ChallengeBindingHandshakeVerifier::bound_challenge(descriptor, &ack);
-            ChallengeBindingHandshakeVerifier.verify(descriptor, &ack, descriptor.created_at)?;
+            let ack = signed_handshake_ack(descriptor, [3_u8; 32]);
+            RemoteAgentPodHandshakeVerifierSet.verify(descriptor, &ack, descriptor.created_at)?;
             Ok(ack)
         }
 
@@ -3792,6 +3779,35 @@ mod tests {
             response.validate_for(&request)?;
             Ok(response)
         }
+    }
+
+    fn signed_handshake_ack(
+        descriptor: &RemoteAgentPodHandshakeDescriptor,
+        seed: [u8; 32],
+    ) -> RemoteAgentPodHandshakeAck {
+        let signing_key = SigningKey::from_bytes(&seed);
+        let verifying_key = signing_key.verifying_key();
+        let mut ack = RemoteAgentPodHandshakeAck {
+            worker_identity: "worker.local/test".into(),
+            worker_public_key: format!("ed25519:{}", hex_encode(&verifying_key.to_bytes())),
+            signed_challenge: String::new(),
+            capabilities: vec![
+                RuntimeCapability::ApprovalBridge,
+                RuntimeCapability::EvidenceExport,
+            ],
+            evidence_endpoint: "https://worker.example.com/agentpod/evidence".into(),
+            lifecycle_ack: true,
+            secret_material_included: false,
+            expires_at: descriptor.created_at + Duration::seconds(60),
+        };
+        let payload = Ed25519HandshakeVerifier::signing_payload(descriptor, &ack);
+        let signature = signing_key.sign(payload.as_bytes());
+        ack.signed_challenge = format!(
+            "ed25519:{}:{}",
+            descriptor.challenge_id,
+            hex_encode(&signature.to_bytes())
+        );
+        ack
     }
 
     #[tokio::test]
@@ -4441,7 +4457,26 @@ mod tests {
     }
 
     #[test]
-    fn remote_handshake_verifier_set_selects_cryptographic_or_legacy_binding() {
+    fn remote_handshake_verifier_set_rejects_mismatched_worker_public_key() {
+        let descriptor = RemoteAgentPodHandshakeDescriptor::new(
+            "https://worker.example.com/agentpod",
+            RemoteAgentPodAuthKind::SignedChallenge,
+            300,
+        )
+        .unwrap();
+        let mut ack = signed_handshake_ack(&descriptor, [17_u8; 32]);
+        let other_key = SigningKey::from_bytes(&[18_u8; 32]).verifying_key();
+        ack.worker_public_key = format!("ed25519:{}", hex_encode(&other_key.to_bytes()));
+
+        let err = RemoteAgentPodHandshakeVerifierSet
+            .verify(&descriptor, &ack, descriptor.created_at)
+            .unwrap_err();
+
+        assert!(err.to_string().contains("Ed25519 verification"));
+    }
+
+    #[test]
+    fn remote_handshake_verifier_set_requires_cryptographic_signature() {
         let descriptor = RemoteAgentPodHandshakeDescriptor::new(
             "https://worker.example.com/agentpod",
             RemoteAgentPodAuthKind::SignedChallenge,
@@ -4486,10 +4521,10 @@ mod tests {
         legacy_ack.signed_challenge =
             ChallengeBindingHandshakeVerifier::bound_challenge(&descriptor, &legacy_ack);
 
-        let legacy = RemoteAgentPodHandshakeVerifierSet
+        let err = RemoteAgentPodHandshakeVerifierSet
             .verify(&descriptor, &legacy_ack, descriptor.created_at)
-            .unwrap();
-        assert!(!legacy.cryptographic_signature_verified);
+            .unwrap_err();
+        assert!(err.to_string().contains("Ed25519"));
     }
 
     fn hex_encode(bytes: &[u8]) -> String {
