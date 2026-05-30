@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "grant_id": "grant-git-push",
+  "session_id": "01agentboxsession",
+  "scope": {
+    "Command": {
+      "binary": "git",
+      "args_prefix": [
+        "push"
+      ]
+    }
+  },
+  "reason": "operator approved git push",
+  "expires_at": "2026-05-30T21:00:00Z",
+  "decision": "granted",
+  "evidence_hash": "sha256:approval-evidence-root",
+  "evidence_refs": [
+    "audit-event-1"
+  ],
+  "signature": {
+    "signer": "did:fides:agentbox-authority",
+    "algorithm": "ed25519",
+    "signature": "base64url-signature-placeholder",
+    "signed_at": "2026-05-30T20:00:00Z"
+  }
+}

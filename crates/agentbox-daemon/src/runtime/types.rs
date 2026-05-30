@@ -479,6 +479,15 @@ pub struct ApprovalSignature {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalReceiptDecision {
+    Granted,
+    Denied,
+    Expired,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SignedApprovalRecord {
     pub schema_version: i64,
     pub grant_id: String,
@@ -486,6 +495,8 @@ pub struct SignedApprovalRecord {
     pub scope: ApprovalScope,
     pub reason: String,
     pub expires_at: Option<DateTime<Utc>>,
+    pub decision: ApprovalReceiptDecision,
+    pub evidence_hash: String,
     pub evidence_refs: Vec<String>,
     pub signature: Option<ApprovalSignature>,
 }
@@ -494,6 +505,8 @@ impl SignedApprovalRecord {
     pub fn unsigned_from_grant(
         grant: &ApprovalGrant,
         session_id: Option<String>,
+        decision: ApprovalReceiptDecision,
+        evidence_hash: String,
         evidence_refs: Vec<String>,
     ) -> Self {
         Self {
@@ -503,6 +516,8 @@ impl SignedApprovalRecord {
             scope: grant.scope.clone(),
             reason: grant.reason.clone(),
             expires_at: grant.expires_at,
+            decision,
+            evidence_hash,
             evidence_refs,
             signature: None,
         }
@@ -2478,18 +2493,24 @@ mod tests {
                 args_prefix: vec!["push".into()],
             },
             reason: "operator approved git push".into(),
-            expires_at: None,
+            expires_at: Some(Utc::now() + chrono::Duration::seconds(300)),
         };
 
         let mut record = SignedApprovalRecord::unsigned_from_grant(
             &grant,
             Some("01agentboxsession".into()),
+            ApprovalReceiptDecision::Granted,
+            "sha256:approval-evidence-root".into(),
             vec!["audit-event-1".into()],
         );
 
         assert_eq!(record.schema_version, 1);
         assert_eq!(record.grant_id, grant.id);
         assert_eq!(record.session_id.as_deref(), Some("01agentboxsession"));
+        assert_eq!(record.scope, grant.scope);
+        assert_eq!(record.expires_at, grant.expires_at);
+        assert_eq!(record.decision, ApprovalReceiptDecision::Granted);
+        assert_eq!(record.evidence_hash, "sha256:approval-evidence-root");
         assert_eq!(record.evidence_refs, vec!["audit-event-1"]);
         assert!(!record.is_signed());
 
@@ -2501,6 +2522,32 @@ mod tests {
         });
 
         assert!(record.is_signed());
+    }
+
+    #[test]
+    fn signed_approval_record_fixture_contains_required_receipt_fields() {
+        let record: SignedApprovalRecord =
+            serde_json::from_str(include_str!("../../fixtures/signed-approval-receipt.json"))
+                .unwrap();
+
+        assert_eq!(record.schema_version, 1);
+        assert_eq!(record.grant_id, "grant-git-push");
+        assert_eq!(record.session_id.as_deref(), Some("01agentboxsession"));
+        assert!(matches!(
+            record.scope,
+            ApprovalScope::Command {
+                ref binary,
+                ref args_prefix,
+            } if binary == "git" && args_prefix == &vec!["push".to_string()]
+        ));
+        assert!(record.expires_at.is_some());
+        assert_eq!(record.decision, ApprovalReceiptDecision::Granted);
+        assert_eq!(record.evidence_hash, "sha256:approval-evidence-root");
+        assert_eq!(record.evidence_refs, vec!["audit-event-1"]);
+        let signature = record.signature.expect("fixture must carry signature");
+        assert_eq!(signature.signer, "did:fides:agentbox-authority");
+        assert_eq!(signature.algorithm, "ed25519");
+        assert!(!signature.signature.is_empty());
     }
 
     #[test]

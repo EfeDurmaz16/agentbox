@@ -237,11 +237,18 @@ bridge action is executed.
 - `outcome`: `granted`, `denied`, `expired`, or `cancelled`
 - `reason`
 - `expires_at`
+- `decision`: signed approval receipt decision, when a detached receipt is
+  attached
+- `evidence_hash`: hash over the approval evidence or bundle root that the
+  receipt signs
 - `receipt_refs`: references to local audit rows, remote worker receipts,
   FIDES signatures, or other approval receipts
-- `signature`: optional detached signature descriptor; absent means unsigned
+- `signature`: optional detached signature descriptor with signer, algorithm,
+  signature bytes, and signing timestamp; absent means unsigned
 
 Unsigned local approvals are valid v0 evidence when labeled as unsigned.
+Signed approval receipt fixtures live in
+`crates/agentbox-daemon/fixtures/signed-approval-receipt.json`.
 
 ### Commands
 
