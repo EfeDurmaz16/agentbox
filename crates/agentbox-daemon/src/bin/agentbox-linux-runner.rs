@@ -256,11 +256,20 @@ mod tests {
     use super::*;
     use agentbox_daemon::runtime::providers::linux::{
         LinuxLandlockAccess, LinuxLandlockPathPolicyPlan, LinuxMountNamespaceMount,
-        LinuxOverlayFsWorkspacePlan, LinuxSeccompProfileImportDescriptor,
+        LinuxOverlayFsWorkspacePlan, LinuxSeccompProfileImportDescriptor, LinuxUserNamespacePlan,
     };
 
     fn request() -> LinuxAgentPodRunnerRequest {
         LinuxAgentPodRunnerRequest {
+            user_namespace: LinuxUserNamespacePlan {
+                schema_version: 1,
+                command_argv: vec!["/bin/true".into()],
+                map_root_user: true,
+                deny_setgroups: true,
+                uid_map: "0 current-user 1".into(),
+                gid_map: "0 current-group 1".into(),
+                requires_linux: true,
+            },
             mount_namespace: LinuxMountNamespacePlan {
                 schema_version: 1,
                 workspace_host_path: "/tmp/agentbox-work".into(),

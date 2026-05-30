@@ -1274,6 +1274,7 @@ pub struct LinuxAgentPodRunnerPhaseEvidence {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LinuxAgentPodRunnerRequest {
+    pub user_namespace: LinuxUserNamespacePlan,
     pub mount_namespace: LinuxMountNamespacePlan,
     pub seccomp: LinuxSeccompPlan,
     pub landlock: LinuxLandlockPlan,
@@ -1284,6 +1285,7 @@ pub struct LinuxAgentPodRunnerRequest {
 impl LinuxAgentPodRunnerRequest {
     pub fn from_execution_plan(plan: &LinuxAgentPodExecutionPlan, command: &ExecCommand) -> Self {
         Self {
+            user_namespace: plan.user_namespace.clone(),
             mount_namespace: plan.mount_namespace.clone(),
             seccomp: plan.seccomp.clone(),
             landlock: plan.landlock.clone(),
@@ -1323,6 +1325,7 @@ impl LinuxAgentPodExecutionPlan {
             command_argv: command.argv.clone(),
             composed_argv,
             runner_phases: linux_agentpod_runner_phases(
+                &user_namespace,
                 &mount_namespace,
                 &seccomp,
                 &landlock,
@@ -1384,6 +1387,7 @@ fn linux_agentpod_unshare_prefix(
 }
 
 fn linux_agentpod_runner_phases(
+    user_namespace: &LinuxUserNamespacePlan,
     mount_namespace: &LinuxMountNamespacePlan,
     seccomp: &LinuxSeccompPlan,
     landlock: &LinuxLandlockPlan,
@@ -1391,11 +1395,30 @@ fn linux_agentpod_runner_phases(
 ) -> Vec<LinuxAgentPodRunnerPhase> {
     vec![
         LinuxAgentPodRunnerPhase {
-            name: "enter-user-mount-pid-namespaces".into(),
-            status: "prototype".into(),
+            name: "enter-user-namespace".into(),
+            status: "gated-prototype".into(),
+            evidence_event: "agentpod.linux.runner.user_namespace.entered".into(),
+            claim: "enter Linux user namespace via unshare; requires AGENTBOX_LINUX_NATIVE=1 and does not prove live enforcement when the gate is disabled"
+                .into(),
+        },
+        LinuxAgentPodRunnerPhase {
+            name: "apply-user-namespace-map".into(),
+            status: "gated-prototype".into(),
+            evidence_event: "agentpod.linux.runner.user_namespace.map_applied".into(),
+            claim: format!(
+                "apply map-root-user={} setgroups=deny={} uid_map={} gid_map={}; requires AGENTBOX_LINUX_NATIVE=1 for live enforcement",
+                user_namespace.map_root_user,
+                user_namespace.deny_setgroups,
+                user_namespace.uid_map,
+                user_namespace.gid_map
+            ),
+        },
+        LinuxAgentPodRunnerPhase {
+            name: "enter-mount-pid-namespaces".into(),
+            status: "gated-prototype".into(),
             evidence_event: "agentpod.linux.runner.namespaces.entered".into(),
             claim: format!(
-                "unshare user, mount, and PID namespaces with {} propagation",
+                "enter mount and PID namespaces with {} propagation after user namespace mapping",
                 mount_namespace.propagation
             ),
         },
@@ -2128,10 +2151,11 @@ fn prefixed_command(binary: &str, args: Vec<String>) -> Vec<String> {
 }
 
 pub fn linux_native_execution_enabled() -> bool {
-    matches!(
-        std::env::var("AGENTBOX_LINUX_NATIVE").as_deref(),
-        Ok("1") | Ok("true") | Ok("yes")
-    )
+    linux_native_execution_enabled_value(std::env::var("AGENTBOX_LINUX_NATIVE").ok().as_deref())
+}
+
+fn linux_native_execution_enabled_value(value: Option<&str>) -> bool {
+    matches!(value, Some("1"))
 }
 
 pub fn linux_cgroup_v2_root() -> std::path::PathBuf {
@@ -3165,7 +3189,9 @@ mod tests {
                 .map(|phase| (phase.name.as_str(), phase.status.as_str()))
                 .collect::<Vec<_>>(),
             vec![
-                ("enter-user-mount-pid-namespaces", "prototype"),
+                ("enter-user-namespace", "gated-prototype"),
+                ("apply-user-namespace-map", "gated-prototype"),
+                ("enter-mount-pid-namespaces", "gated-prototype"),
                 ("bind-workspace", "prototype"),
                 ("apply-overlayfs", "inactive"),
                 ("apply-landlock", "prototype"),
@@ -3196,6 +3222,113 @@ mod tests {
         assert_eq!(plan.cgroup.cgroup_name, format!("agentbox-{}", spec.id));
         assert!(plan.landlock.default_deny);
         assert!(!plan.seccomp.requires_loader);
+    }
+
+    #[test]
+    fn agentpod_execution_plan_models_user_namespace_lifecycle_before_policy_loaders() {
+        let mut spec = MinipodSpec::for_agent_task("hermes", "/tmp/agentbox-work");
+        spec.seccomp =
+            crate::runtime::types::SeccompProfile::deny_syscalls(&["kill"], "block signal fanout");
+        let command = command(&["/bin/true"]);
+
+        let plan = LinuxAgentPodExecutionPlan::from_minipod_spec(&spec, &command).unwrap();
+
+        let phases = plan
+            .runner_phases
+            .iter()
+            .map(|phase| phase.name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            phases,
+            vec![
+                "enter-user-namespace",
+                "apply-user-namespace-map",
+                "enter-mount-pid-namespaces",
+                "bind-workspace",
+                "apply-overlayfs",
+                "apply-landlock",
+                "apply-seccomp",
+                "apply-nftables",
+                "exec-command",
+            ]
+        );
+
+        let enter_user = &plan.runner_phases[0];
+        assert_eq!(enter_user.status, "gated-prototype");
+        assert_eq!(
+            enter_user.evidence_event,
+            "agentpod.linux.runner.user_namespace.entered"
+        );
+        assert!(enter_user
+            .claim
+            .contains("requires AGENTBOX_LINUX_NATIVE=1"));
+        assert!(enter_user.claim.contains("does not prove live enforcement"));
+
+        let apply_map = &plan.runner_phases[1];
+        assert_eq!(apply_map.status, "gated-prototype");
+        assert_eq!(
+            apply_map.evidence_event,
+            "agentpod.linux.runner.user_namespace.map_applied"
+        );
+        assert!(apply_map.claim.contains("map-root-user"));
+        assert!(apply_map.claim.contains("setgroups=deny"));
+
+        let landlock_index = phases
+            .iter()
+            .position(|phase| *phase == "apply-landlock")
+            .unwrap();
+        let seccomp_index = phases
+            .iter()
+            .position(|phase| *phase == "apply-seccomp")
+            .unwrap();
+        assert!(landlock_index > 1);
+        assert!(seccomp_index > 1);
+    }
+
+    #[test]
+    fn agentpod_runner_request_carries_user_namespace_lifecycle_plan() {
+        let spec = MinipodSpec::for_agent_task("hermes", "/tmp/agentbox-work");
+        let command = command(&["/bin/true"]);
+        let plan = LinuxAgentPodExecutionPlan::from_minipod_spec(&spec, &command).unwrap();
+
+        let request = LinuxAgentPodRunnerRequest::from_execution_plan(&plan, &command);
+
+        assert_eq!(request.user_namespace, plan.user_namespace);
+        assert!(request.user_namespace.requires_linux);
+        assert!(request.user_namespace.map_root_user);
+        assert!(request.user_namespace.deny_setgroups);
+        assert_eq!(request.user_namespace.command_argv, vec!["/bin/true"]);
+    }
+
+    #[test]
+    fn user_namespace_lifecycle_stays_gated_without_native_execution() {
+        let spec = MinipodSpec::for_agent_task("hermes", "/tmp/agentbox-work");
+        let command = command(&["/bin/true"]);
+
+        let plan = LinuxAgentPodExecutionPlan::from_minipod_spec(&spec, &command).unwrap();
+
+        if std::env::var("AGENTBOX_LINUX_NATIVE").is_err() {
+            assert!(!plan.live_execution_enabled);
+            assert!(plan.runner_phases.iter().all(|phase| {
+                phase.name != "enter-user-namespace"
+                    || (phase.status == "gated-prototype"
+                        && phase.claim.contains("does not prove live enforcement"))
+            }));
+            assert!(plan.runner_phases.iter().all(|phase| {
+                phase.name != "apply-user-namespace-map"
+                    || (phase.status == "gated-prototype"
+                        && phase.claim.contains("requires AGENTBOX_LINUX_NATIVE=1"))
+            }));
+        }
+    }
+
+    #[test]
+    fn linux_native_gate_requires_exact_one_value() {
+        assert!(linux_native_execution_enabled_value(Some("1")));
+        assert!(!linux_native_execution_enabled_value(None));
+        assert!(!linux_native_execution_enabled_value(Some("")));
+        assert!(!linux_native_execution_enabled_value(Some("true")));
+        assert!(!linux_native_execution_enabled_value(Some("yes")));
     }
 
     #[test]
@@ -3248,10 +3381,10 @@ mod tests {
         assert_eq!(events[0].schema_version, 1);
         assert_eq!(events[0].provider, "agentpod-linux");
         assert_eq!(events[0].session_id, spec.id);
-        assert_eq!(events[0].phase, "enter-user-mount-pid-namespaces");
+        assert_eq!(events[0].phase, "enter-user-namespace");
         assert_eq!(
             events[0].event_name,
-            "agentpod.linux.runner.namespaces.entered"
+            "agentpod.linux.runner.user_namespace.entered"
         );
         assert!(events.iter().any(|event| {
             event.phase == "apply-seccomp"
@@ -3297,6 +3430,7 @@ mod tests {
 
         assert_eq!(request.command_argv, vec!["/bin/true"]);
         assert_eq!(request.working_dir, Some("/workspace".into()));
+        assert_eq!(request.user_namespace, plan.user_namespace);
         assert_eq!(request.mount_namespace, plan.mount_namespace);
         assert_eq!(request.seccomp, plan.seccomp);
         assert_eq!(request.landlock, plan.landlock);
