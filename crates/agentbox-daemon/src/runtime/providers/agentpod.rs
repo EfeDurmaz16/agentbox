@@ -10,12 +10,13 @@ use crate::runtime::provider::{
 use crate::runtime::providers::linux::{
     linux_native_execution_enabled, LinuxAgentPodPrototypeExecutor,
 };
-use crate::runtime::providers::macos::{
-    macos_native_execution_enabled, MacOsAgentPodPrototypeExecutor,
-};
 use crate::runtime::types::{
     CommandResult, ExecCommand, MinipodSpec, RuntimeCapability, RuntimeSession, RuntimeStatus,
 };
+
+const MACOS_PROVIDER_MISSING_PREREQUISITES: &str = "agentpod-macos is unavailable until Apple Virtualization VM lifecycle, signed Endpoint Security system extension, Network Extension lifecycle, and live allow/deny evidence tests are wired; AGENTBOX_MACOS_NATIVE=1 only enables native-plan/runner request experiments and does not enable provider execution";
+const MACOS_PROVIDER_REQUIRED_GATE: &str =
+    "VM lifecycle + signed Endpoint Security + Network Extension + live allow/deny tests";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AgentPodProviderKind {
@@ -198,20 +199,24 @@ impl AgentPodProvider {
         ))
     }
 
+    fn provider_unavailable(&self) -> RuntimeError {
+        match self.kind {
+            AgentPodProviderKind::Linux => self.linux_prototype_unavailable(),
+            AgentPodProviderKind::MacOs => {
+                RuntimeError::Unavailable(MACOS_PROVIDER_MISSING_PREREQUISITES.to_string())
+            }
+            AgentPodProviderKind::Windows => self.unavailable(),
+        }
+    }
+
     fn linux_prototype_available(&self) -> bool {
         matches!(self.kind, AgentPodProviderKind::Linux)
             && cfg!(target_os = "linux")
             && linux_native_execution_enabled()
     }
 
-    fn macos_vm_runner_invocation_available(&self) -> bool {
-        matches!(self.kind, AgentPodProviderKind::MacOs)
-            && cfg!(target_os = "macos")
-            && macos_native_execution_enabled()
-    }
-
     fn gated_invocation_available(&self) -> bool {
-        self.linux_prototype_available() || self.macos_vm_runner_invocation_available()
+        self.linux_prototype_available()
     }
 
     fn linux_prototype_unavailable(&self) -> RuntimeError {
@@ -313,8 +318,8 @@ impl RuntimeProvider for AgentPodProvider {
         let (status, requires_gate, enforcement_scope) = match self.kind {
             AgentPodProviderKind::MacOs => (
                 ProviderImplementationStatus::DescriptorOnly,
-                Some("AGENTBOX_MACOS_NATIVE=1"),
-                "plan compiler only; VM runner, system extension, and network extension are not wired",
+                Some(MACOS_PROVIDER_REQUIRED_GATE),
+                "plan compiler and runner request contract only; Apple Virtualization VM lifecycle, signed Endpoint Security system extension, Network Extension lifecycle, and live allow/deny evidence tests are not wired",
             ),
             AgentPodProviderKind::Windows => (
                 ProviderImplementationStatus::DescriptorOnly,
@@ -342,10 +347,7 @@ impl RuntimeProvider for AgentPodProvider {
 
     async fn create(&self, spec: &MinipodSpec) -> Result<RuntimeSession, RuntimeError> {
         if !self.gated_invocation_available() {
-            return Err(match self.kind {
-                AgentPodProviderKind::Linux => self.linux_prototype_unavailable(),
-                AgentPodProviderKind::MacOs | AgentPodProviderKind::Windows => self.unavailable(),
-            });
+            return Err(self.provider_unavailable());
         }
 
         let mut session = RuntimeSession::new(
@@ -370,10 +372,7 @@ impl RuntimeProvider for AgentPodProvider {
         command: &ExecCommand,
     ) -> Result<CommandResult, RuntimeError> {
         if !self.gated_invocation_available() {
-            return Err(match self.kind {
-                AgentPodProviderKind::Linux => self.linux_prototype_unavailable(),
-                AgentPodProviderKind::MacOs | AgentPodProviderKind::Windows => self.unavailable(),
-            });
+            return Err(self.provider_unavailable());
         }
 
         let session = self
@@ -406,19 +405,14 @@ impl RuntimeProvider for AgentPodProvider {
             AgentPodProviderKind::Linux => {
                 LinuxAgentPodPrototypeExecutor::execute(&session.spec, &command)
             }
-            AgentPodProviderKind::MacOs => {
-                MacOsAgentPodPrototypeExecutor::execute(&session.spec, &command)
-            }
+            AgentPodProviderKind::MacOs => Err(self.provider_unavailable()),
             AgentPodProviderKind::Windows => Err(self.unavailable()),
         }
     }
 
     async fn status(&self, session_id: &str) -> Result<RuntimeStatus, RuntimeError> {
         if !self.gated_invocation_available() {
-            return Err(match self.kind {
-                AgentPodProviderKind::Linux => self.linux_prototype_unavailable(),
-                AgentPodProviderKind::MacOs | AgentPodProviderKind::Windows => self.unavailable(),
-            });
+            return Err(self.provider_unavailable());
         }
 
         self.sessions
@@ -431,10 +425,7 @@ impl RuntimeProvider for AgentPodProvider {
 
     async fn destroy(&self, session_id: &str) -> Result<(), RuntimeError> {
         if !self.gated_invocation_available() {
-            return Err(match self.kind {
-                AgentPodProviderKind::Linux => self.linux_prototype_unavailable(),
-                AgentPodProviderKind::MacOs | AgentPodProviderKind::Windows => self.unavailable(),
-            });
+            return Err(self.provider_unavailable());
         }
 
         let mut sessions = self
@@ -451,10 +442,7 @@ impl RuntimeProvider for AgentPodProvider {
 
     async fn list(&self) -> Result<Vec<RuntimeSession>, RuntimeError> {
         if !self.gated_invocation_available() {
-            return Err(match self.kind {
-                AgentPodProviderKind::Linux => self.linux_prototype_unavailable(),
-                AgentPodProviderKind::MacOs | AgentPodProviderKind::Windows => self.unavailable(),
-            });
+            return Err(self.provider_unavailable());
         }
 
         Ok(self
@@ -616,69 +604,40 @@ mod tests {
         }
     }
 
-    #[cfg(target_os = "macos")]
     #[tokio::test]
-    async fn macos_agentpod_provider_invokes_vm_runner_behind_gate_without_claiming_boot() {
-        use std::io::Write;
-        use std::os::unix::fs::PermissionsExt;
-
-        let dir = std::env::temp_dir().join(format!(
-            "agentbox-agentpod-macos-provider-test-{}-{}",
-            std::process::id(),
-            ulid::Ulid::new()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        let runner = dir.join("fake-macos-vm-runner");
-        let marker = dir.join("runner-argv.txt");
-        let mut file = std::fs::File::create(&runner).unwrap();
-        writeln!(
-            file,
-            "#!/usr/bin/env sh\nprintf '%s\\n' \"$@\" > '{}'\necho fake vm unavailable >&2\nexit 125",
-            marker.display()
-        )
-        .unwrap();
-        let mut permissions = std::fs::metadata(&runner).unwrap().permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&runner, permissions).unwrap();
-
+    async fn macos_agentpod_provider_remains_unavailable_until_vm_lifecycle_exists() {
         let previous_gate = std::env::var_os("AGENTBOX_MACOS_NATIVE");
-        let previous_runner = std::env::var_os("AGENTBOX_MACOS_VM_RUNNER");
         std::env::set_var("AGENTBOX_MACOS_NATIVE", "1");
-        std::env::set_var("AGENTBOX_MACOS_VM_RUNNER", &runner);
 
         let provider = AgentPodProvider::new(AgentPodProviderKind::MacOs);
         let spec = MinipodSpec::for_agent_task("macos-test", std::env::temp_dir());
-        let session = provider.create(&spec).await.unwrap();
-        let err = provider
-            .exec(
-                &session.id,
-                &ExecCommand {
-                    argv: vec!["/bin/true".into()],
-                    working_dir: Some("/workspace".into()),
-                    env: HashMap::new(),
-                    timeout_seconds: Some(5),
-                },
-            )
-            .await
-            .unwrap_err();
-        let status = provider.status(&session.id).await;
+
+        assert!(!provider.is_available().await);
+        let err = provider.create(&spec).await.unwrap_err();
 
         match previous_gate {
             Some(value) => std::env::set_var("AGENTBOX_MACOS_NATIVE", value),
             None => std::env::remove_var("AGENTBOX_MACOS_NATIVE"),
         }
-        match previous_runner {
-            Some(value) => std::env::set_var("AGENTBOX_MACOS_VM_RUNNER", value),
-            None => std::env::remove_var("AGENTBOX_MACOS_VM_RUNNER"),
-        }
 
-        assert!(err.to_string().contains("contract invoked"));
-        assert!(err.to_string().contains("fake vm unavailable"));
-        let argv = std::fs::read_to_string(marker).unwrap();
-        assert!(argv.contains("--request"));
-        assert!(status.is_ok());
+        let err = err.to_string();
+        assert!(err.contains("agentpod-macos"));
+        assert!(err.contains("Apple Virtualization VM lifecycle"));
+        assert!(err.contains("signed Endpoint Security"));
+        assert!(err.contains("Network Extension lifecycle"));
+        assert!(err.contains("live allow/deny evidence tests"));
+        assert!(err.contains("AGENTBOX_MACOS_NATIVE=1 only enables native-plan/runner request"));
 
-        let _ = std::fs::remove_dir_all(dir);
+        let statuses = provider.boundary_primitive_statuses();
+        assert!(statuses.iter().all(|status| !status.active));
+        assert!(statuses.iter().all(|status| {
+            status.status == ProviderImplementationStatus::DescriptorOnly
+                && status.requires_gate == Some(MACOS_PROVIDER_REQUIRED_GATE)
+                && status.enforcement_scope.contains("VM lifecycle")
+                && status
+                    .enforcement_scope
+                    .contains("live allow/deny evidence tests")
+        }));
     }
 
     #[tokio::test]

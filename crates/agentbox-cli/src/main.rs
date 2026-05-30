@@ -2328,9 +2328,7 @@ fn setup_first_run_provider_plan(provider: Option<&str>) -> SetupFirstRunProvide
             let first_run_command = match provider_name.as_str() {
                 "direct-host" => "agentbox run --provider direct-host --risk low -- <cmd>",
                 "podman" => "agentbox run --provider podman -- <cmd>",
-                "agentpod-macos" => {
-                    "AGENTBOX_MACOS_NATIVE=1 agentbox run --provider agentpod-macos -- <cmd>"
-                }
+                "agentpod-macos" => "agentbox native-plan --provider agentpod-macos -- <cmd>",
                 "agentpod-linux" => {
                     "AGENTBOX_LINUX_NATIVE=1 agentbox run --provider agentpod-linux -- <cmd>"
                 }
@@ -6493,7 +6491,9 @@ fn format_actionable_provider_unavailable(
 fn actionable_provider_required_gate(provider: Option<&str>, reason: &str) -> String {
     match provider {
         Some("agentpod-linux") => "AGENTBOX_LINUX_NATIVE=1".to_string(),
-        Some("agentpod-macos") => "AGENTBOX_MACOS_NATIVE=1".to_string(),
+        Some("agentpod-macos") => {
+            "Apple Virtualization VM lifecycle + signed Endpoint Security + Network Extension + live allow/deny evidence tests".to_string()
+        }
         Some("agentpod-windows") => "live Windows lifecycle/enforcement gates".to_string(),
         Some("remote-agentpod") => {
             "AGENTBOX_REMOTE_AGENTPOD_ENDPOINT=https://worker.example.com/agentpod".to_string()
@@ -6501,7 +6501,9 @@ fn actionable_provider_required_gate(provider: Option<&str>, reason: &str) -> St
         Some("podman") => "podman --version".to_string(),
         Some("direct-host") => "agentbox daemon socket and shim PATH".to_string(),
         _ if reason.contains("AGENTBOX_LINUX_NATIVE=1") => "AGENTBOX_LINUX_NATIVE=1".to_string(),
-        _ if reason.contains("AGENTBOX_MACOS_NATIVE=1") => "AGENTBOX_MACOS_NATIVE=1".to_string(),
+        _ if reason.contains("Apple Virtualization VM lifecycle") => {
+            "Apple Virtualization VM lifecycle + signed Endpoint Security + Network Extension + live allow/deny evidence tests".to_string()
+        }
         _ if reason.contains("AGENTBOX_WINDOWS_NATIVE=1") => {
             "live Windows lifecycle/enforcement gates".to_string()
         }
@@ -6556,10 +6558,6 @@ fn actionable_provider_next_commands(provider: Option<&str>, reason: &str) -> Ve
             push_unique_command(
                 &mut commands,
                 "agentbox native-plan --provider agentpod-macos -- <cmd>",
-            );
-            push_unique_command(
-                &mut commands,
-                "AGENTBOX_MACOS_NATIVE=1 agentbox run --provider agentpod-macos -- <cmd>",
             );
         }
         Some("agentpod-windows") => {
@@ -6617,7 +6615,7 @@ fn runtime_provider_unavailable_reason(provider: &str, selection_reason: &str) -
                 .to_string()
         }
         "agentpod-macos" => {
-            "agentpod-macos VM-backed execution requires macOS and AGENTBOX_MACOS_NATIVE=1; provider execution remains descriptor-gated".to_string()
+            "agentpod-macos is unavailable until Apple Virtualization VM lifecycle, signed Endpoint Security system extension, Network Extension lifecycle, and live allow/deny evidence tests are wired; AGENTBOX_MACOS_NATIVE=1 only enables native-plan/runner request experiments and does not enable provider execution".to_string()
         }
         "agentpod-windows" => {
             "agentpod-windows is descriptor-only; provider execution, process assignment, cleanup, AppContainer/WFP/ETW enforcement, and live limit enforcement are not wired in this build".to_string()
@@ -10172,6 +10170,25 @@ mod tests {
     }
 
     #[test]
+    fn actionable_provider_error_does_not_offer_macos_run_gate() {
+        let message = format_actionable_provider_unavailable(
+            "agentbox run",
+            Some("agentpod-macos"),
+            &AgentPodRiskLevel::High,
+            "provider unavailable: agentpod-macos is unavailable until Apple Virtualization VM lifecycle, signed Endpoint Security system extension, Network Extension lifecycle, and live allow/deny evidence tests are wired; AGENTBOX_MACOS_NATIVE=1 only enables native-plan/runner request experiments and does not enable provider execution",
+        );
+
+        assert!(message.contains("context: provider=agentpod-macos, risk=high"));
+        assert!(message.contains("required gate: Apple Virtualization VM lifecycle"));
+        assert!(message.contains("signed Endpoint Security"));
+        assert!(message.contains("Network Extension"));
+        assert!(message.contains("live allow/deny evidence tests"));
+        assert!(message.contains("next: agentbox provider-readiness --provider agentpod-macos"));
+        assert!(message.contains("next: agentbox native-plan --provider agentpod-macos -- <cmd>"));
+        assert!(!message.contains("AGENTBOX_MACOS_NATIVE=1 agentbox run"));
+    }
+
+    #[test]
     fn actionable_provider_error_keeps_unknown_provider_generic() {
         let message = format_actionable_provider_unavailable(
             "agentbox minipod-spec",
@@ -10222,6 +10239,26 @@ mod tests {
         assert!(linux.recommended);
         assert_eq!(linux.readiness_verdict, "prototype-gated");
         assert!(linux.first_run_command.contains("AGENTBOX_LINUX_NATIVE=1"));
+    }
+
+    #[test]
+    fn setup_first_run_provider_plan_does_not_offer_macos_run_command() {
+        let plan = setup_first_run_provider_plan(Some("agentpod-macos"));
+
+        assert_eq!(plan.recommended_provider, "agentpod-macos");
+        let macos = plan
+            .options
+            .iter()
+            .find(|option| option.provider == "agentpod-macos")
+            .unwrap();
+        assert!(macos.recommended);
+        assert_eq!(macos.readiness_verdict, "metadata-only");
+        assert_eq!(
+            macos.first_run_command,
+            "agentbox native-plan --provider agentpod-macos -- <cmd>"
+        );
+        assert!(!macos.first_run_command.contains("AGENTBOX_MACOS_NATIVE=1"));
+        assert!(!macos.first_run_command.contains(" agentbox run "));
     }
 
     #[test]

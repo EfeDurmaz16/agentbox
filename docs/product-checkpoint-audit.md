@@ -43,7 +43,6 @@ Podman remains compatibility-only. These support levels must stay explicit.
 | --- | --- | --- |
 | `agentpod-linux` | rootless namespace wrapper, mount namespace plan, PID namespace plan, no-new-privs, cgroups v2 planning/apply, write/create/remove Landlock loader with explicit read/execute gap model, targeted seccomp deny loader with OCI/libseccomp import descriptor, overlayfs review workspace apply, native runner phase evidence | `AGENTBOX_LINUX_NATIVE=1` on Linux |
 | `remote-agentpod` | typed worker handshake/create/exec/destroy, workspace bundle handoff/export/apply, env/file credential handoff, command policy, approval-grant resolution, evidence upload/stream/status, lifecycle event journal, restart/status contract | HTTPS endpoint, or loopback HTTP only with `AGENTBOX_REMOTE_AGENTPOD_ALLOW_HTTP_LOOPBACK=1` |
-| `agentpod-macos` | native plan compiler, VM cell storage layout, VM runner request contract, gated runner invocation that currently returns an honest unavailable result | `AGENTBOX_MACOS_NATIVE=1` |
 
 Prototype means the surface has code and tests, but it is not yet a full
 sandbox or release-grade isolation claim.
@@ -52,7 +51,7 @@ sandbox or release-grade isolation claim.
 
 | Provider | Descriptor surface | Current limit |
 | --- | --- | --- |
-| `agentpod-macos` | Apple Virtualization, Endpoint Security, Network Extension, VM evidence observer plan | no VM boot lifecycle, no signed system extension, no live ES/NE denial proof |
+| `agentpod-macos` | Apple Virtualization, Endpoint Security, Network Extension, VM evidence observer plan, deterministic VM cell storage layout, VM runner request contract | provider execution stays unavailable; `AGENTBOX_MACOS_NATIVE=1` only enables native-plan/runner-request experiments, with no VM boot lifecycle, no signed system extension, and no live ES/NE denial proof |
 | `agentpod-windows` | Job Objects, gated Job Object create/close smoke, AppContainer, WFP, ETW, Windows Sandbox, Hyper-V, Windows native receipt descriptor | no process assignment proof, no resource limit enforcement proof, no WFP denial proof, no Sandbox/Hyper-V lifecycle |
 | FIDES / AGIT / OAPS integrations | evidence and authority descriptors | no external authority adapter or live publisher configured |
 | Linux eBPF / nftables | observability and egress policy descriptors plus gated nftables table lifecycle smoke | no probe loading, no egress hook, no packet/domain enforcement proof |
