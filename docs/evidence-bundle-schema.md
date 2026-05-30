@@ -42,6 +42,35 @@ agentpod-evidence/
     command-0001.json
 ```
 
+Agentbox also supports a portable single-file JSON archive for the same bundle
+contents. The archive is intentionally not a compression or encryption format;
+it is a transport envelope that embeds `index.json` plus each indexed file as
+UTF-8 JSON content:
+
+```json
+{
+  "schema_version": 1,
+  "archive_format": "agentpod-evidence-bundle-json-archive",
+  "index": { "...": "same root hash contract as index.json" },
+  "files": [
+    {
+      "path": "bundle.json",
+      "media_type": "application/json",
+      "description": "Full redacted AgentPod session evidence bundle",
+      "sha256": "...",
+      "bytes": 1234,
+      "contents_utf8": "{...}"
+    }
+  ]
+}
+```
+
+`agentbox evidence verify --archive <file>` verifies the embedded index root,
+per-file byte counts, per-file SHA-256 digests, path safety, and the session
+evidence hash chain when `bundle.json` carries one. `--bundle-archive` export
+does not add confidentiality; redaction must happen before the archive is
+written.
+
 Required v0 files:
 
 | Path | Purpose |

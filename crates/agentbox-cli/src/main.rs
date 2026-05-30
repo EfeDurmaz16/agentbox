@@ -421,6 +421,10 @@ enum Commands {
         #[arg(long = "bundle")]
         bundle_dir: Option<PathBuf>,
 
+        /// Write a portable single-file evidence bundle archive instead of printing JSON
+        #[arg(long = "bundle-archive")]
+        bundle_archive: Option<PathBuf>,
+
         /// Show only the AgentPod native receipt summary from a session or bundle
         #[arg(long = "agentpod-receipt")]
         agentpod_receipt: bool,
@@ -1173,6 +1177,10 @@ enum AgentPodCommands {
         #[arg(long = "bundle")]
         bundle_dir: Option<PathBuf>,
 
+        /// Write a portable single-file evidence bundle archive instead of printing JSON
+        #[arg(long = "bundle-archive")]
+        bundle_archive: Option<PathBuf>,
+
         /// Show only the AgentPod native receipt summary from a session or bundle
         #[arg(long = "agentpod-receipt")]
         agentpod_receipt: bool,
@@ -1260,11 +1268,15 @@ enum AgentPodReviewCommands {
 
 #[derive(Subcommand)]
 enum EvidenceCommands {
-    /// Verify an existing evidence bundle directory
+    /// Verify an existing evidence bundle directory or archive
     Verify {
         /// Existing evidence bundle directory produced by `agentbox evidence --bundle`
         #[arg(long = "bundle")]
-        bundle_dir: PathBuf,
+        bundle_dir: Option<PathBuf>,
+
+        /// Existing evidence bundle archive produced by `agentbox evidence --bundle-archive`
+        #[arg(long = "archive")]
+        archive: Option<PathBuf>,
     },
 }
 
@@ -5726,6 +5738,7 @@ struct EvidenceOptions {
     credentials: bool,
     network: bool,
     bundle_dir: Option<PathBuf>,
+    bundle_archive: Option<PathBuf>,
     agentpod_receipt: bool,
     command: Option<EvidenceCommands>,
 }
@@ -5738,12 +5751,14 @@ fn cmd_evidence(options: EvidenceOptions) {
         credentials,
         network,
         bundle_dir,
+        bundle_archive,
         agentpod_receipt,
         command,
     } = options;
 
     if let Some(EvidenceCommands::Verify {
         bundle_dir: verify_bundle_dir,
+        archive: verify_archive,
     }) = command
     {
         if verify
@@ -5751,17 +5766,37 @@ fn cmd_evidence(options: EvidenceOptions) {
             || credentials
             || network
             || bundle_dir.is_some()
+            || bundle_archive.is_some()
             || agentpod_receipt
         {
             eprintln!("error: evidence verify cannot be combined with legacy evidence mode flags");
             std::process::exit(1);
         }
-        cmd_verify_evidence_bundle_dir(&verify_bundle_dir);
+        match (verify_bundle_dir, verify_archive) {
+            (Some(bundle_dir), None) => cmd_verify_evidence_bundle_dir(&bundle_dir),
+            (None, Some(archive_path)) => cmd_verify_evidence_bundle_archive(&archive_path),
+            (Some(_), Some(_)) => {
+                eprintln!("error: evidence verify accepts either --bundle or --archive, not both");
+                std::process::exit(1);
+            }
+            (None, None) => {
+                eprintln!("error: evidence verify requires --bundle <dir> or --archive <file>");
+                std::process::exit(1);
+            }
+        }
         return;
     }
 
+    if bundle_dir.is_some() && bundle_archive.is_some() {
+        eprintln!("error: --bundle and --bundle-archive cannot be combined");
+        std::process::exit(1);
+    }
     if bundle_dir.is_some() && (credentials || network) {
         eprintln!("error: --bundle cannot be combined with --credentials or --network");
+        std::process::exit(1);
+    }
+    if bundle_archive.is_some() && (credentials || network) {
+        eprintln!("error: --bundle-archive cannot be combined with --credentials or --network");
         std::process::exit(1);
     }
     if agentpod_receipt && (credentials || network || verify) {
@@ -5784,6 +5819,18 @@ fn cmd_evidence(options: EvidenceOptions) {
             return;
         }
     }
+    if let Some(archive_path) = bundle_archive.as_deref() {
+        if agentpod_receipt {
+            eprintln!(
+                "error: --agentpod-receipt from archive is not implemented; use --bundle <dir>"
+            );
+            std::process::exit(1);
+        }
+        if verify {
+            cmd_verify_evidence_bundle_archive(archive_path);
+            return;
+        }
+    }
 
     let db_path = audit_db_path();
     if !db_path.exists() {
@@ -5798,6 +5845,14 @@ fn cmd_evidence(options: EvidenceOptions) {
             std::process::exit(1);
         };
         cmd_session_evidence_bundle_dir(&db_path, &session_id, limit, &bundle_dir);
+        return;
+    }
+    if let Some(bundle_archive) = bundle_archive {
+        let Some(session_id) = session else {
+            eprintln!("error: --bundle-archive requires --session <id>");
+            std::process::exit(1);
+        };
+        cmd_session_evidence_bundle_archive(&db_path, &session_id, limit, &bundle_archive);
         return;
     }
 
@@ -6195,6 +6250,28 @@ fn cmd_session_evidence_bundle_dir(
     );
 }
 
+fn cmd_session_evidence_bundle_archive(
+    db_path: &PathBuf,
+    session_id: &str,
+    limit: usize,
+    archive_path: &Path,
+) {
+    let bundle = load_session_evidence_bundle(db_path, session_id, limit);
+    write_session_evidence_bundle_archive(&bundle, archive_path).unwrap_or_else(|e| {
+        eprintln!(
+            "error: failed to write evidence bundle archive to {}: {}",
+            archive_path.display(),
+            e
+        );
+        std::process::exit(1);
+    });
+    println!(
+        "wrote evidence bundle archive {} to {}",
+        bundle.bundle_id,
+        archive_path.display()
+    );
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 struct EvidenceBundleIndex {
     schema_version: i64,
@@ -6214,6 +6291,29 @@ struct EvidenceBundleFile {
     description: String,
     sha256: String,
     bytes: usize,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct EvidenceBundleArchive {
+    schema_version: i64,
+    archive_format: String,
+    index: EvidenceBundleIndex,
+    files: Vec<EvidenceBundleArchiveFile>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct EvidenceBundleArchiveFile {
+    path: String,
+    media_type: String,
+    description: String,
+    sha256: String,
+    bytes: usize,
+    contents_utf8: String,
+}
+
+struct EvidenceBundleFilePayload {
+    descriptor: EvidenceBundleFile,
+    bytes: Vec<u8>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -6272,40 +6372,101 @@ fn write_session_evidence_bundle_dir(
     output_dir: &Path,
 ) -> io::Result<()> {
     fs::create_dir_all(output_dir)?;
-    let files = vec![
-        write_bundle_json_file(
-            output_dir,
+    let payloads = session_evidence_bundle_payloads(bundle);
+    for payload in &payloads {
+        fs::write(output_dir.join(&payload.descriptor.path), &payload.bytes)?;
+    }
+
+    let index = evidence_bundle_index(bundle, &payloads);
+    fs::write(
+        output_dir.join("index.json"),
+        serde_json::to_vec_pretty(&index).expect("failed to serialize evidence bundle index"),
+    )?;
+    Ok(())
+}
+
+fn write_session_evidence_bundle_archive(
+    bundle: &agentbox_daemon::runtime::types::SessionEvidenceBundle,
+    archive_path: &Path,
+) -> io::Result<()> {
+    let payloads = session_evidence_bundle_payloads(bundle);
+    let index = evidence_bundle_index(bundle, &payloads);
+    let files = payloads
+        .into_iter()
+        .map(|payload| EvidenceBundleArchiveFile {
+            path: payload.descriptor.path,
+            media_type: payload.descriptor.media_type,
+            description: payload.descriptor.description,
+            sha256: payload.descriptor.sha256,
+            bytes: payload.descriptor.bytes,
+            contents_utf8: String::from_utf8(payload.bytes)
+                .expect("evidence bundle payloads are serialized as UTF-8 JSON"),
+        })
+        .collect();
+    let archive = EvidenceBundleArchive {
+        schema_version: 1,
+        archive_format: "agentpod-evidence-bundle-json-archive".to_string(),
+        index,
+        files,
+    };
+    if let Some(parent) = archive_path.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent)?;
+        }
+    }
+    fs::write(
+        archive_path,
+        serde_json::to_vec_pretty(&archive).expect("failed to serialize evidence bundle archive"),
+    )
+}
+
+fn session_evidence_bundle_payloads(
+    bundle: &agentbox_daemon::runtime::types::SessionEvidenceBundle,
+) -> Vec<EvidenceBundleFilePayload> {
+    vec![
+        build_bundle_json_file(
             "bundle.json",
             "Full redacted AgentPod session evidence bundle",
             bundle,
-        )?,
-        write_bundle_json_file(
-            output_dir,
+        ),
+        build_bundle_json_file(
             "manifest.json",
             "AgentPod manifest captured for this session",
             &bundle.manifest,
-        )?,
-        write_bundle_json_file(
-            output_dir,
+        ),
+        build_bundle_json_file(
             "replay.json",
             "Metadata-only replay plan and limitations",
             &bundle.replay,
-        )?,
-        write_bundle_json_file(
-            output_dir,
+        ),
+        build_bundle_json_file(
             "transcripts.json",
             "Redacted command transcripts captured by RuntimeManager",
             &bundle.transcripts,
-        )?,
-        write_bundle_json_file(
-            output_dir,
+        ),
+        build_bundle_json_file(
             "integrations.json",
             "Descriptor-only FIDES, AGIT, and OAPS integration metadata",
             &bundle.integration_descriptors,
-        )?,
-    ];
+        ),
+    ]
+}
 
-    let index = EvidenceBundleIndex {
+fn evidence_bundle_index(
+    bundle: &agentbox_daemon::runtime::types::SessionEvidenceBundle,
+    payloads: &[EvidenceBundleFilePayload],
+) -> EvidenceBundleIndex {
+    let files = payloads
+        .iter()
+        .map(|payload| EvidenceBundleFile {
+            path: payload.descriptor.path.clone(),
+            media_type: payload.descriptor.media_type.clone(),
+            description: payload.descriptor.description.clone(),
+            sha256: payload.descriptor.sha256.clone(),
+            bytes: payload.descriptor.bytes,
+        })
+        .collect::<Vec<_>>();
+    EvidenceBundleIndex {
         schema_version: 1,
         bundle_id: bundle.bundle_id.clone(),
         session_id: bundle.session_id.clone(),
@@ -6314,29 +6475,37 @@ fn write_session_evidence_bundle_dir(
         root_sha256: evidence_bundle_root_sha256(&files),
         generated_at: bundle.generated_at,
         files,
-    };
-    fs::write(
-        output_dir.join("index.json"),
-        serde_json::to_vec_pretty(&index).expect("failed to serialize evidence bundle index"),
-    )?;
-    Ok(())
+    }
 }
 
+fn build_bundle_json_file<T: Serialize>(
+    path: &str,
+    description: &str,
+    value: &T,
+) -> EvidenceBundleFilePayload {
+    let bytes = serde_json::to_vec_pretty(value).expect("failed to serialize evidence bundle file");
+    EvidenceBundleFilePayload {
+        descriptor: EvidenceBundleFile {
+            path: path.to_string(),
+            media_type: "application/json".to_string(),
+            description: description.to_string(),
+            sha256: sha256_hex(&bytes),
+            bytes: bytes.len(),
+        },
+        bytes,
+    }
+}
+
+#[cfg(test)]
 fn write_bundle_json_file<T: Serialize>(
     output_dir: &Path,
     path: &str,
     description: &str,
     value: &T,
 ) -> io::Result<EvidenceBundleFile> {
-    let bytes = serde_json::to_vec_pretty(value).expect("failed to serialize evidence bundle file");
-    fs::write(output_dir.join(path), &bytes)?;
-    Ok(EvidenceBundleFile {
-        path: path.to_string(),
-        media_type: "application/json".to_string(),
-        description: description.to_string(),
-        sha256: sha256_hex(&bytes),
-        bytes: bytes.len(),
-    })
+    let payload = build_bundle_json_file(path, description, value);
+    fs::write(output_dir.join(path), &payload.bytes)?;
+    Ok(payload.descriptor)
 }
 
 fn cmd_verify_evidence_bundle_dir(bundle_dir: &Path) {
@@ -6352,6 +6521,26 @@ fn cmd_verify_evidence_bundle_dir(bundle_dir: &Path) {
             eprintln!(
                 "evidence bundle: invalid at {}: {}",
                 bundle_dir.display(),
+                e
+            );
+            std::process::exit(1);
+        }
+    }
+}
+
+fn cmd_verify_evidence_bundle_archive(archive_path: &Path) {
+    match verify_evidence_bundle_archive(archive_path) {
+        Ok(verified_files) => {
+            println!(
+                "evidence bundle archive: valid ({} files checked) at {}",
+                verified_files,
+                archive_path.display()
+            );
+        }
+        Err(e) => {
+            eprintln!(
+                "evidence bundle archive: invalid at {}: {}",
+                archive_path.display(),
                 e
             );
             std::process::exit(1);
@@ -6404,6 +6593,88 @@ fn verify_evidence_bundle_dir(bundle_dir: &Path) -> Result<usize, String> {
     Ok(index.files.len())
 }
 
+fn verify_evidence_bundle_archive(archive_path: &Path) -> Result<usize, String> {
+    let bytes = fs::read(archive_path)
+        .map_err(|e| format!("failed to read {}: {e}", archive_path.display()))?;
+    let archive: EvidenceBundleArchive = serde_json::from_slice(&bytes)
+        .map_err(|e| format!("failed to parse {}: {e}", archive_path.display()))?;
+
+    if archive.schema_version != 1 {
+        return Err(format!(
+            "unsupported evidence bundle archive schema version {}",
+            archive.schema_version
+        ));
+    }
+    if archive.archive_format != "agentpod-evidence-bundle-json-archive" {
+        return Err(format!(
+            "unsupported evidence bundle archive format `{}`",
+            archive.archive_format
+        ));
+    }
+    if archive.index.schema_version != 1 {
+        return Err(format!(
+            "unsupported evidence bundle index schema version {}",
+            archive.index.schema_version
+        ));
+    }
+    if archive.index.files.is_empty() {
+        return Err("evidence bundle archive index does not list any files".to_string());
+    }
+    if archive.index.files.len() != archive.files.len() {
+        return Err(format!(
+            "archive file count mismatch: index lists {}, archive contains {}",
+            archive.index.files.len(),
+            archive.files.len()
+        ));
+    }
+    let actual_root_sha256 = evidence_bundle_root_sha256(&archive.index.files);
+    if archive.index.root_sha256 != actual_root_sha256 {
+        return Err(format!(
+            "bundle root sha256 mismatch: expected {}, got {}",
+            archive.index.root_sha256, actual_root_sha256
+        ));
+    }
+
+    let mut seen_paths = std::collections::HashSet::new();
+    for descriptor in &archive.index.files {
+        safe_bundle_relative_path(&descriptor.path)?;
+        let file = archive
+            .files
+            .iter()
+            .find(|file| file.path == descriptor.path)
+            .ok_or_else(|| format!("archive is missing {}", descriptor.path))?;
+        if !seen_paths.insert(file.path.clone()) {
+            return Err(format!("archive contains duplicate file {}", file.path));
+        }
+        if file.media_type != descriptor.media_type
+            || file.description != descriptor.description
+            || file.sha256 != descriptor.sha256
+            || file.bytes != descriptor.bytes
+        {
+            return Err(format!("archive metadata mismatch for {}", descriptor.path));
+        }
+        let file_bytes = file.contents_utf8.as_bytes();
+        if file_bytes.len() != descriptor.bytes {
+            return Err(format!(
+                "{} byte count mismatch: expected {}, got {}",
+                descriptor.path,
+                descriptor.bytes,
+                file_bytes.len()
+            ));
+        }
+        let actual_sha256 = sha256_hex(file_bytes);
+        if actual_sha256 != descriptor.sha256 {
+            return Err(format!(
+                "{} sha256 mismatch: expected {}, got {}",
+                descriptor.path, descriptor.sha256, actual_sha256
+            ));
+        }
+    }
+    verify_session_evidence_hash_chain_from_archive(&archive)?;
+
+    Ok(archive.index.files.len())
+}
+
 fn verify_session_evidence_hash_chain_if_present(
     bundle_dir: &Path,
     index: &EvidenceBundleIndex,
@@ -6416,6 +6687,21 @@ fn verify_session_evidence_hash_chain_if_present(
         .map_err(|e| format!("failed to read {}: {e}", bundle_path.display()))?;
     let value: serde_json::Value = serde_json::from_slice(&bytes)
         .map_err(|e| format!("failed to parse {}: {e}", bundle_path.display()))?;
+    verify_session_evidence_hash_chain_value(value)
+}
+
+fn verify_session_evidence_hash_chain_from_archive(
+    archive: &EvidenceBundleArchive,
+) -> Result<(), String> {
+    let Some(file) = archive.files.iter().find(|file| file.path == "bundle.json") else {
+        return Ok(());
+    };
+    let value: serde_json::Value = serde_json::from_str(&file.contents_utf8)
+        .map_err(|e| format!("failed to parse archived bundle.json: {e}"))?;
+    verify_session_evidence_hash_chain_value(value)
+}
+
+fn verify_session_evidence_hash_chain_value(value: serde_json::Value) -> Result<(), String> {
     if value.get("hash_chain").is_none() {
         return Ok(());
     }
@@ -10111,6 +10397,7 @@ async fn main() {
                 credentials,
                 network,
                 bundle_dir,
+                bundle_archive,
                 agentpod_receipt,
                 command,
             } => cmd_evidence(EvidenceOptions {
@@ -10120,6 +10407,7 @@ async fn main() {
                 credentials,
                 network,
                 bundle_dir,
+                bundle_archive,
                 agentpod_receipt,
                 command,
             }),
@@ -10298,6 +10586,7 @@ async fn main() {
             credentials,
             network,
             bundle_dir,
+            bundle_archive,
             agentpod_receipt,
             command,
         } => cmd_evidence(EvidenceOptions {
@@ -10307,6 +10596,7 @@ async fn main() {
             credentials,
             network,
             bundle_dir,
+            bundle_archive,
             agentpod_receipt,
             command,
         }),
@@ -11959,6 +12249,51 @@ mod tests {
     }
 
     #[test]
+    fn evidence_bundle_archive_round_trips_through_verify() {
+        let spec = MinipodSpec::for_agent_task("codex", "/tmp/agentbox-work");
+        let session = RuntimeSession::new(
+            spec.name.clone(),
+            "direct-host".into(),
+            "macos".into(),
+            spec,
+        );
+        let bundle = SessionEvidenceBundle::from_session_events(&session, &[]);
+        let archive_path = std::env::temp_dir().join(format!(
+            "agentbox-evidence-bundle-archive-test-{}.json",
+            std::process::id()
+        ));
+        let _ = fs::remove_file(&archive_path);
+
+        write_session_evidence_bundle_archive(&bundle, &archive_path).unwrap();
+
+        assert_eq!(verify_evidence_bundle_archive(&archive_path).unwrap(), 5);
+        let archive: serde_json::Value =
+            serde_json::from_slice(&fs::read(&archive_path).unwrap()).unwrap();
+        assert_eq!(archive["schema_version"], 1);
+        assert_eq!(
+            archive["archive_format"],
+            "agentpod-evidence-bundle-json-archive"
+        );
+        assert_eq!(archive["index"]["session_id"], bundle.session_id);
+        assert_eq!(archive["files"].as_array().unwrap().len(), 5);
+
+        let mut tampered = archive;
+        let original = tampered["files"][0]["contents_utf8"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let replacement = format!(" {}{}", &original[1..2], &original[2..]);
+        assert_eq!(replacement.len(), original.len());
+        tampered["files"][0]["contents_utf8"] = serde_json::json!(replacement);
+        fs::write(&archive_path, serde_json::to_vec_pretty(&tampered).unwrap()).unwrap();
+        assert!(verify_evidence_bundle_archive(&archive_path)
+            .unwrap_err()
+            .contains("sha256 mismatch"));
+
+        let _ = fs::remove_file(archive_path);
+    }
+
+    #[test]
     fn agentpod_receipt_summary_formats_operator_view() {
         let receipt = AgentPodNativeReceiptSummary {
             schema_version: 1,
@@ -12769,7 +13104,8 @@ mod tests {
             let Commands::Evidence {
                 command:
                     Some(EvidenceCommands::Verify {
-                        bundle_dir: parsed_bundle_dir,
+                        bundle_dir: Some(parsed_bundle_dir),
+                        archive,
                     }),
                 verify,
                 bundle_dir,
@@ -12781,7 +13117,41 @@ mod tests {
 
             assert!(!verify);
             assert!(bundle_dir.is_none());
+            assert!(archive.is_none());
             assert_eq!(parsed_bundle_dir, PathBuf::from("/tmp/agentbox-evidence"));
+        });
+    }
+
+    #[test]
+    fn evidence_verify_subcommand_parses_bundle_archive() {
+        run_cli_parse_test(|| {
+            let cli = Cli::try_parse_from([
+                "agentbox",
+                "evidence",
+                "verify",
+                "--archive",
+                "/tmp/agentbox-evidence.json",
+            ])
+            .unwrap();
+
+            let Commands::Evidence {
+                command:
+                    Some(EvidenceCommands::Verify {
+                        bundle_dir,
+                        archive: Some(parsed_archive),
+                    }),
+                verify,
+                bundle_archive,
+                ..
+            } = cli.command
+            else {
+                panic!("expected evidence verify archive command");
+            };
+
+            assert!(!verify);
+            assert!(bundle_dir.is_none());
+            assert!(bundle_archive.is_none());
+            assert_eq!(parsed_archive, PathBuf::from("/tmp/agentbox-evidence.json"));
         });
     }
 
@@ -12830,7 +13200,8 @@ mod tests {
                     AgentPodCommands::Evidence {
                         command:
                             Some(EvidenceCommands::Verify {
-                                bundle_dir: parsed_bundle_dir,
+                                bundle_dir: Some(parsed_bundle_dir),
+                                archive,
                             }),
                         verify,
                         bundle_dir,
@@ -12843,6 +13214,7 @@ mod tests {
 
             assert!(!verify);
             assert!(bundle_dir.is_none());
+            assert!(archive.is_none());
             assert_eq!(parsed_bundle_dir, PathBuf::from("/tmp/agentbox-evidence"));
         });
     }

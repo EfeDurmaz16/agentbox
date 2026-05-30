@@ -143,7 +143,9 @@ grep -F "Export only session credential grants/events as JSONL" \
   "$TMPDIR/evidence-help.txt" >/dev/null
 grep -F "Show only the AgentPod native receipt summary" \
   "$TMPDIR/evidence-help.txt" >/dev/null
-grep -F "Verify an existing evidence bundle directory" \
+grep -F "Write a portable single-file evidence bundle archive" \
+  "$TMPDIR/evidence-help.txt" >/dev/null
+grep -F "Verify an existing evidence bundle directory or archive" \
   "$TMPDIR/evidence-help.txt" >/dev/null
 
 log "checking doctor JSON truth"
@@ -555,31 +557,34 @@ grep -F "Commit message for the lower workspace" \
 
 log "checking evidence bundle verification"
 BUNDLE_DIR="$TMPDIR/evidence-bundle"
+ARCHIVE_FILE="$TMPDIR/evidence-bundle.archive.json"
 mkdir -p "$BUNDLE_DIR"
 printf '{"schema_version":1,"kind":"AgentPod"}\n' >"$BUNDLE_DIR/manifest.json"
 printf '{"schema_version":1,"commands":[{"audit_event_id":"evt_1"}],"approvals":[],"lifecycle_events":[],"boundary_events":[],"credential_events":[]}\n' >"$BUNDLE_DIR/bundle.json"
-python3 - "$BUNDLE_DIR" <<'PY'
+python3 - "$BUNDLE_DIR" "$ARCHIVE_FILE" <<'PY'
 import hashlib
 import json
 import pathlib
 import sys
 
 bundle = pathlib.Path(sys.argv[1])
+archive_file = pathlib.Path(sys.argv[2])
 files = []
+archive_files = []
 for path, description in [
     ("bundle.json", "smoke bundle"),
     ("manifest.json", "smoke manifest"),
 ]:
     data = (bundle / path).read_bytes()
-    files.append(
-        {
-            "path": path,
-            "media_type": "application/json",
-            "description": description,
-            "sha256": hashlib.sha256(data).hexdigest(),
-            "bytes": len(data),
-        }
-    )
+    descriptor = {
+        "path": path,
+        "media_type": "application/json",
+        "description": description,
+        "sha256": hashlib.sha256(data).hexdigest(),
+        "bytes": len(data),
+    }
+    files.append(descriptor)
+    archive_files.append({**descriptor, "contents_utf8": data.decode("utf-8")})
 root_entries = [
     f"{entry['path']}\0{entry['sha256']}\0{entry['bytes']}\0{entry['media_type']}"
     for entry in sorted(files, key=lambda value: value["path"])
@@ -596,9 +601,17 @@ index = {
     "files": files,
 }
 (bundle / "index.json").write_text(json.dumps(index, indent=2), encoding="utf-8")
+archive_file.write_text(json.dumps({
+    "schema_version": 1,
+    "archive_format": "agentpod-evidence-bundle-json-archive",
+    "index": index,
+    "files": archive_files,
+}, indent=2), encoding="utf-8")
 PY
 "${CLI[@]}" evidence verify --bundle "$BUNDLE_DIR"
+"${CLI[@]}" evidence verify --archive "$ARCHIVE_FILE"
 "${CLI[@]}" evidence --verify --bundle "$BUNDLE_DIR"
+"${CLI[@]}" evidence --verify --bundle-archive "$ARCHIVE_FILE"
 "${CLI[@]}" remote-evidence \
   --session smoke-session \
   --worker-session smoke-worker-session \
