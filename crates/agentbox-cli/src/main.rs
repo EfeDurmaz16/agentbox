@@ -1098,6 +1098,10 @@ enum AgentPodCommands {
         #[arg(long)]
         json: bool,
 
+        /// Inspect the latest persisted AgentPod session
+        #[arg(long)]
+        latest: bool,
+
         /// Refresh the session list until interrupted
         #[arg(long)]
         watch: bool,
@@ -4848,6 +4852,7 @@ async fn cmd_pods(
             std::process::exit(1);
         });
         let sessions = filter_pod_sessions(sessions, provider.as_deref(), status.as_deref());
+        let sessions = sort_sessions_by_started_at_desc(sessions);
 
         if json {
             println!(
@@ -4888,6 +4893,36 @@ fn print_pod_sessions(sessions: &[agentbox_daemon::runtime::types::RuntimeSessio
             session.spec.agent.name
         );
     }
+}
+
+fn sort_sessions_by_started_at_desc(
+    mut sessions: Vec<agentbox_daemon::runtime::types::RuntimeSession>,
+) -> Vec<agentbox_daemon::runtime::types::RuntimeSession> {
+    sessions.sort_by(|a, b| {
+        b.started_at
+            .cmp(&a.started_at)
+            .then_with(|| b.id.cmp(&a.id))
+    });
+    sessions
+}
+
+fn latest_session_id(provider: Option<&str>, status: Option<&str>) -> Option<String> {
+    use agentbox_daemon::config;
+    use agentbox_daemon::runtime::session::RuntimeSessionStore;
+
+    let config = config::load().unwrap_or_else(|e| {
+        eprintln!("error: failed to load Agentbox config: {}", e);
+        std::process::exit(1);
+    });
+    let store = RuntimeSessionStore::new(config.session_store_path);
+    let sessions = store.list().unwrap_or_else(|e| {
+        eprintln!("error: failed to read runtime session store: {}", e);
+        std::process::exit(1);
+    });
+    let sessions = filter_pod_sessions(sessions, provider, status);
+    let sessions = sort_sessions_by_started_at_desc(sessions);
+
+    sessions.into_iter().next().map(|session| session.id)
 }
 
 fn filter_pod_sessions(
@@ -9767,6 +9802,7 @@ fn cmd_minipod_inspect(session_id: Option<String>, json: bool) {
         eprintln!("error: failed to read runtime session store: {}", e);
         std::process::exit(1);
     });
+    let sessions = sort_sessions_by_started_at_desc(sessions);
 
     if json {
         println!(
@@ -10337,13 +10373,30 @@ async fn main() {
             AgentPodCommands::Status {
                 session_id,
                 json,
+                latest,
                 watch,
                 interval_seconds,
                 provider,
                 status,
             } => {
+                if session_id.is_some() && latest {
+                    eprintln!("error: --latest cannot be used with an explicit session id");
+                    std::process::exit(2);
+                }
+                if latest && watch {
+                    eprintln!("error: --latest cannot be combined with --watch");
+                    std::process::exit(2);
+                }
                 if session_id.is_some() {
                     cmd_minipod_inspect(session_id, json)
+                } else if latest {
+                    let Some(session_id) =
+                        latest_session_id(provider.as_deref(), status.as_deref())
+                    else {
+                        eprintln!("error: no matching AgentPod session found");
+                        std::process::exit(1);
+                    };
+                    cmd_minipod_inspect(Some(session_id), json);
                 } else {
                     cmd_pods(json, watch, interval_seconds, provider, status).await
                 }
@@ -12090,6 +12143,30 @@ mod tests {
     }
 
     #[test]
+    fn pod_sessions_are_sorted_by_started_at_descending() {
+        let mut older = RuntimeSession::new(
+            "older".into(),
+            "direct-host".into(),
+            "linux".into(),
+            MinipodSpec::for_agent_task("codex", "/tmp/agentbox-direct"),
+        );
+        let mut newer = RuntimeSession::new(
+            "newer".into(),
+            "direct-host".into(),
+            "linux".into(),
+            MinipodSpec::for_agent_task("codex", "/tmp/agentbox-direct"),
+        );
+
+        older.started_at = Utc::now() - chrono::Duration::seconds(60);
+        newer.started_at = Utc::now();
+
+        let sorted = sort_sessions_by_started_at_desc(vec![older, newer]);
+        assert_eq!(sorted.len(), 2);
+        assert_eq!(sorted[0].name, "newer");
+        assert_eq!(sorted[1].name, "older");
+    }
+
+    #[test]
     fn remote_evidence_status_metadata_can_use_persisted_session_labels() {
         let mut session = RuntimeSession::new(
             "remote".into(),
@@ -13037,6 +13114,7 @@ mod tests {
                     AgentPodCommands::Status {
                         session_id: None,
                         json,
+                        latest,
                         provider,
                         status,
                         interval_seconds,
@@ -13048,6 +13126,7 @@ mod tests {
             };
 
             assert!(json);
+            assert!(!latest);
             assert_eq!(provider.as_deref(), Some("direct-host"));
             assert_eq!(status.as_deref(), Some("running"));
             assert_eq!(interval_seconds, 5);
@@ -13070,6 +13149,45 @@ mod tests {
 
             assert_eq!(session_id, "session-123");
             assert!(json);
+            assert!(!latest);
+        });
+    }
+
+    #[test]
+    fn agentpod_status_parses_latest_flag() {
+        run_cli_parse_test(|| {
+            let list_cli = Cli::try_parse_from([
+                "agentbox",
+                "agentpod",
+                "status",
+                "--latest",
+                "--provider",
+                "agentpod-linux",
+                "--status",
+                "running",
+                "--json",
+            ])
+            .unwrap();
+
+            let Commands::Agentpod {
+                command:
+                    AgentPodCommands::Status {
+                        session_id: None,
+                        latest,
+                        provider,
+                        status,
+                        json,
+                        ..
+                    },
+            } = list_cli.command
+            else {
+                panic!("expected agentpod status latest command");
+            };
+
+            assert!(latest);
+            assert!(json);
+            assert_eq!(provider.as_deref(), Some("agentpod-linux"));
+            assert_eq!(status.as_deref(), Some("running"));
         });
     }
 
