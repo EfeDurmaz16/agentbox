@@ -17,6 +17,11 @@ approval / credentials / evidence**. Providers may use guarded host processes,
 native OS sandboxes, containers, VMs, or remote workers. Podman is only a
 compatibility provider; Agentbox owns the AgentPod contract.
 
+The Rust workspace now exposes that contract directly as `agentbox-agentpod`.
+Platform loaders still live in `agentbox-daemon`, but provider ids, receipt
+types, enforcement status vocabulary, and skipped-primitive vocabulary have a
+first-class AgentPod crate instead of being hidden inside provider modules.
+
 ## Why
 
 Autonomous agents are no longer just coding helpers. Coding agents, browser

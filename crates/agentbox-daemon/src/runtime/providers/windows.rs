@@ -1,5 +1,10 @@
 use serde::{Deserialize, Serialize};
 
+use agentbox_agentpod::{
+    skipped_primitives_for_provider, AgentPodEnforcementStatus, PROVIDER_WINDOWS,
+    RUNNER_PHASE_STATUS_DESCRIPTOR, RUNNER_PHASE_STATUS_PLANNED,
+};
+
 use crate::runtime::provider::RuntimeError;
 use crate::runtime::types::{
     AgentPodNativeReceiptSummary, AgentPodRunnerPhaseReceipt, CredentialGrantKind, ExecCommand,
@@ -693,31 +698,31 @@ fn windows_native_receipt_descriptor(
     let runner_phases = vec![
         AgentPodRunnerPhaseReceipt {
             phase: "apply-job-object".into(),
-            status: "descriptor".into(),
+            status: RUNNER_PHASE_STATUS_DESCRIPTOR.into(),
             event_name: "windows.job_object.apply".into(),
             evidence_ref: Some(job_object.timeout_action.clone()),
         },
         AgentPodRunnerPhaseReceipt {
             phase: "apply-app-container".into(),
-            status: "descriptor".into(),
+            status: RUNNER_PHASE_STATUS_DESCRIPTOR.into(),
             event_name: "windows.app_container.apply".into(),
             evidence_ref: Some(app_container.workspace_boundary.access_model.clone()),
         },
         AgentPodRunnerPhaseReceipt {
             phase: "apply-wfp".into(),
-            status: "descriptor".into(),
+            status: RUNNER_PHASE_STATUS_DESCRIPTOR.into(),
             event_name: "windows.wfp.policy.apply".into(),
             evidence_ref: Some(wfp.evidence_events.join(",")),
         },
         AgentPodRunnerPhaseReceipt {
             phase: "attach-etw".into(),
-            status: "descriptor".into(),
+            status: RUNNER_PHASE_STATUS_DESCRIPTOR.into(),
             event_name: "windows.etw.observer.attach".into(),
             evidence_ref: Some(etw.evidence_export.bundle_files.join(",")),
         },
         AgentPodRunnerPhaseReceipt {
             phase: "boot-vm-boundary".into(),
-            status: "planned".into(),
+            status: RUNNER_PHASE_STATUS_PLANNED.into(),
             event_name: "windows.vm_boundary.boot".into(),
             evidence_ref: Some(vm_boundary.candidate_backends.join(",")),
         },
@@ -729,17 +734,13 @@ fn windows_native_receipt_descriptor(
 
     AgentPodNativeReceiptSummary {
         schema_version: 1,
-        provider: "agentpod-windows".into(),
-        enforcement_status: "descriptor-only-or-unobserved".into(),
+        provider: PROVIDER_WINDOWS.into(),
+        enforcement_status: AgentPodEnforcementStatus::DescriptorOnlyOrUnobserved
+            .as_str()
+            .into(),
         runner_phases,
         enforced_phases: vec![],
-        skipped_planned_primitives: vec![
-            "live Windows Job Object apply proof".into(),
-            "live AppContainer profile/ACL proof".into(),
-            "live WFP packet/domain enforcement".into(),
-            "live ETW capture/export".into(),
-            "live VM lifecycle".into(),
-        ],
+        skipped_planned_primitives: skipped_primitives_for_provider(PROVIDER_WINDOWS),
         evidence_refs,
     }
 }

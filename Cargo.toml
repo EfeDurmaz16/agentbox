@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "crates/agentbox-agentpod",
     "crates/agentbox-daemon",
     "crates/agentbox-shim",
     "crates/agentbox-cli",

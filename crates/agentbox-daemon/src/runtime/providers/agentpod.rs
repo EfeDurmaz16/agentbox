@@ -4,6 +4,8 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
+use agentbox_agentpod::{PROVIDER_LINUX, PROVIDER_MACOS, PROVIDER_WINDOWS};
+
 use crate::runtime::bridge::HostBridgeTransportKind;
 use crate::runtime::provider::{
     BoundaryPrimitiveStatus, ProviderFamily, ProviderImplementationStatus, RuntimeError,
@@ -89,9 +91,9 @@ impl AgentPodProviderKind {
 
     fn name(&self) -> &'static str {
         match self {
-            Self::MacOs => "agentpod-macos",
-            Self::Linux => "agentpod-linux",
-            Self::Windows => "agentpod-windows",
+            Self::MacOs => PROVIDER_MACOS,
+            Self::Linux => PROVIDER_LINUX,
+            Self::Windows => PROVIDER_WINDOWS,
         }
     }
 

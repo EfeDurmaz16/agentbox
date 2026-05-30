@@ -5,6 +5,13 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use ulid::Ulid;
 
+use agentbox_agentpod::{
+    is_native_agentpod_provider, runner_phase_status_counts_as_enforced,
+    runner_phase_status_counts_as_skipped, skipped_primitives_for_provider,
+    AgentPodEnforcementStatus,
+};
+pub use agentbox_agentpod::{AgentPodNativeReceiptSummary, AgentPodRunnerPhaseReceipt};
+
 use crate::audit::{redact_sensitive_text, AuditEvent};
 
 pub const AGENTPOD_SPEC_SCHEMA_VERSION: u32 = 1;
@@ -938,25 +945,6 @@ pub struct SessionEvidenceBundle {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AgentPodNativeReceiptSummary {
-    pub schema_version: i64,
-    pub provider: String,
-    pub enforcement_status: String,
-    pub runner_phases: Vec<AgentPodRunnerPhaseReceipt>,
-    pub enforced_phases: Vec<String>,
-    pub skipped_planned_primitives: Vec<String>,
-    pub evidence_refs: Vec<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AgentPodRunnerPhaseReceipt {
-    pub phase: String,
-    pub status: String,
-    pub event_name: String,
-    pub evidence_ref: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EvidenceIntegrationDescriptor {
     pub schema_version: i64,
     pub integration: String,
@@ -1219,7 +1207,7 @@ fn agentpod_native_receipt_summary(
     session: &RuntimeSession,
     events: &[AuditEvent],
 ) -> Option<AgentPodNativeReceiptSummary> {
-    if !session.provider.starts_with("agentpod-") {
+    if !is_native_agentpod_provider(&session.provider) {
         return None;
     }
 
@@ -1230,23 +1218,16 @@ fn agentpod_native_receipt_summary(
         .collect();
     let mut enforced_phases: Vec<String> = runner_phases
         .iter()
-        .filter(|phase| matches!(phase.status.as_str(), "prototype" | "shipped" | "active"))
+        .filter(|phase| runner_phase_status_counts_as_enforced(&phase.status))
         .map(|phase| phase.phase.clone())
         .collect();
     enforced_phases.sort();
     enforced_phases.dedup();
 
     let mut skipped_planned_primitives = Vec::new();
-    if session.provider == "agentpod-linux" {
-        skipped_planned_primitives.extend([
-            "complete libseccomp profile loading".to_string(),
-            "complete Landlock ABI coverage".to_string(),
-            "nftables packet/domain enforcement".to_string(),
-            "cross-host overlayfs live proof".to_string(),
-        ]);
-    }
+    skipped_planned_primitives.extend(skipped_primitives_for_provider(&session.provider));
     for phase in &runner_phases {
-        if matches!(phase.status.as_str(), "inactive" | "planned" | "descriptor") {
+        if runner_phase_status_counts_as_skipped(&phase.status) {
             skipped_planned_primitives.push(format!("{} phase {}", phase.phase, phase.status));
         }
     }
@@ -1262,10 +1243,12 @@ fn agentpod_native_receipt_summary(
         schema_version: 1,
         provider: session.provider.clone(),
         enforcement_status: if runner_phases.is_empty() {
-            "descriptor-only-or-unobserved".to_string()
+            AgentPodEnforcementStatus::DescriptorOnlyOrUnobserved
         } else {
-            "prototype-native-runner-evidence".to_string()
-        },
+            AgentPodEnforcementStatus::PrototypeNativeRunnerEvidence
+        }
+        .as_str()
+        .to_string(),
         runner_phases,
         enforced_phases,
         skipped_planned_primitives,

@@ -3,9 +3,17 @@
 version = 4
 
 [[package]]
+name = "agentbox-agentpod"
+version = "0.1.0"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "agentbox-cli"
 version = "0.1.0"
 dependencies = [
+ "agentbox-agentpod",
  "agentbox-daemon",
  "agentbox-policy",
  "chrono",
@@ -34,6 +42,7 @@ dependencies = [
 name = "agentbox-daemon"
 version = "0.1.0"
 dependencies = [
+ "agentbox-agentpod",
  "agentbox-policy",
  "async-trait",
  "chrono",

@@ -6,6 +6,7 @@ use std::process::Command;
 use std::thread;
 use std::time::Duration;
 
+use agentbox_agentpod::AgentPodNativeReceiptSummary;
 use agentbox_policy::classify::{
     Bucket, Classification, CommandContext, PolicyConfig, PolicyNetworkMode,
 };
@@ -5277,9 +5278,7 @@ fn cmd_agentpod_receipt_from_bundle_dir(bundle_dir: &Path) {
     print_agentpod_receipt_summary(receipt.as_ref());
 }
 
-fn print_agentpod_receipt_summary(
-    receipt: Option<&agentbox_daemon::runtime::types::AgentPodNativeReceiptSummary>,
-) {
+fn print_agentpod_receipt_summary(receipt: Option<&AgentPodNativeReceiptSummary>) {
     match receipt {
         Some(receipt) => print!("{}", format_agentpod_receipt_summary(receipt)),
         None => {
@@ -5291,7 +5290,7 @@ fn print_agentpod_receipt_summary(
 
 fn load_agentpod_receipt_from_bundle_dir(
     bundle_dir: &Path,
-) -> Result<Option<agentbox_daemon::runtime::types::AgentPodNativeReceiptSummary>, String> {
+) -> Result<Option<AgentPodNativeReceiptSummary>, String> {
     verify_evidence_bundle_dir(bundle_dir)?;
     let bundle_path = bundle_dir.join("bundle.json");
     let bytes = fs::read(&bundle_path)
@@ -5302,9 +5301,7 @@ fn load_agentpod_receipt_from_bundle_dir(
     Ok(bundle.agentpod_receipt)
 }
 
-fn format_agentpod_receipt_summary(
-    receipt: &agentbox_daemon::runtime::types::AgentPodNativeReceiptSummary,
-) -> String {
+fn format_agentpod_receipt_summary(receipt: &AgentPodNativeReceiptSummary) -> String {
     let mut out = String::new();
     out.push_str(&format!("provider: {}\n", receipt.provider));
     out.push_str(&format!(
@@ -9791,6 +9788,7 @@ async fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use agentbox_agentpod::AgentPodRunnerPhaseReceipt;
     use agentbox_daemon::audit::AuditEvent;
     use agentbox_daemon::runtime::providers::remote::{
         RemoteAgentPodEventStreamDescriptor, RemoteAgentPodEvidenceReceiptStatus,
@@ -9802,9 +9800,8 @@ mod tests {
         RemoteAgentPodWorkspaceExportResponse, RemoteAgentPodWorkspaceFile,
     };
     use agentbox_daemon::runtime::types::{
-        AgentPodNativeReceiptSummary, AgentPodRiskLevel, AgentPodRunnerPhaseReceipt,
-        AgentPodWorkspaceMode, MinipodSpec, RuntimeSession, RuntimeStatus, SessionEvidenceBundle,
-        WorkspaceWritePolicy,
+        AgentPodRiskLevel, AgentPodWorkspaceMode, MinipodSpec, RuntimeSession, RuntimeStatus,
+        SessionEvidenceBundle, WorkspaceWritePolicy,
     };
 
     #[test]

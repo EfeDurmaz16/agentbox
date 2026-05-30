@@ -79,6 +79,11 @@ risk, native sandboxing for medium risk, VM-backed cells for high risk, and
 remote/disposable workers when useful. Strong isolation is provided by real OS
 or virtualization primitives, not by branding.
 
+The repo should make that product boundary visible. `agentbox-agentpod` is the
+small contract crate for AgentPod provider ids, receipt summaries, enforcement
+status vocabulary, and skipped-primitive vocabulary. `agentbox-daemon` owns the
+current platform-specific runners and providers.
+
 ## Current State
 
 The validated core today is:

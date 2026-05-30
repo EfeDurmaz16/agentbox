@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+agentbox-agentpod = { path = "../agentbox-agentpod" }
 agentbox-policy = { path = "../agentbox-policy" }
 tokio = { workspace = true }
 serde = { workspace = true }

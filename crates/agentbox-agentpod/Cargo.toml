@@ -1,0 +1,8 @@
+[package]
+name = "agentbox-agentpod"
+version.workspace = true
+edition.workspace = true
+description = "AgentPod contract vocabulary and receipt types for Agentbox"
+
+[dependencies]
+serde = { workspace = true }

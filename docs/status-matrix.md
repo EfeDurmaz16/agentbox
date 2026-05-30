@@ -13,6 +13,7 @@ implemented yet. The canonical status terms live in the
 |---------|--------|---------------|
 | PATH shim interception | Shipped | `agentbox-shim` forwards command context to the daemon over a Unix socket. |
 | Policy classifier | Shipped | `agentbox-policy` classifies allow, approve, and block decisions with workspace and config input. |
+| AgentPod contract crate | Shipped | `agentbox-agentpod` is a first-class workspace crate for AgentPod provider ids, native receipt summary types, runner phase receipt vocabulary, enforcement status labels, and skipped-primitive vocabulary. Platform-specific loaders still live in `agentbox-daemon`. |
 | Out-of-band approval | Shipped | The daemon can send ntfy approvals and waits for approve, deny, or timeout. |
 | SQLite audit log | Shipped | The daemon records command, cwd, bucket, decision, parent process, and timing. |
 | Hash-chained evidence | Shipped | New audit rows include `schema_version`, `prev_hash`, and `event_hash`. |

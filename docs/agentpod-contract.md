@@ -9,6 +9,13 @@ contract around an agent task. The provider underneath may be a guarded host
 process, a native OS sandbox, a container-like runtime, a VM-backed cell, or a
 remote worker. The contract remains the same.
 
+In code, the provider-neutral contract surface lives in the `agentbox-agentpod`
+crate. That crate owns stable provider ids, native receipt summary types,
+runner phase receipt vocabulary, enforcement status labels, and skipped
+primitive vocabulary. Platform loaders remain in `agentbox-daemon` so the core
+contract can stay small while Linux, macOS, Windows, and remote execution evolve
+at different speeds.
+
 ```text
 agent intent
   -> AgentPod manifest
