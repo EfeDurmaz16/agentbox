@@ -1,9 +1,9 @@
 # AgentPod Productization Execution Dashboard
-Generated: 2026-05-30T21:20:12.676577+00:00
-Open issues: 56
+Generated: 2026-05-30T21:22:41.560220+00:00
+Open issues: 55
 
 ## Coverage
-- Mapped into 100-issue AgentPod plan: 38
+- Mapped into 100-issue AgentPod plan: 37
 - Outside mapped plan (legacy/epic-level tasks): 18
 
 ## Open Issue Surface (sorted by priority, then plan id)
@@ -62,20 +62,19 @@ Open issues: 56
 | #237 | AgentPod 078: Define Windows evidence via ETW path | p2 | m | evidence | feature | windows-native | windows | yes |
 | #238 | AgentPod 079: Add Windows installer prerequisite checks | p2 | m | install | infra | windows-native | windows | yes |
 | #239 | AgentPod 080: Document Windows non-goals for first paid/OSS release | p2 | s | docs | docs | windows-native | windows | yes |
-| #247 | AgentPod 088: Add evidence export formats | p2 | m | evidence | feature | evidence-integrations | n/a | yes |
 | #248 | AgentPod 089: Add evidence retention policy controls | p2 | m | evidence | feature | evidence-integrations | n/a | yes |
 | #249 | AgentPod 090: Document evidence trust boundaries | p2 | s | evidence | docs | evidence-integrations | n/a | yes |
 | #159 | Task 159: Add product status checkpoint for tasks 139-149 | p2 | s | docs | docs | n/a | n/a | no |
 
 ## Priority and area buckets (open issues)
 
-- p0=8 | p1=25 | p2=23 | n/a=0
+- p0=8 | p1=25 | p2=22 | n/a=0
 
 ```text
 runtime                      17
 policy                       10
 docs                         9
-evidence                     8
+evidence                     7
 security                     4
 cli                          3
 n/a                          2
