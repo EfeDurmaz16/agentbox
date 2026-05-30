@@ -42,6 +42,7 @@ Podman remains compatibility-only. These support levels must stay explicit.
 | Provider | Prototype behavior | Gate |
 | --- | --- | --- |
 | `agentpod-linux` | rootless namespace wrapper, mount namespace plan, PID namespace plan, no-new-privs, cgroups v2 planning/apply, read/write/execute Landlock path-beneath loader with explicit runtime support paths, targeted seccomp deny loader with OCI/libseccomp import descriptor, overlayfs review workspace apply, native runner phase evidence, and descriptor-only eBPF observability receipts | `AGENTBOX_LINUX_NATIVE=1` on Linux plus host prerequisites: `unshare`, user namespaces, and a cgroups v2 root |
+| `agentpod-macos` | gated Apple Virtualization boot-prerequisite/start prototype aligned with `VZLinuxBootLoader`, kernel/initrd artifacts, `VZVirtualMachineConfiguration.validate()`, and `VZVirtualMachine.start` | `AGENTBOX_MACOS_VM_BOOT_PROTOTYPE=1` plus macOS, kernel/initrd paths, Swift toolchain, `codesign`, and `com.apple.security.virtualization` |
 | `remote-agentpod` | typed worker handshake/create/exec/destroy, workspace bundle handoff/export/apply, env/file credential handoff, command policy, approval-grant resolution, evidence upload/stream/status, lifecycle event journal, restart/status contract | HTTPS endpoint, or loopback HTTP only with `AGENTBOX_REMOTE_AGENTPOD_ALLOW_HTTP_LOOPBACK=1` |
 
 Prototype means the surface has code and tests, but it is not yet a full
@@ -51,7 +52,7 @@ sandbox or release-grade isolation claim.
 
 | Provider | Descriptor surface | Current limit |
 | --- | --- | --- |
-| `agentpod-macos` | Apple Virtualization, Endpoint Security, Network Extension, VM evidence observer plan, deterministic VM cell storage layout, VM runner request contract | provider execution stays unavailable; `AGENTBOX_MACOS_NATIVE=1` only enables native-plan/runner-request experiments, with no VM boot lifecycle, no signed system extension, and no live ES/NE denial proof |
+| `agentpod-macos` | Endpoint Security, Network Extension, VM evidence observer plan, deterministic VM cell storage layout, VM runner request contract | provider execution stays unavailable; `AGENTBOX_MACOS_NATIVE=1` only enables native-plan/runner-request experiments, with no host bridge evidence, no signed system extension, and no live ES/NE denial proof |
 | `agentpod-windows` | Job Objects, gated Job Object create/close smoke, AppContainer, WFP, ETW, Windows Sandbox, Hyper-V, Windows native receipt descriptor | no process assignment proof, no resource limit enforcement proof, no WFP denial proof, no Sandbox/Hyper-V lifecycle |
 | FIDES / AGIT / OAPS integrations | evidence and authority descriptors | no external authority adapter or live publisher configured |
 | Linux network/eBPF/nftables | coarse connect-deny seccomp bridge for deny-all modes, eBPF observability receipts, egress policy descriptors, plus gated nftables table lifecycle smoke | no probe loading, no live eBPF event capture, no domain allowlist enforcement, no packet firewall denial proof |

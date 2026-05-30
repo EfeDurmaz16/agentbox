@@ -69,9 +69,10 @@ The sprint has moved past pure planning. The current working spine is:
   exposes prerequisite checks and ordered runner phases for the future Apple
   Virtualization VM runner, Endpoint Security system extension, Network
   Extension, host bridge, and evidence flow. The daemon also has a typed VM
-  runner request schema plus a contract-only `agentbox-macos-vm-runner` binary
-  that validates requests and refuses execution honestly until VM lifecycle
-  wiring lands.
+  runner request schema, a Linux `VZLinuxBootLoader` artifact contract, and a
+  gated `agentbox-macos-vm-runner` boot prototype that either reports typed
+  missing prerequisites or attempts Apple Virtualization only when kernel/initrd
+  and entitlement prerequisites are present.
 - `agentbox doctor --json` and setup-plan filtering now surface macOS VM runner
   and extension readiness gaps as advisory checks instead of hiding them in
   prose.

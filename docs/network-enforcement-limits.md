@@ -23,7 +23,7 @@ evidence layers.
 |---------|------------------|-------|
 | Direct host shims | Command classification and audit evidence | Only commands that pass through shims are governed. Direct sockets from binaries, browsers, SDKs, or interpreters are not fully mediated. |
 | Podman compatibility | Coarse provider network mode plus daemon policy/evidence | Domain allow/deny is not proven as packet-level enforcement. macOS Podman also runs behind a VM boundary. |
-| macOS AgentPod | Descriptor only | Network Extension is planned, but no shipped entitlement-backed provider exists. |
+| macOS AgentPod | Gated VM boot prototype plus descriptors | Network Extension is planned, but no shipped entitlement-backed provider exists. The Apple Virtualization boot prototype does not mediate egress. |
 | Linux AgentPod | Prototype primitives | eBPF/nftables are planned for observability or enforcement. A gated nftables table lifecycle smoke exists, but it does not attach egress hooks or prove packet/domain denial. |
 | Windows AgentPod | Prototype primitives | WFP/ETW are planned for network governance/evidence, but provider execution remains unavailable. |
 

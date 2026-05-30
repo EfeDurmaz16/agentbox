@@ -81,11 +81,16 @@ agentbox native-plan --provider agentpod-macos -- /bin/true
 ```
 
 That command is a compiler for the VM cell, Endpoint Security, Network
-Extension, entitlement, host bridge, and evidence surfaces. It does not launch a
-VM, install a system extension, activate Network Extension filtering, or enforce
-host file/network decisions. Until those pieces exist, Agentbox should describe
-macOS native enforcement as a provider descriptor with a plan compiler, not as
-shipped support.
+Extension, entitlement, host bridge, and evidence surfaces. The VM cell boot
+contract follows Apple's Linux VM path: `VZLinuxBootLoader` needs a host
+architecture kernel image, a matching initial RAM disk, a
+`VZVirtualMachineConfiguration` that passes `validate()`, and an executable with
+`com.apple.security.virtualization`. `agentbox-macos-vm-runner` can emit a typed
+boot-prerequisite report behind `AGENTBOX_MACOS_VM_BOOT_PROTOTYPE=1`, but it
+still does not make `agentpod-macos` provider execution available, install a
+system extension, activate Network Extension filtering, or enforce host
+file/network decisions. Until those pieces exist, Agentbox should describe macOS
+native enforcement as a gated prototype plus descriptors, not as shipped support.
 
 See [macOS Endpoint Security enforcement design](macos-endpoint-security.md) and
 [macOS system extension scaffold plan](macos-system-extension-scaffold.md) for

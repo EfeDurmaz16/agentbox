@@ -24,6 +24,7 @@ pub struct MacOsVirtualizationCellPlan {
     pub workspace_guest_path: String,
     pub cell_config: MacOsVmCellConfigPlan,
     pub storage_layout: MacOsVmCellStorageLayout,
+    pub linux_boot: MacOsLinuxBootPlan,
     pub shared_directories: Vec<MacOsSharedDirectoryPlan>,
     pub host_bridge: MacOsHostBridgePlan,
     pub requires_apple_virtualization: bool,
@@ -57,6 +58,17 @@ pub struct MacOsVmCellCleanupPolicy {
     pub destroy_cell_root_after_stop: bool,
     pub seal_evidence_before_cleanup: bool,
     pub retain_disk_image_on_failure: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MacOsLinuxBootPlan {
+    pub schema_version: i64,
+    pub boot_loader: String,
+    pub kernel_image_host_path: Option<String>,
+    pub initial_ramdisk_host_path: Option<String>,
+    pub kernel_command_line: Vec<String>,
+    pub requires_architecture_match: bool,
+    pub claim_boundary: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -207,6 +219,7 @@ impl MacOsVirtualizationCellPlan {
         let bridge_socket_guest_path = "/run/agentbox/bridge.sock".to_string();
 
         let storage_layout = MacOsVmCellStorageLayout::from_minipod_spec(spec);
+        let linux_boot = MacOsLinuxBootPlan::from_env();
 
         Ok(Self {
             schema_version: 1,
@@ -224,6 +237,7 @@ impl MacOsVirtualizationCellPlan {
                 shutdown_policy: "destroy-vm-cell-and-seal-evidence".into(),
             },
             storage_layout,
+            linux_boot,
             shared_directories,
             host_bridge: MacOsHostBridgePlan {
                 transport: HostBridgeTransportKind::Vsock,
@@ -234,6 +248,55 @@ impl MacOsVirtualizationCellPlan {
             requires_apple_virtualization: true,
         })
     }
+}
+
+impl MacOsLinuxBootPlan {
+    pub fn from_env() -> Self {
+        Self {
+            schema_version: 1,
+            boot_loader: "VZLinuxBootLoader".into(),
+            kernel_image_host_path: env_string("AGENTBOX_MACOS_VM_KERNEL_IMAGE"),
+            initial_ramdisk_host_path: env_string("AGENTBOX_MACOS_VM_INITRD_IMAGE"),
+            kernel_command_line: vec!["console=hvc0".into(), "rd.break=initqueue".into()],
+            requires_architecture_match: true,
+            claim_boundary: "Linux boot artifact contract only; VM boot is gated by AGENTBOX_MACOS_VM_BOOT_PROTOTYPE=1 and Apple Virtualization prerequisites".into(),
+        }
+    }
+
+    pub fn validate_contract(&self) -> Result<(), RuntimeError> {
+        if self.schema_version != 1 {
+            return Err(RuntimeError::ManifestRejected(
+                "macOS Linux boot plan schema_version must be 1".into(),
+            ));
+        }
+        if self.boot_loader != "VZLinuxBootLoader" {
+            return Err(RuntimeError::ManifestRejected(
+                "macOS Linux boot plan must use VZLinuxBootLoader".into(),
+            ));
+        }
+        if !self
+            .kernel_command_line
+            .iter()
+            .any(|argument| argument == "console=hvc0")
+        {
+            return Err(RuntimeError::ManifestRejected(
+                "macOS Linux boot plan must expose the virtio console with console=hvc0".into(),
+            ));
+        }
+        if !self.claim_boundary.contains("gated") {
+            return Err(RuntimeError::ManifestRejected(
+                "macOS Linux boot plan must keep an explicit gated boot claim boundary".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn env_string(name: &str) -> Option<String> {
+    std::env::var(name)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
 }
 
 impl MacOsVmCellStorageLayout {
@@ -659,6 +722,7 @@ pub struct MacOsVmCellBootRequest {
     pub storage_layout: MacOsVmCellStorageLayout,
     pub workspace_mount: MacOsWorkspaceMountPlan,
     pub shared_directories: Vec<MacOsSharedDirectoryPlan>,
+    pub linux_boot: MacOsLinuxBootPlan,
     pub bridge_socket_guest_path: String,
     pub evidence_spool_guest_path: String,
     pub required_entitlements: Vec<String>,
@@ -682,6 +746,7 @@ impl MacOsVmCellBootRequest {
             storage_layout: plan.virtualization.storage_layout.clone(),
             workspace_mount: plan.virtualization.cell_config.workspace_mount.clone(),
             shared_directories: plan.virtualization.shared_directories.clone(),
+            linux_boot: plan.virtualization.linux_boot.clone(),
             bridge_socket_guest_path: plan
                 .virtualization
                 .cell_config
@@ -693,8 +758,7 @@ impl MacOsVmCellBootRequest {
                 .evidence_spool_guest_path
                 .clone(),
             required_entitlements: plan.required_entitlements.clone(),
-            claim_boundary:
-                "boot request contract only; Apple Virtualization lifecycle is not wired".into(),
+            claim_boundary: "boot request contract only; gated Apple Virtualization boot prototype requires AGENTBOX_MACOS_VM_BOOT_PROTOTYPE=1 plus kernel/initrd and entitlement prerequisites".into(),
         }
     }
 
@@ -735,6 +799,7 @@ impl MacOsVmCellBootRequest {
             ));
         }
         validate_macos_workspace_mount_contract(&self.workspace_mount)?;
+        self.linux_boot.validate_contract()?;
         if !self
             .required_entitlements
             .iter()
@@ -744,10 +809,12 @@ impl MacOsVmCellBootRequest {
                 "macOS VM cell boot request must require Apple Virtualization entitlement".into(),
             ));
         }
-        if !self.claim_boundary.contains("not wired") {
+        if !self
+            .claim_boundary
+            .contains("gated Apple Virtualization boot prototype")
+        {
             return Err(RuntimeError::ManifestRejected(
-                "macOS VM cell boot request must keep an explicit non-execution claim boundary"
-                    .into(),
+                "macOS VM cell boot request must keep an explicit gated boot claim boundary".into(),
             ));
         }
         Ok(())
@@ -890,6 +957,16 @@ fn macos_native_prerequisite_checks() -> Vec<MacOsNativePrerequisiteCheck> {
             probe: "agentbox-macos-vm-runner --version".into(),
             claim: "dedicated VM runner exists and owns Apple Virtualization lifecycle".into(),
         },
+        macos_boot_artifact_prerequisite(
+            "linux-kernel-image",
+            "AGENTBOX_MACOS_VM_KERNEL_IMAGE",
+            "VZLinuxBootLoader kernelURL exists and matches the host CPU architecture",
+        ),
+        macos_boot_artifact_prerequisite(
+            "linux-initial-ramdisk",
+            "AGENTBOX_MACOS_VM_INITRD_IMAGE",
+            "VZLinuxBootLoader initialRamdiskURL exists and matches the host CPU architecture",
+        ),
         MacOsNativePrerequisiteCheck {
             name: "endpoint-security-system-extension".into(),
             status: "planned".into(),
@@ -908,6 +985,25 @@ fn macos_native_prerequisite_checks() -> Vec<MacOsNativePrerequisiteCheck> {
     ]
 }
 
+fn macos_boot_artifact_prerequisite(
+    name: &str,
+    env_var: &str,
+    claim: &str,
+) -> MacOsNativePrerequisiteCheck {
+    let status = if env_string(env_var).is_some() {
+        "host-probe-required"
+    } else {
+        "missing"
+    };
+    MacOsNativePrerequisiteCheck {
+        name: name.into(),
+        status: status.into(),
+        required: true,
+        probe: format!("test -f \"${env_var}\""),
+        claim: claim.into(),
+    }
+}
+
 fn macos_agentpod_runner_phases() -> Vec<MacOsAgentPodRunnerPhase> {
     vec![
         MacOsAgentPodRunnerPhase {
@@ -916,9 +1012,14 @@ fn macos_agentpod_runner_phases() -> Vec<MacOsAgentPodRunnerPhase> {
             claim: "emit secret-free VM cell, workspace mount, bridge socket, and evidence spool descriptors".into(),
         },
         MacOsAgentPodRunnerPhase {
+            name: "validate-vm-configuration".into(),
+            status: "gated-prototype".into(),
+            claim: "validate VZVirtualMachineConfiguration against Apple Virtualization prerequisites before boot".into(),
+        },
+        MacOsAgentPodRunnerPhase {
             name: "start-virtualization-vm".into(),
-            status: "planned".into(),
-            claim: "boot a short-lived Apple Virtualization VM cell for the AgentPod session".into(),
+            status: "gated-prototype".into(),
+            claim: "boot a short-lived Apple Virtualization VM cell for the AgentPod session when kernel/initrd, entitlement, and host support are present".into(),
         },
         MacOsAgentPodRunnerPhase {
             name: "attach-host-bridge".into(),
@@ -1558,6 +1659,15 @@ mod tests {
                 .cleanup_policy
                 .seal_evidence_before_cleanup
         );
+        assert_eq!(plan.linux_boot.schema_version, 1);
+        assert_eq!(plan.linux_boot.boot_loader, "VZLinuxBootLoader");
+        assert!(plan.linux_boot.kernel_image_host_path.is_none());
+        assert!(plan.linux_boot.initial_ramdisk_host_path.is_none());
+        assert!(plan
+            .linux_boot
+            .kernel_command_line
+            .contains(&"console=hvc0".to_string()));
+        plan.linux_boot.validate_contract().unwrap();
         assert_eq!(plan.cell_config.credential_channels.len(), 2);
         assert!(plan.cell_config.credential_channels.iter().any(|channel| {
             channel.name == "AWS_PROFILE"
@@ -1678,7 +1788,8 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![
                 ("compile-vm-cell-config", "descriptor"),
-                ("start-virtualization-vm", "planned"),
+                ("validate-vm-configuration", "gated-prototype"),
+                ("start-virtualization-vm", "gated-prototype"),
                 ("attach-host-bridge", "planned"),
                 ("attach-endpoint-security", "planned"),
                 ("attach-network-extension", "planned"),
@@ -1768,7 +1879,13 @@ mod tests {
             None => std::env::remove_var("AGENTBOX_MACOS_NATIVE"),
         }
 
-        assert!(err.to_string().contains("requires AGENTBOX_MACOS_NATIVE=1"));
+        let err = err.to_string();
+        assert!(err.contains("macOS AgentPod VM runner"));
+        assert!(
+            err.contains("requires AGENTBOX_MACOS_NATIVE=1")
+                || err.contains("agentbox-macos-vm-runner binary not found")
+                || err.contains("VM execution is unavailable")
+        );
     }
 
     #[test]
@@ -1786,8 +1903,12 @@ mod tests {
         assert_eq!(request.boot_request.session_id, request.session_id);
         assert_eq!(request.boot_request.command_argv, request.command_argv);
         assert_eq!(
+            request.boot_request.linux_boot,
+            request.virtualization.linux_boot
+        );
+        assert_eq!(
             request.boot_request.claim_boundary,
-            "boot request contract only; Apple Virtualization lifecycle is not wired"
+            "boot request contract only; gated Apple Virtualization boot prototype requires AGENTBOX_MACOS_VM_BOOT_PROTOTYPE=1 plus kernel/initrd and entitlement prerequisites"
         );
         request.boot_request.validate().unwrap();
         assert_eq!(request.virtualization, plan.virtualization);
@@ -1826,10 +1947,17 @@ mod tests {
             boot_request.bridge_socket_guest_path,
             "/run/agentbox/bridge.sock"
         );
+        assert_eq!(boot_request.linux_boot.boot_loader, "VZLinuxBootLoader");
+        assert!(boot_request
+            .linux_boot
+            .kernel_command_line
+            .contains(&"console=hvc0".to_string()));
         assert!(boot_request
             .required_entitlements
             .contains(&"com.apple.security.virtualization".into()));
-        assert!(boot_request.claim_boundary.contains("not wired"));
+        assert!(boot_request
+            .claim_boundary
+            .contains("gated Apple Virtualization boot prototype"));
         boot_request.validate().unwrap();
     }
 
@@ -1871,13 +1999,24 @@ mod tests {
         assert_eq!(request.command_argv[0], "/usr/bin/python3");
         assert_eq!(request.workspace_mount.guest_path, "/workspace");
         assert_eq!(request.shared_directories.len(), 1);
+        assert_eq!(request.linux_boot.boot_loader, "VZLinuxBootLoader");
+        assert_eq!(
+            request.linux_boot.kernel_image_host_path.as_deref(),
+            Some("/Users/example/.agentbox/agentpods/macos/fixture-session/boot/vmlinuz")
+        );
+        assert_eq!(
+            request.linux_boot.initial_ramdisk_host_path.as_deref(),
+            Some("/Users/example/.agentbox/agentpods/macos/fixture-session/boot/initrd.img")
+        );
         assert!(
             request
                 .storage_layout
                 .cleanup_policy
                 .seal_evidence_before_cleanup
         );
-        assert!(request.claim_boundary.contains("not wired"));
+        assert!(request
+            .claim_boundary
+            .contains("gated Apple Virtualization boot prototype"));
     }
 
     #[test]
@@ -2000,6 +2139,31 @@ mod tests {
             assert!(!plan.live_execution_enabled);
             assert!(!plan.runnable_on_current_host());
         }
+    }
+
+    #[test]
+    fn macos_execution_plan_lists_linux_boot_artifact_prerequisites() {
+        let spec = MinipodSpec::for_agent_task("hermes", "/tmp/agentbox-work");
+        let plan =
+            MacOsAgentPodExecutionPlan::from_minipod_spec(&spec, &command(&["/bin/true"])).unwrap();
+
+        assert!(plan
+            .prerequisite_checks
+            .iter()
+            .any(|check| check.name == "linux-kernel-image"
+                && check.required
+                && check.probe.contains("AGENTBOX_MACOS_VM_KERNEL_IMAGE")));
+        assert!(plan
+            .prerequisite_checks
+            .iter()
+            .any(|check| check.name == "linux-initial-ramdisk"
+                && check.required
+                && check.probe.contains("AGENTBOX_MACOS_VM_INITRD_IMAGE")));
+        assert!(plan
+            .runner_phases
+            .iter()
+            .any(|phase| phase.name == "validate-vm-configuration"
+                && phase.status == "gated-prototype"));
     }
 
     #[test]

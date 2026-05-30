@@ -65,6 +65,18 @@
       "kind": "WorkspaceOverlay"
     }
   ],
+  "linux_boot": {
+    "schema_version": 1,
+    "boot_loader": "VZLinuxBootLoader",
+    "kernel_image_host_path": "/Users/example/.agentbox/agentpods/macos/fixture-session/boot/vmlinuz",
+    "initial_ramdisk_host_path": "/Users/example/.agentbox/agentpods/macos/fixture-session/boot/initrd.img",
+    "kernel_command_line": [
+      "console=hvc0",
+      "rd.break=initqueue"
+    ],
+    "requires_architecture_match": true,
+    "claim_boundary": "Linux boot artifact contract only; VM boot is gated by AGENTBOX_MACOS_VM_BOOT_PROTOTYPE=1 and Apple Virtualization prerequisites"
+  },
   "bridge_socket_guest_path": "/run/agentbox/bridge.sock",
   "evidence_spool_guest_path": "/var/lib/agentbox/evidence",
   "required_entitlements": [
@@ -72,5 +84,5 @@
     "com.apple.developer.endpoint-security.client",
     "com.apple.developer.networking.networkextension"
   ],
-  "claim_boundary": "boot request contract only; Apple Virtualization lifecycle is not wired"
+  "claim_boundary": "boot request contract only; gated Apple Virtualization boot prototype requires AGENTBOX_MACOS_VM_BOOT_PROTOTYPE=1 plus kernel/initrd and entitlement prerequisites"
 }

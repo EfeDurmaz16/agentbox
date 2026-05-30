@@ -20,9 +20,9 @@ use crate::runtime::types::{
     CommandResult, ExecCommand, MinipodSpec, RuntimeCapability, RuntimeSession, RuntimeStatus,
 };
 
-const MACOS_PROVIDER_MISSING_PREREQUISITES: &str = "agentpod-macos is unavailable until Apple Virtualization VM lifecycle, signed Endpoint Security system extension, Network Extension lifecycle, and live allow/deny evidence tests are wired; AGENTBOX_MACOS_NATIVE=1 only enables native-plan/runner request experiments and does not enable provider execution";
+const MACOS_PROVIDER_MISSING_PREREQUISITES: &str = "agentpod-macos is unavailable until Apple Virtualization VM lifecycle, signed Endpoint Security system extension, Network Extension lifecycle, and live allow/deny evidence tests are wired; AGENTBOX_MACOS_NATIVE=1 only enables native-plan/runner request experiments, and AGENTBOX_MACOS_VM_BOOT_PROTOTYPE=1 only enables a gated Apple Virtualization boot prototype when kernel/initrd artifacts and entitlement prerequisites are present; neither gate enables provider execution";
 const MACOS_PROVIDER_REQUIRED_GATE: &str =
-    "VM lifecycle + signed Endpoint Security + Network Extension + live allow/deny tests";
+    "Apple Virtualization boot lifecycle + signed Endpoint Security + Network Extension + live allow/deny tests";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AgentPodProviderKind {
@@ -380,7 +380,7 @@ impl RuntimeProvider for AgentPodProvider {
             AgentPodProviderKind::MacOs => (
                 ProviderImplementationStatus::DescriptorOnly,
                 Some(MACOS_PROVIDER_REQUIRED_GATE),
-                "plan compiler and runner request contract only; Apple Virtualization VM lifecycle, signed Endpoint Security system extension, Network Extension lifecycle, and live allow/deny evidence tests are not wired",
+                "plan compiler and runner request contract only; Apple Virtualization boot is gated separately by AGENTBOX_MACOS_VM_BOOT_PROTOTYPE=1, but provider execution, signed Endpoint Security system extension, Network Extension lifecycle, and live allow/deny evidence tests are not wired",
             ),
             AgentPodProviderKind::Windows => (
                 ProviderImplementationStatus::DescriptorOnly,
@@ -392,12 +392,26 @@ impl RuntimeProvider for AgentPodProvider {
 
         self.planned_primitives()
             .iter()
-            .map(|primitive| BoundaryPrimitiveStatus {
-                primitive: primitive.label(),
-                status,
-                active: false,
-                requires_gate,
-                enforcement_scope,
+            .map(|primitive| {
+                if matches!(self.kind, AgentPodProviderKind::MacOs)
+                    && matches!(primitive, AgentPodPrimitive::AppleVirtualization)
+                {
+                    return BoundaryPrimitiveStatus {
+                        primitive: primitive.label(),
+                        status: ProviderImplementationStatus::PrototypePrimitive,
+                        active: false,
+                        requires_gate: Some("AGENTBOX_MACOS_VM_BOOT_PROTOTYPE=1 + AGENTBOX_MACOS_VM_KERNEL_IMAGE + AGENTBOX_MACOS_VM_INITRD_IMAGE + com.apple.security.virtualization"),
+                        enforcement_scope: "gated VZLinuxBootLoader/VZVirtualMachineConfiguration validation and short-lived VZVirtualMachine.start prototype; provider execution, host bridge evidence, and cleanup proof are not wired",
+                    };
+                }
+
+                BoundaryPrimitiveStatus {
+                    primitive: primitive.label(),
+                    status,
+                    active: false,
+                    requires_gate,
+                    enforcement_scope,
+                }
             })
             .collect()
     }
@@ -688,17 +702,36 @@ mod tests {
         assert!(err.contains("Network Extension lifecycle"));
         assert!(err.contains("live allow/deny evidence tests"));
         assert!(err.contains("AGENTBOX_MACOS_NATIVE=1 only enables native-plan/runner request"));
+        assert!(err.contains("AGENTBOX_MACOS_VM_BOOT_PROTOTYPE=1"));
+        assert!(err.contains("neither gate enables provider execution"));
 
         let statuses = provider.boundary_primitive_statuses();
         assert!(statuses.iter().all(|status| !status.active));
-        assert!(statuses.iter().all(|status| {
-            status.status == ProviderImplementationStatus::DescriptorOnly
-                && status.requires_gate == Some(MACOS_PROVIDER_REQUIRED_GATE)
-                && status.enforcement_scope.contains("VM lifecycle")
-                && status
-                    .enforcement_scope
-                    .contains("live allow/deny evidence tests")
-        }));
+        let apple_virtualization = statuses
+            .iter()
+            .find(|status| status.primitive == "apple-virtualization")
+            .unwrap();
+        assert_eq!(
+            apple_virtualization.status,
+            ProviderImplementationStatus::PrototypePrimitive
+        );
+        assert!(apple_virtualization
+            .requires_gate
+            .unwrap()
+            .contains("AGENTBOX_MACOS_VM_BOOT_PROTOTYPE=1"));
+        assert!(apple_virtualization
+            .enforcement_scope
+            .contains("VZVirtualMachine.start"));
+        assert!(statuses
+            .iter()
+            .filter(|status| status.primitive != "apple-virtualization")
+            .all(|status| {
+                status.status == ProviderImplementationStatus::DescriptorOnly
+                    && status.requires_gate == Some(MACOS_PROVIDER_REQUIRED_GATE)
+                    && status
+                        .enforcement_scope
+                        .contains("live allow/deny evidence tests")
+            }));
     }
 
     #[tokio::test]

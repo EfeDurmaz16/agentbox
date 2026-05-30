@@ -6521,7 +6521,7 @@ fn actionable_provider_required_gate(provider: Option<&str>, reason: &str) -> St
     match provider {
         Some("agentpod-linux") => "AGENTBOX_LINUX_NATIVE=1".to_string(),
         Some("agentpod-macos") => {
-            "Apple Virtualization VM lifecycle + signed Endpoint Security + Network Extension + live allow/deny evidence tests".to_string()
+            "Apple Virtualization boot lifecycle + signed Endpoint Security + Network Extension + live allow/deny evidence tests".to_string()
         }
         Some("agentpod-windows") => "live Windows lifecycle/enforcement gates".to_string(),
         Some("remote-agentpod") => {
@@ -6533,7 +6533,7 @@ fn actionable_provider_required_gate(provider: Option<&str>, reason: &str) -> St
         Some("direct-host") => "agentbox daemon socket and shim PATH".to_string(),
         _ if reason.contains("AGENTBOX_LINUX_NATIVE=1") => "AGENTBOX_LINUX_NATIVE=1".to_string(),
         _ if reason.contains("Apple Virtualization VM lifecycle") => {
-            "Apple Virtualization VM lifecycle + signed Endpoint Security + Network Extension + live allow/deny evidence tests".to_string()
+            "Apple Virtualization boot lifecycle + signed Endpoint Security + Network Extension + live allow/deny evidence tests".to_string()
         }
         _ if reason.contains("AGENTBOX_WINDOWS_NATIVE=1") => {
             "live Windows lifecycle/enforcement gates".to_string()
@@ -6593,6 +6593,10 @@ fn actionable_provider_next_commands(provider: Option<&str>, reason: &str) -> Ve
                 &mut commands,
                 "agentbox native-plan --provider agentpod-macos -- <cmd>",
             );
+            push_unique_command(
+                &mut commands,
+                "AGENTBOX_MACOS_VM_BOOT_PROTOTYPE=1 agentbox-macos-vm-runner --request <request.json>",
+            );
         }
         Some("agentpod-windows") => {
             push_unique_command(
@@ -6649,7 +6653,7 @@ fn runtime_provider_unavailable_reason(provider: &str, selection_reason: &str) -
                 .to_string()
         }
         "agentpod-macos" => {
-            "agentpod-macos is unavailable until Apple Virtualization VM lifecycle, signed Endpoint Security system extension, Network Extension lifecycle, and live allow/deny evidence tests are wired; AGENTBOX_MACOS_NATIVE=1 only enables native-plan/runner request experiments and does not enable provider execution".to_string()
+            "agentpod-macos is unavailable until Apple Virtualization VM lifecycle, signed Endpoint Security system extension, Network Extension lifecycle, and live allow/deny evidence tests are wired; AGENTBOX_MACOS_NATIVE=1 only enables native-plan/runner request experiments, and AGENTBOX_MACOS_VM_BOOT_PROTOTYPE=1 only enables a gated Apple Virtualization boot prototype when kernel/initrd artifacts and entitlement prerequisites are present; neither gate enables provider execution".to_string()
         }
         "agentpod-windows" => {
             "agentpod-windows is descriptor-only; provider execution, process assignment, cleanup, AppContainer/WFP/ETW enforcement, and live limit enforcement are not wired in this build".to_string()
@@ -10217,16 +10221,17 @@ mod tests {
             "agentbox run",
             Some("agentpod-macos"),
             &AgentPodRiskLevel::High,
-            "provider unavailable: agentpod-macos is unavailable until Apple Virtualization VM lifecycle, signed Endpoint Security system extension, Network Extension lifecycle, and live allow/deny evidence tests are wired; AGENTBOX_MACOS_NATIVE=1 only enables native-plan/runner request experiments and does not enable provider execution",
+            "provider unavailable: agentpod-macos is unavailable until Apple Virtualization VM lifecycle, signed Endpoint Security system extension, Network Extension lifecycle, and live allow/deny evidence tests are wired; AGENTBOX_MACOS_NATIVE=1 only enables native-plan/runner request experiments, and AGENTBOX_MACOS_VM_BOOT_PROTOTYPE=1 only enables a gated Apple Virtualization boot prototype when kernel/initrd artifacts and entitlement prerequisites are present; neither gate enables provider execution",
         );
 
         assert!(message.contains("context: provider=agentpod-macos, risk=high"));
-        assert!(message.contains("required gate: Apple Virtualization VM lifecycle"));
+        assert!(message.contains("required gate: Apple Virtualization boot lifecycle"));
         assert!(message.contains("signed Endpoint Security"));
         assert!(message.contains("Network Extension"));
         assert!(message.contains("live allow/deny evidence tests"));
         assert!(message.contains("next: agentbox provider-readiness --provider agentpod-macos"));
         assert!(message.contains("next: agentbox native-plan --provider agentpod-macos -- <cmd>"));
+        assert!(message.contains("AGENTBOX_MACOS_VM_BOOT_PROTOTYPE=1"));
         assert!(!message.contains("AGENTBOX_MACOS_NATIVE=1 agentbox run"));
     }
 
