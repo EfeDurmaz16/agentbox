@@ -343,6 +343,7 @@ mod tests {
                 enabled: false,
                 default_action: agentbox_daemon::runtime::types::SeccompAction::Allow,
                 syscall_rules: Vec::new(),
+                denied_syscall_fixture: None,
                 import_descriptor: LinuxSeccompProfileImportDescriptor {
                     schema_version: 1,
                     supported_formats: vec!["oci-seccomp-v1-json".into()],

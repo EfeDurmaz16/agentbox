@@ -434,6 +434,8 @@ pub struct LinuxSeccompPlan {
     pub enabled: bool,
     pub default_action: SeccompAction,
     pub syscall_rules: Vec<LinuxSeccompRule>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub denied_syscall_fixture: Option<LinuxSeccompDeniedSyscallFixturePlan>,
     #[serde(default)]
     pub import_descriptor: LinuxSeccompProfileImportDescriptor,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -447,6 +449,66 @@ pub struct LinuxSeccompRule {
     pub syscall: String,
     pub action: SeccompAction,
     pub reason: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LinuxSeccompDeniedSyscallFixturePlan {
+    pub schema_version: i64,
+    pub syscall: String,
+    pub argv: Vec<String>,
+    pub expected_syscall_error: String,
+    pub expected_process_exit_code: Option<i32>,
+    pub expected_stdout_contains: String,
+    pub expected_stderr_contains: String,
+    pub evidence_event: String,
+    pub claim_boundary: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LinuxSeccompDeniedSyscallFixtureEvidence {
+    pub schema_version: i64,
+    pub provider: String,
+    pub session_id: String,
+    pub phase: String,
+    pub event_name: String,
+    pub syscall: String,
+    pub expected_syscall_error: String,
+    pub observed_exit_code: Option<i32>,
+    pub observed_stdout_contains: bool,
+    pub observed_stderr_contains: bool,
+    pub claim: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LinuxSeccompDeniedSyscallFixtureRun {
+    pub exit_code: Option<i32>,
+    pub stdout: String,
+    pub stderr: String,
+    pub evidence: LinuxSeccompDeniedSyscallFixtureEvidence,
+}
+
+impl LinuxSeccompDeniedSyscallFixturePlan {
+    pub fn evidence(
+        &self,
+        session_id: &str,
+        exit_code: Option<i32>,
+        stdout: &str,
+        stderr: &str,
+    ) -> LinuxSeccompDeniedSyscallFixtureEvidence {
+        LinuxSeccompDeniedSyscallFixtureEvidence {
+            schema_version: 1,
+            provider: "agentpod-linux".into(),
+            session_id: session_id.into(),
+            phase: "apply-seccomp".into(),
+            event_name: self.evidence_event.clone(),
+            syscall: self.syscall.clone(),
+            expected_syscall_error: self.expected_syscall_error.clone(),
+            observed_exit_code: exit_code,
+            observed_stdout_contains: stdout.contains(&self.expected_stdout_contains),
+            observed_stderr_contains: stderr.contains(&self.expected_stderr_contains),
+            claim: self.claim_boundary.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -516,6 +578,7 @@ impl LinuxSeccompPlan {
                     reason: rule.reason.clone(),
                 })
                 .collect(),
+            denied_syscall_fixture: linux_seccomp_denied_syscall_fixture(profile),
             import_descriptor: LinuxSeccompProfileImportDescriptor::for_generated_profile(
                 oci_profile.is_some(),
             ),
@@ -524,6 +587,38 @@ impl LinuxSeccompPlan {
             requires_linux: true,
         }
     }
+}
+
+fn linux_seccomp_denied_syscall_fixture(
+    profile: &SeccompProfile,
+) -> Option<LinuxSeccompDeniedSyscallFixturePlan> {
+    if !profile.enabled {
+        return None;
+    }
+    profile
+        .rules
+        .iter()
+        .find(|rule| {
+            rule.syscall == "kill"
+                && matches!(rule.action, SeccompAction::Errno(_) | SeccompAction::KillProcess)
+        })
+        .map(|rule| LinuxSeccompDeniedSyscallFixturePlan {
+            schema_version: 1,
+            syscall: rule.syscall.clone(),
+            argv: vec![
+                "sh".into(),
+                "-c".into(),
+                "kill -0 $$; printf 'kill_status:%s\\n' \"$?\"".into(),
+            ],
+            expected_syscall_error: "EPERM".into(),
+            expected_process_exit_code: Some(0),
+            expected_stdout_contains: "kill_status:1".into(),
+            expected_stderr_contains: "Operation not permitted".into(),
+            evidence_event: "agentpod.linux.runner.seccomp.denied_syscall".into(),
+            claim_boundary:
+                "fixture proves Agentbox-generated BPF seccomp deny rule only; not full libseccomp profile loading"
+                    .into(),
+        })
 }
 
 impl LinuxSeccompProfileImportDescriptor {
@@ -1777,6 +1872,58 @@ fn configure_linux_child_security(
 }
 
 #[cfg(all(test, target_os = "linux"))]
+fn run_linux_seccomp_denied_syscall_fixture(
+    plan: &LinuxSeccompPlan,
+    session_id: &str,
+) -> Result<LinuxSeccompDeniedSyscallFixtureRun, RuntimeError> {
+    let fixture = plan.denied_syscall_fixture.as_ref().ok_or_else(|| {
+        RuntimeError::ManifestRejected(
+            "Linux seccomp plan does not include a denied syscall fixture".into(),
+        )
+    })?;
+    let (binary, args) = fixture.argv.split_first().ok_or_else(|| {
+        RuntimeError::ManifestRejected("Linux seccomp fixture argv cannot be empty".into())
+    })?;
+    let mut command = std::process::Command::new(binary);
+    command
+        .args(args)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    configure_linux_child_security(&mut command, Some(plan), None).map_err(|err| {
+        RuntimeError::ExecFailed(format!(
+            "Linux seccomp denied syscall fixture failed to prepare child security: {err}"
+        ))
+    })?;
+
+    let child = command.spawn().map_err(|err| {
+        RuntimeError::ExecFailed(format!(
+            "Linux seccomp denied syscall fixture failed to spawn: {err}"
+        ))
+    })?;
+    let output = wait_for_child_output(child, Some(5))?;
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    let exit_code = output.status.code();
+    let evidence = fixture.evidence(session_id, exit_code, &stdout, &stderr);
+
+    if exit_code != fixture.expected_process_exit_code
+        || !evidence.observed_stdout_contains
+        || !evidence.observed_stderr_contains
+    {
+        return Err(RuntimeError::ExecFailed(format!(
+            "Linux seccomp denied syscall fixture did not observe expected denial evidence: stdout={stdout:?} stderr={stderr:?} exit={exit_code:?}"
+        )));
+    }
+
+    Ok(LinuxSeccompDeniedSyscallFixtureRun {
+        exit_code,
+        stdout,
+        stderr,
+        evidence,
+    })
+}
+
+#[cfg(all(test, target_os = "linux"))]
 struct LinuxPreparedChildSecurity {
     seccomp_filter: Option<Vec<libc::sock_filter>>,
     landlock_ruleset: Option<LinuxLandlockPreparedRuleset>,
@@ -2288,6 +2435,31 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    fn linux_seccomp_denied_syscall_fixture_fails_with_expected_evidence() {
+        let profile = SeccompProfile::deny_syscalls(&["kill"], "test syscall denial");
+        let plan = LinuxSeccompProfileLoader::plan(&profile).unwrap();
+
+        let result = run_linux_seccomp_denied_syscall_fixture(&plan, "session-seccomp").unwrap();
+
+        assert_eq!(result.exit_code, Some(0));
+        assert!(result.stdout.contains("kill_status:1"));
+        assert!(result.stderr.contains("Operation not permitted"));
+        assert_eq!(result.evidence.provider, "agentpod-linux");
+        assert_eq!(result.evidence.session_id, "session-seccomp");
+        assert_eq!(result.evidence.phase, "apply-seccomp");
+        assert_eq!(
+            result.evidence.event_name,
+            "agentpod.linux.runner.seccomp.denied_syscall"
+        );
+        assert_eq!(result.evidence.syscall, "kill");
+        assert_eq!(result.evidence.expected_syscall_error, "EPERM");
+        assert!(result.evidence.observed_stdout_contains);
+        assert!(result.evidence.observed_stderr_contains);
+        assert!(result.evidence.claim.contains("not full libseccomp"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
     fn linux_landlock_filter_denies_child_writes_outside_workspace() {
         if let Err(err) = linux_landlock_abi_version() {
             eprintln!("skipping Landlock child proof: {err}");
@@ -2691,6 +2863,7 @@ mod tests {
         assert!(!plan.enabled);
         assert_eq!(plan.default_action, SeccompAction::Allow);
         assert!(plan.syscall_rules.is_empty());
+        assert!(plan.denied_syscall_fixture.is_none());
         assert!(plan.oci_profile.is_none());
         assert_eq!(plan.import_descriptor.schema_version, 1);
         assert!(!plan.import_descriptor.generated_oci_profile);
@@ -2731,6 +2904,7 @@ mod tests {
         assert_eq!(oci_json["defaultAction"], "SCMP_ACT_ALLOW");
         assert_eq!(oci_json["syscalls"][0]["errnoRet"], libc::EPERM);
         assert!(oci_json.get("default_action").is_none());
+        assert!(plan.denied_syscall_fixture.is_none());
     }
 
     #[test]
@@ -2757,6 +2931,41 @@ mod tests {
             .import_descriptor
             .claim_boundary
             .contains("external OCI/libseccomp profile import"));
+    }
+
+    #[test]
+    fn seccomp_plan_includes_denied_syscall_fixture_for_supported_rule() {
+        let profile = SeccompProfile::deny_syscalls(&["kill"], "block signal fanout");
+
+        let plan = LinuxSeccompProfileLoader::plan(&profile).unwrap();
+        let fixture = plan.denied_syscall_fixture.as_ref().unwrap();
+
+        assert_eq!(fixture.schema_version, 1);
+        assert_eq!(fixture.syscall, "kill");
+        assert_eq!(fixture.argv[0], "sh");
+        assert_eq!(fixture.expected_syscall_error, "EPERM");
+        assert_eq!(fixture.expected_process_exit_code, Some(0));
+        assert_eq!(fixture.expected_stdout_contains, "kill_status:1");
+        assert_eq!(fixture.expected_stderr_contains, "Operation not permitted");
+        assert_eq!(
+            fixture.evidence_event,
+            "agentpod.linux.runner.seccomp.denied_syscall"
+        );
+        assert!(fixture.claim_boundary.contains("Agentbox-generated BPF"));
+
+        let evidence = fixture.evidence(
+            "session-1",
+            Some(0),
+            "kill_status:1\n",
+            "sh: kill: Operation not permitted\n",
+        );
+
+        assert_eq!(evidence.phase, "apply-seccomp");
+        assert_eq!(evidence.event_name, fixture.evidence_event);
+        assert_eq!(evidence.syscall, "kill");
+        assert!(evidence.observed_stdout_contains);
+        assert!(evidence.observed_stderr_contains);
+        assert!(evidence.claim.contains("not full libseccomp"));
     }
 
     #[test]
