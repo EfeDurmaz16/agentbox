@@ -93,7 +93,52 @@ pub struct LinuxMountNamespacePlan {
     pub overlayfs: Option<LinuxOverlayFsWorkspacePlan>,
     pub read_only_mounts: Vec<LinuxMountNamespaceMount>,
     pub propagation: String,
+    pub boundary: LinuxMountNamespaceBoundaryPlan,
     pub requires_linux: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LinuxMountNamespaceBoundaryPlan {
+    pub schema_version: i64,
+    pub rootfs_mode: String,
+    pub pivot_root: bool,
+    pub procfs_mode: String,
+    pub tmp_mode: String,
+    pub devices_mode: String,
+    pub device_ioctl_mediation_claimed: bool,
+    pub sensitive_host_path_probes: Vec<String>,
+    pub device_node_probes: Vec<String>,
+    pub probe_expectation: String,
+    pub claim_boundary: String,
+    pub non_claims: Vec<String>,
+}
+
+impl LinuxMountNamespaceBoundaryPlan {
+    pub fn runner_managed() -> Self {
+        Self {
+            schema_version: 1,
+            rootfs_mode: "host-root-private-mount-namespace".into(),
+            pivot_root: false,
+            procfs_mode: "pid-namespace-procfs-via-unshare-mount-proc".into(),
+            tmp_mode: "host-tmp-visible-subject-to-landlock-policy".into(),
+            devices_mode: "host-dev-visible-path-access-mediated-by-landlock".into(),
+            device_ioctl_mediation_claimed: false,
+            sensitive_host_path_probes: vec!["/etc/shadow".into(), "/root/.ssh".into()],
+            device_node_probes: vec!["/dev/kmsg".into(), "/dev/mem".into()],
+            probe_expectation: "unavailable-or-mediated".into(),
+            claim_boundary:
+                "agentbox-linux-runner uses a private mount namespace with workspace bind/overlay mounts and pid-namespace procfs; it does not pivot_root, does not hide the host rootfs, and relies on Landlock and host permissions to make sensitive host paths and device nodes unavailable or mediated"
+                    .into(),
+            non_claims: vec![
+                "hardened rootfs isolation".into(),
+                "complete host path invisibility".into(),
+                "private device namespace".into(),
+                "device ioctl mediation".into(),
+                "complete procfs isolation".into(),
+                "private tmpfs".into(),
+            ],
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -169,6 +214,7 @@ impl LinuxMountNamespacePlan {
             overlayfs,
             read_only_mounts,
             propagation: "private".to_string(),
+            boundary: LinuxMountNamespaceBoundaryPlan::runner_managed(),
             requires_linux: true,
         }
     }
@@ -4573,6 +4619,71 @@ printf landlock-policy-ok
         assert_eq!(plan.read_only_mounts.len(), 1);
         assert_eq!(plan.read_only_mounts[0].guest_path, "/fixtures");
         assert!(plan.read_only_mounts[0].read_only);
+    }
+
+    #[test]
+    fn mount_namespace_plan_describes_rootfs_proc_tmp_device_boundaries() {
+        let spec = MinipodSpec::for_agent_task("hermes", "/tmp/agentbox-work");
+
+        let plan = LinuxMountNamespaceLauncher::plan(&spec).unwrap();
+
+        assert_eq!(plan.boundary.schema_version, 1);
+        assert_eq!(
+            plan.boundary.rootfs_mode,
+            "host-root-private-mount-namespace"
+        );
+        assert!(!plan.boundary.pivot_root);
+        assert_eq!(
+            plan.boundary.procfs_mode,
+            "pid-namespace-procfs-via-unshare-mount-proc"
+        );
+        assert_eq!(
+            plan.boundary.tmp_mode,
+            "host-tmp-visible-subject-to-landlock-policy"
+        );
+        assert_eq!(
+            plan.boundary.devices_mode,
+            "host-dev-visible-path-access-mediated-by-landlock"
+        );
+        assert!(!plan.boundary.device_ioctl_mediation_claimed);
+        assert!(plan.boundary.claim_boundary.contains("does not pivot_root"));
+        assert!(plan
+            .boundary
+            .non_claims
+            .contains(&"complete host path invisibility".to_string()));
+        assert!(plan
+            .boundary
+            .non_claims
+            .contains(&"private device namespace".to_string()));
+        assert!(plan
+            .boundary
+            .non_claims
+            .contains(&"device ioctl mediation".to_string()));
+    }
+
+    #[test]
+    fn mount_namespace_plan_lists_live_boundary_probes() {
+        let spec = MinipodSpec::for_agent_task("hermes", "/tmp/agentbox-work");
+
+        let plan = LinuxMountNamespaceLauncher::plan(&spec).unwrap();
+
+        assert!(plan
+            .boundary
+            .sensitive_host_path_probes
+            .contains(&"/etc/shadow".to_string()));
+        assert!(plan
+            .boundary
+            .sensitive_host_path_probes
+            .contains(&"/root/.ssh".to_string()));
+        assert!(plan
+            .boundary
+            .device_node_probes
+            .contains(&"/dev/kmsg".to_string()));
+        assert!(plan
+            .boundary
+            .device_node_probes
+            .contains(&"/dev/mem".to_string()));
+        assert_eq!(plan.boundary.probe_expectation, "unavailable-or-mediated");
     }
 
     #[test]

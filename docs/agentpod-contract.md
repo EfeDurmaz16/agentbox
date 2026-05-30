@@ -99,7 +99,14 @@ the native plan are not claimed as enforced. The
 executor invokes `agentbox-linux-runner` inside `unshare`; the runner bind-mounts
 the host workspace at the guest workspace path for direct workspace mode, or
 mounts an overlayfs review workspace when the manifest carries upper/work
-paths. It then applies Landlock/seccomp and execs the requested argv. The Linux
+paths. The mount plan explicitly describes the current boundary as host-root in
+a private mount namespace with no `pivot_root`, PID-namespace procfs from
+`unshare --mount-proc`, host `/tmp` visibility subject to Landlock policy, and
+host `/dev` path access mediated by Landlock/host permissions. The live Linux
+smoke proves `/etc/shadow`, `/root/.ssh`, `/dev/kmsg`, and `/dev/mem` are
+unavailable or mediated, but Agentbox does not claim hardened rootfs isolation,
+private tmpfs, a private device namespace, device `ioctl` mediation, or complete
+host path invisibility yet. It then applies Landlock/seccomp and execs the requested argv. The Linux
 native plan exposes ordered `runner_phases` so the namespace, workspace bind,
 overlayfs, Landlock, seccomp, and exec stages can be reviewed separately;
 each phase carries a stable `agentpod.linux.runner.*` evidence event name so

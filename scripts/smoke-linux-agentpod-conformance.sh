@@ -36,6 +36,22 @@ assert plan["provider"] == "agentpod-linux"
 assert plan["live_env_var"] == "AGENTBOX_LINUX_NATIVE"
 assert plan["live_execution_enabled"] is False
 assert plan["mount_namespace"]["workspace_bind_mount_wired"] is True
+boundary = plan["mount_namespace"]["boundary"]
+assert boundary["schema_version"] == 1
+assert boundary["rootfs_mode"] == "host-root-private-mount-namespace"
+assert boundary["pivot_root"] is False
+assert boundary["procfs_mode"] == "pid-namespace-procfs-via-unshare-mount-proc"
+assert boundary["tmp_mode"] == "host-tmp-visible-subject-to-landlock-policy"
+assert boundary["devices_mode"] == "host-dev-visible-path-access-mediated-by-landlock"
+assert boundary["device_ioctl_mediation_claimed"] is False
+assert boundary["probe_expectation"] == "unavailable-or-mediated"
+assert "/etc/shadow" in boundary["sensitive_host_path_probes"]
+assert "/root/.ssh" in boundary["sensitive_host_path_probes"]
+assert "/dev/kmsg" in boundary["device_node_probes"]
+assert "/dev/mem" in boundary["device_node_probes"]
+assert "complete host path invisibility" in boundary["non_claims"]
+assert "private device namespace" in boundary["non_claims"]
+assert "device ioctl mediation" in boundary["non_claims"]
 landlock = plan["landlock"]
 abi = landlock["abi"]
 supported = set(abi["supported_access"])

@@ -322,7 +322,8 @@ tests exist.
 **What AgentPod still needs before stronger isolation claims are credible:**
 - protected host path denial tests on each provider that claims filesystem
   isolation
-- complete mount/rootfs/proc/device failure injection across native providers
+- hardened rootfs pivot, private tmpfs, private device namespace, and device
+  `ioctl` mediation before claiming VM/container-grade isolation
 - live domain resolver/ipset proof before claiming domain allowlist enforcement
 - honest platform-specific bypass documentation
 

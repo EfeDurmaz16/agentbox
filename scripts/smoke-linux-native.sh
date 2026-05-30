@@ -107,6 +107,21 @@ jq -e '
     end)
     and .mount_namespace.workspace_bind_mount_wired == true
     and (.mount_namespace.workspace_mount_claim | contains("agentbox-linux-runner"))
+    and .mount_namespace.boundary.schema_version == 1
+    and .mount_namespace.boundary.rootfs_mode == "host-root-private-mount-namespace"
+    and .mount_namespace.boundary.pivot_root == false
+    and .mount_namespace.boundary.procfs_mode == "pid-namespace-procfs-via-unshare-mount-proc"
+    and .mount_namespace.boundary.tmp_mode == "host-tmp-visible-subject-to-landlock-policy"
+    and .mount_namespace.boundary.devices_mode == "host-dev-visible-path-access-mediated-by-landlock"
+    and .mount_namespace.boundary.device_ioctl_mediation_claimed == false
+    and .mount_namespace.boundary.probe_expectation == "unavailable-or-mediated"
+    and (.mount_namespace.boundary.sensitive_host_path_probes | index("/etc/shadow") != null)
+    and (.mount_namespace.boundary.sensitive_host_path_probes | index("/root/.ssh") != null)
+    and (.mount_namespace.boundary.device_node_probes | index("/dev/kmsg") != null)
+    and (.mount_namespace.boundary.device_node_probes | index("/dev/mem") != null)
+    and (.mount_namespace.boundary.non_claims | index("complete host path invisibility") != null)
+    and (.mount_namespace.boundary.non_claims | index("private device namespace") != null)
+    and (.mount_namespace.boundary.non_claims | index("device ioctl mediation") != null)
     and any(.runner_phases[]; .name == "bind-workspace" and .status == "prototype")
     and any(.runner_phases[]; .name == "apply-landlock" and .status == "prototype")
     and (.nftables.session_scope.cgroup_match | contains("socket cgroupv2"))
@@ -134,6 +149,75 @@ landlock_effective_abi="$(jq -r '.landlock.abi.effective_abi_version' "$plan_jso
     --timeout-seconds "$timeout_seconds" \
     -- $command_string
   )
+
+host_workspace_mounts_before="$(awk '$5 == "/workspace" { count++ } END { print count + 0 }' /proc/self/mountinfo)"
+set +e
+boundary_output="$(
+  cd "$workspace"
+  printf 'y\n' | AGENTBOX_LINUX_NATIVE=1 cargo run -q -p agentbox-cli -- run \
+    --provider agentpod-linux \
+    --workspace-mode direct \
+    --timeout-seconds "$timeout_seconds" \
+    -- /bin/sh -c '
+      set -u
+      if ! grep -q " /proc " /proc/self/mountinfo; then
+        echo "proc mount missing"
+        exit 20
+      fi
+      if ! grep -q " /workspace " /proc/self/mountinfo; then
+        echo "workspace mount missing"
+        exit 21
+      fi
+      printf "proc_mount:present\n"
+      printf "pid_namespace:%s\n" "$(readlink /proc/self/ns/pid)"
+      if cat /etc/shadow > boundary-etc-shadow.out 2> boundary-etc-shadow.err; then
+        echo "sensitive path read unexpectedly succeeded: /etc/shadow"
+        exit 22
+      fi
+      printf "sensitive_path:/etc/shadow:unavailable_or_mediated\n"
+      if ls /root/.ssh > boundary-root-ssh.out 2> boundary-root-ssh.err; then
+        echo "sensitive path list unexpectedly succeeded: /root/.ssh"
+        exit 23
+      fi
+      printf "sensitive_path:/root/.ssh:unavailable_or_mediated\n"
+      if dd if=/dev/kmsg of=boundary-dev-kmsg.out bs=1 count=1 2> boundary-dev-kmsg.err; then
+        echo "device node read unexpectedly succeeded: /dev/kmsg"
+        exit 24
+      fi
+      printf "device_node:/dev/kmsg:unavailable_or_mediated\n"
+      if dd if=/dev/mem of=boundary-dev-mem.out bs=1 count=1 2> boundary-dev-mem.err; then
+        echo "device node read unexpectedly succeeded: /dev/mem"
+        exit 25
+      fi
+      printf "device_node:/dev/mem:unavailable_or_mediated\n"
+    ' 2>&1
+)"
+boundary_status=$?
+set -e
+
+if [[ "$boundary_status" -ne 0 ]]; then
+  printf '%s\n' "$boundary_output" >&2
+  echo "expected Linux mount/rootfs/proc/device boundary smoke to observe unavailable or mediated host paths and device nodes" >&2
+  exit 1
+fi
+for expected in \
+  "proc_mount:present" \
+  "sensitive_path:/etc/shadow:unavailable_or_mediated" \
+  "sensitive_path:/root/.ssh:unavailable_or_mediated" \
+  "device_node:/dev/kmsg:unavailable_or_mediated" \
+  "device_node:/dev/mem:unavailable_or_mediated"; do
+  if [[ "$boundary_output" != *"$expected"* ]]; then
+    printf '%s\n' "$boundary_output" >&2
+    echo "expected Linux boundary smoke output to include $expected" >&2
+    exit 1
+  fi
+done
+host_workspace_mounts_after="$(awk '$5 == "/workspace" { count++ } END { print count + 0 }' /proc/self/mountinfo)"
+if [[ "$host_workspace_mounts_after" != "$host_workspace_mounts_before" ]]; then
+  printf '%s\n' "$boundary_output" >&2
+  echo "expected Linux boundary smoke to leave no stale /workspace mount in the host namespace" >&2
+  exit 1
+fi
 
 set +e
 seccomp_output="$(

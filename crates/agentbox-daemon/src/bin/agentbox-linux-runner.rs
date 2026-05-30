@@ -333,8 +333,9 @@ fn exec_request(
 mod tests {
     use super::*;
     use agentbox_daemon::runtime::providers::linux::{
-        LinuxLandlockAccess, LinuxLandlockPathPolicyPlan, LinuxMountNamespaceMount,
-        LinuxOverlayFsWorkspacePlan, LinuxSeccompProfileImportDescriptor, LinuxUserNamespacePlan,
+        LinuxLandlockAccess, LinuxLandlockPathPolicyPlan, LinuxMountNamespaceBoundaryPlan,
+        LinuxMountNamespaceMount, LinuxOverlayFsWorkspacePlan, LinuxSeccompProfileImportDescriptor,
+        LinuxUserNamespacePlan,
     };
     use agentbox_daemon::runtime::types::AgentPodWorkspaceMode;
 
@@ -359,6 +360,7 @@ mod tests {
                 overlayfs: None,
                 read_only_mounts: Vec::<LinuxMountNamespaceMount>::new(),
                 propagation: "private".into(),
+                boundary: LinuxMountNamespaceBoundaryPlan::runner_managed(),
                 requires_linux: true,
             },
             seccomp: agentbox_daemon::runtime::providers::linux::LinuxSeccompPlan {
