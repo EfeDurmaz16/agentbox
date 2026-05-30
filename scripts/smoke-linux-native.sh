@@ -36,6 +36,41 @@ workspace="${AGENTBOX_LINUX_NATIVE_WORKSPACE:-$(mktemp -d)}"
 command_string="${AGENTBOX_LINUX_NATIVE_COMMAND:-/bin/true}"
 timeout_seconds="${AGENTBOX_LINUX_NATIVE_TIMEOUT_SECONDS:-30}"
 runner_binary="${AGENTBOX_LINUX_RUNNER:-$(pwd)/target/debug/agentbox-linux-runner}"
+seccomp_profile="$(mktemp)"
+trap 'rm -f "$seccomp_profile"' EXIT
+
+case "$(uname -m)" in
+  x86_64 | amd64)
+    seccomp_arch="SCMP_ARCH_X86_64"
+    ;;
+  arm64 | aarch64)
+    seccomp_arch="SCMP_ARCH_AARCH64"
+    ;;
+  arm | armv7l)
+    seccomp_arch="SCMP_ARCH_ARM"
+    ;;
+  i386 | i686)
+    seccomp_arch="SCMP_ARCH_X86"
+    ;;
+  *)
+    seccomp_arch="SCMP_ARCH_NATIVE"
+    ;;
+esac
+
+cat >"$seccomp_profile" <<EOF
+{
+  "defaultAction": "SCMP_ACT_ALLOW",
+  "architectures": ["$seccomp_arch"],
+  "syscalls": [
+    {
+      "names": ["kill"],
+      "action": "SCMP_ACT_ERRNO",
+      "errnoRet": 1,
+      "comment": "block signal fanout from imported OCI/libseccomp profile"
+    }
+  ]
+}
+EOF
 
 cargo build -q -p agentbox-daemon --bin agentbox-linux-runner
 export AGENTBOX_LINUX_RUNNER="$runner_binary"
@@ -67,11 +102,35 @@ cargo run -q -p agentbox-cli -- native-plan \
     --workspace-mode direct \
     --timeout-seconds "$timeout_seconds" \
     -- $command_string
-)
+  )
+
+set +e
+seccomp_output="$(
+  cd "$workspace"
+  printf 'y\n' | AGENTBOX_LINUX_NATIVE=1 cargo run -q -p agentbox-cli -- run \
+    --provider agentpod-linux \
+    --workspace-mode direct \
+    --seccomp-profile "$seccomp_profile" \
+    --timeout-seconds "$timeout_seconds" \
+    -- /bin/sh -c 'kill -0 $$; printf "kill_status:%s\n" "$?"' 2>&1
+)"
+seccomp_status=$?
+set -e
+
+if [[ "$seccomp_status" -ne 0 ]]; then
+  printf '%s\n' "$seccomp_output" >&2
+  echo "expected imported OCI/libseccomp profile AgentPod command to exit after observing seccomp denial" >&2
+  exit 1
+fi
+if [[ "$seccomp_output" != *"kill_status:1"* || "$seccomp_output" != *"Operation not permitted"* ]]; then
+  printf '%s\n' "$seccomp_output" >&2
+  echo "expected imported OCI/libseccomp profile to deny kill(2) with EPERM evidence" >&2
+  exit 1
+fi
 
 proof_outside="$(mktemp -d)"
 parallel_root=""
-trap 'rm -rf "$proof_outside" "$parallel_root"' EXIT
+trap 'rm -rf "$proof_outside" "$parallel_root"; rm -f "$seccomp_profile"' EXIT
 proof_policy_dir="$workspace/agentbox-landlock-policy"
 mkdir -p "$proof_policy_dir"
 proof_read_allowed="$proof_policy_dir/allowed-read"
@@ -197,7 +256,7 @@ fi
 
 overlay_workspace="$(mktemp -d)"
 overlay_base="$(mktemp -d)"
-trap 'rm -rf "$proof_outside" "$parallel_root" "$overlay_workspace" "$overlay_base"' EXIT
+trap 'rm -rf "$proof_outside" "$parallel_root" "$overlay_workspace" "$overlay_base"; rm -f "$seccomp_profile"' EXIT
 printf 'base\n' >"$overlay_workspace/base.txt"
 
 set +e

@@ -18,7 +18,7 @@ pub const RUNNER_PHASE_STATUS_PROTOTYPE: &str = "prototype";
 pub const RUNNER_PHASE_STATUS_SHIPPED: &str = "shipped";
 
 pub const LINUX_SKIPPED_PRIMITIVES: &[&str] = &[
-    "complete libseccomp profile loading",
+    "complete libseccomp compatibility beyond the supported import subset",
     "complete Landlock ABI coverage",
     "nftables packet/domain enforcement",
     "cross-host overlayfs live proof",

@@ -13,7 +13,7 @@ implementation.
 
 | Gap | Current proof | Follow-up issue | Claim boundary |
 | --- | --- | --- | --- |
-| Complete syscall policy | Generated seccomp deny rules and a coarse connect-deny bridge for deny-all network modes. OCI or libseccomp profile import remains descriptor-only. | #261 | Do not claim complete libseccomp profile compatibility, arbitrary profile enforcement, or syscall coverage beyond the generated native plan. |
+| Complete syscall policy | Generated seccomp deny rules, imported OCI/libseccomp subset profiles, and a coarse connect-deny bridge for deny-all network modes. The importer validates schema, action semantics, architectures, and syscall names before compiling supported unconditional deny rules into the prototype BPF loader. | #261 | Do not claim complete libseccomp profile compatibility, default-deny profile support, conditional argument rules, notify/listener support, arbitrary profile enforcement, or syscall coverage beyond the supported prototype loader set. |
 | Complete filesystem policy | Landlock read/write/execute path-beneath rules, workspace bindings, read-only mount descriptors, and guest aliases in the native plan. | #262 | Do not claim complete Landlock ABI coverage, complete filesystem mediation, or full protection against every path escape class. |
 | Packet/domain network policy | Network mode descriptors, coarse deny-all connect denial through seccomp, and a gated nftables table lifecycle smoke. | #263 | Do not claim domain allowlist enforcement, packet firewall denial, DNS semantic completeness, or session-scoped firewall cleanup. |
 | Kernel event evidence | eBPF observability receipt schemas in the native plan, including provider, session, cgroup path, event identity, pid/tgid fallback fields, and observed-only semantics. | #264 | Do not claim live eBPF probe loading, live event capture, enforcement, or observed events as denial proof. |
@@ -30,6 +30,7 @@ Use these phrases for the current Linux surface:
 - `observed-only`
 - `coarse connect-deny bridge`
 - `optional live Linux smoke`
+- `supported OCI/libseccomp import subset`
 
 Avoid these phrases until the mapped issues are complete and verified by live
 tests:

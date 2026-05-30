@@ -252,6 +252,10 @@ enum Commands {
         #[arg(long = "deny-syscall")]
         deny_syscalls: Vec<String>,
 
+        /// Import an OCI/libseccomp seccomp profile JSON for agentpod-linux
+        #[arg(long = "seccomp-profile")]
+        seccomp_profile: Option<PathBuf>,
+
         /// Add a read-only host mount as host_path:guest_path
         #[arg(long = "mount-ro")]
         read_only_mounts: Vec<String>,
@@ -442,6 +446,10 @@ enum Commands {
         /// Deny a Linux syscall through the generated seccomp profile; repeatable
         #[arg(long = "deny-syscall")]
         deny_syscalls: Vec<String>,
+
+        /// Import an OCI/libseccomp seccomp profile JSON for agentpod-linux
+        #[arg(long = "seccomp-profile")]
+        seccomp_profile: Option<PathBuf>,
 
         /// Disable localhost/loopback service access in the generated manifest
         #[arg(long = "deny-localhost")]
@@ -833,6 +841,10 @@ enum Commands {
         #[arg(long = "deny-syscall")]
         deny_syscalls: Vec<String>,
 
+        /// Import an OCI/libseccomp seccomp profile JSON for agentpod-linux
+        #[arg(long = "seccomp-profile")]
+        seccomp_profile: Option<PathBuf>,
+
         /// Optional Linux cgroup pids.max process limit
         #[arg(long = "max-processes")]
         max_processes: Option<u32>,
@@ -967,6 +979,10 @@ enum AgentPodCommands {
         /// Deny a Linux syscall through the AgentPod seccomp profile; repeatable
         #[arg(long = "deny-syscall")]
         deny_syscalls: Vec<String>,
+
+        /// Import an OCI/libseccomp seccomp profile JSON for agentpod-linux
+        #[arg(long = "seccomp-profile")]
+        seccomp_profile: Option<PathBuf>,
 
         /// Add a read-only host mount as host_path:guest_path
         #[arg(long = "mount-ro")]
@@ -1153,6 +1169,10 @@ enum AgentPodCommands {
         /// Deny a Linux syscall through the AgentPod seccomp profile; repeatable
         #[arg(long = "deny-syscall")]
         deny_syscalls: Vec<String>,
+
+        /// Import an OCI/libseccomp seccomp profile JSON for agentpod-linux
+        #[arg(long = "seccomp-profile")]
+        seccomp_profile: Option<PathBuf>,
 
         /// Optional Linux cgroup pids.max process limit
         #[arg(long = "max-processes")]
@@ -3281,6 +3301,7 @@ struct RunOptions {
     max_processes: Option<u32>,
     timeout_seconds: Option<u64>,
     deny_syscalls: Vec<String>,
+    seccomp_profile: Option<PathBuf>,
     read_only_mounts: Vec<String>,
     credential_files: Vec<String>,
     credential_env: Vec<String>,
@@ -3355,7 +3376,7 @@ async fn cmd_run(options: RunOptions) {
     use agentbox_daemon::runtime::registry::{ProviderSelectionRequest, RuntimeProviderRegistry};
     use agentbox_daemon::runtime::session::RuntimeSessionStore;
     use agentbox_daemon::runtime::types::{
-        AgentPodRiskLevel, ExecCommand, MinipodSpec, NetworkMode, ResourcePolicy, SeccompProfile,
+        AgentPodRiskLevel, ExecCommand, MinipodSpec, NetworkMode, ResourcePolicy,
     };
     use agentbox_daemon::runtime::workspace::WorkspaceProjectionMaterializer;
 
@@ -3453,14 +3474,13 @@ async fn cmd_run(options: RunOptions) {
             max_processes.to_string(),
         );
     }
-    if !options.deny_syscalls.is_empty() {
-        let syscalls = options
-            .deny_syscalls
-            .iter()
-            .map(String::as_str)
-            .collect::<Vec<_>>();
-        spec.seccomp =
-            SeccompProfile::deny_syscalls(&syscalls, "explicit AgentPod task syscall denial");
+    if let Err(err) = apply_seccomp_options_to_spec(
+        &mut spec,
+        &options.deny_syscalls,
+        options.seccomp_profile.as_deref(),
+    ) {
+        eprintln!("error: {err}");
+        std::process::exit(1);
     }
     if let Some(runtime) = options.runtime.as_deref() {
         spec.labels
@@ -6268,6 +6288,7 @@ struct MinipodSpecOptions {
     network_mode: Option<String>,
     deny_domains: Vec<String>,
     deny_syscalls: Vec<String>,
+    seccomp_profile: Option<PathBuf>,
     deny_localhost: bool,
     workspace_mode: Option<String>,
     workspace_overlay_dir: Option<PathBuf>,
@@ -6277,7 +6298,7 @@ struct MinipodSpecOptions {
 fn cmd_minipod_spec(options: MinipodSpecOptions) {
     use agentbox_daemon::runtime::policy::validate_minipod_spec;
     use agentbox_daemon::runtime::registry::{ProviderSelectionRequest, RuntimeProviderRegistry};
-    use agentbox_daemon::runtime::types::{MinipodSpec, NetworkMode, SeccompProfile};
+    use agentbox_daemon::runtime::types::{MinipodSpec, NetworkMode};
 
     let workspace = options.workspace.unwrap_or_else(|| {
         std::env::current_dir().unwrap_or_else(|_| {
@@ -6374,14 +6395,13 @@ fn cmd_minipod_spec(options: MinipodSpecOptions) {
     if !options.deny_domains.is_empty() {
         spec.network.denied_domains = options.deny_domains;
     }
-    if !options.deny_syscalls.is_empty() {
-        let syscalls = options
-            .deny_syscalls
-            .iter()
-            .map(String::as_str)
-            .collect::<Vec<_>>();
-        spec.seccomp =
-            SeccompProfile::deny_syscalls(&syscalls, "explicit AgentPod task syscall denial");
+    if let Err(err) = apply_seccomp_options_to_spec(
+        &mut spec,
+        &options.deny_syscalls,
+        options.seccomp_profile.as_deref(),
+    ) {
+        eprintln!("error: {err}");
+        std::process::exit(1);
     }
     if options.deny_localhost {
         spec.network.allow_localhost = false;
@@ -6440,6 +6460,35 @@ fn parse_network_mode(raw: &str) -> agentbox_daemon::runtime::types::NetworkMode
             std::process::exit(1);
         }
     }
+}
+
+fn apply_seccomp_options_to_spec(
+    spec: &mut agentbox_daemon::runtime::types::MinipodSpec,
+    deny_syscalls: &[String],
+    seccomp_profile: Option<&Path>,
+) -> Result<(), String> {
+    use agentbox_daemon::runtime::providers::linux::LinuxSeccompProfileLoader;
+    use agentbox_daemon::runtime::types::SeccompProfile;
+
+    if !deny_syscalls.is_empty() && seccomp_profile.is_some() {
+        return Err("--deny-syscall cannot be combined with --seccomp-profile".into());
+    }
+    if let Some(path) = seccomp_profile {
+        let profile_json = fs::read_to_string(path)
+            .map_err(|err| format!("failed to read --seccomp-profile {}: {err}", path.display()))?;
+        spec.seccomp = LinuxSeccompProfileLoader::profile_from_oci_profile_json(
+            &profile_json,
+            &path.display().to_string(),
+        )
+        .map_err(|err| err.to_string())?;
+        return Ok(());
+    }
+    if !deny_syscalls.is_empty() {
+        let syscalls = deny_syscalls.iter().map(String::as_str).collect::<Vec<_>>();
+        spec.seccomp =
+            SeccompProfile::deny_syscalls(&syscalls, "explicit AgentPod task syscall denial");
+    }
+    Ok(())
 }
 
 fn parse_agentpod_risk(raw: &str) -> agentbox_daemon::runtime::types::AgentPodRiskLevel {
@@ -8460,17 +8509,30 @@ fn cmd_remote_workspace_apply(
     }
 }
 
-fn cmd_native_plan(
+struct NativePlanOptions {
     provider: String,
     workspace: Option<PathBuf>,
     agent_profile: String,
     risk: String,
     deny_syscalls: Vec<String>,
+    seccomp_profile: Option<PathBuf>,
     max_processes: Option<u32>,
     command: Vec<String>,
-) {
-    let provider = resolve_native_plan_provider(&provider);
+}
 
+struct NativePlanBuildOptions {
+    provider: String,
+    workspace: PathBuf,
+    agent_profile: String,
+    risk: String,
+    deny_syscalls: Vec<String>,
+    seccomp_profile: Option<PathBuf>,
+    max_processes: Option<u32>,
+    command: Vec<String>,
+}
+
+fn cmd_native_plan(options: NativePlanOptions) {
+    let provider = resolve_native_plan_provider(&options.provider);
     if !matches!(
         provider.as_str(),
         "agentpod-linux" | "agentpod-macos" | "agentpod-windows"
@@ -8482,26 +8544,27 @@ fn cmd_native_plan(
         eprintln!("hint: supported values: agentpod-linux, agentpod-macos, agentpod-windows");
         std::process::exit(1);
     }
-    if command.is_empty() {
+    if options.command.is_empty() {
         eprintln!("error: native plan command cannot be empty");
         std::process::exit(1);
     }
 
-    let workspace = workspace.unwrap_or_else(|| {
+    let workspace = options.workspace.unwrap_or_else(|| {
         std::env::current_dir().unwrap_or_else(|e| {
             eprintln!("error: failed to determine current directory: {}", e);
             std::process::exit(1);
         })
     });
-    let plan = build_native_plan_json(
-        &provider,
+    let plan = build_native_plan_json(NativePlanBuildOptions {
+        provider,
         workspace,
-        agent_profile,
-        risk,
-        deny_syscalls,
-        max_processes,
-        command,
-    )
+        agent_profile: options.agent_profile,
+        risk: options.risk,
+        deny_syscalls: options.deny_syscalls,
+        seccomp_profile: options.seccomp_profile,
+        max_processes: options.max_processes,
+        command: options.command,
+    })
     .unwrap_or_else(|e| {
         eprintln!("error: failed to build native AgentPod plan: {}", e);
         std::process::exit(1);
@@ -8513,19 +8576,22 @@ fn cmd_native_plan(
     );
 }
 
-fn build_native_plan_json(
-    provider: &str,
-    workspace: PathBuf,
-    agent_profile: String,
-    risk: String,
-    deny_syscalls: Vec<String>,
-    max_processes: Option<u32>,
-    command: Vec<String>,
-) -> Result<serde_json::Value, String> {
+fn build_native_plan_json(options: NativePlanBuildOptions) -> Result<serde_json::Value, String> {
     use agentbox_daemon::runtime::providers::linux::LinuxAgentPodExecutionPlan;
     use agentbox_daemon::runtime::providers::macos::MacOsAgentPodExecutionPlan;
     use agentbox_daemon::runtime::providers::windows::WindowsAgentPodExecutionPlan;
-    use agentbox_daemon::runtime::types::{ExecCommand, MinipodSpec, SeccompProfile};
+    use agentbox_daemon::runtime::types::{ExecCommand, MinipodSpec};
+
+    let NativePlanBuildOptions {
+        provider,
+        workspace,
+        agent_profile,
+        risk,
+        deny_syscalls,
+        seccomp_profile,
+        max_processes,
+        command,
+    } = options;
 
     if command.is_empty() {
         return Err("native plan command cannot be empty".into());
@@ -8545,11 +8611,7 @@ fn build_native_plan_json(
             max_processes.to_string(),
         );
     }
-    if !deny_syscalls.is_empty() {
-        let syscalls = deny_syscalls.iter().map(String::as_str).collect::<Vec<_>>();
-        spec.seccomp =
-            SeccompProfile::deny_syscalls(&syscalls, "explicit AgentPod task syscall denial");
-    }
+    apply_seccomp_options_to_spec(&mut spec, &deny_syscalls, seccomp_profile.as_deref())?;
     let workspace_mode_risk = spec.risk.clone();
     apply_workspace_mode(&mut spec, &workspace_mode_risk, None, None);
 
@@ -8560,7 +8622,7 @@ fn build_native_plan_json(
         timeout_seconds: None,
     };
 
-    match provider {
+    match provider.as_str() {
         "agentpod-linux" => serde_json::to_value(
             LinuxAgentPodExecutionPlan::from_minipod_spec(&spec, &exec)
                 .map_err(|e| format!("failed to build Linux native AgentPod plan: {e}"))?,
@@ -9248,6 +9310,7 @@ async fn main() {
                 max_processes,
                 timeout_seconds,
                 deny_syscalls,
+                seccomp_profile,
                 read_only_mounts,
                 credential_files,
                 credential_env,
@@ -9277,6 +9340,7 @@ async fn main() {
                     max_processes,
                     timeout_seconds,
                     deny_syscalls,
+                    seccomp_profile,
                     read_only_mounts,
                     credential_files,
                     credential_env,
@@ -9338,6 +9402,7 @@ async fn main() {
                     max_processes: None,
                     timeout_seconds: None,
                     deny_syscalls: Vec::new(),
+                    seccomp_profile: None,
                     read_only_mounts: Vec::new(),
                     credential_files: Vec::new(),
                     credential_env: Vec::new(),
@@ -9378,17 +9443,19 @@ async fn main() {
                 agent_profile,
                 risk,
                 deny_syscalls,
+                seccomp_profile,
                 max_processes,
                 command,
-            } => cmd_native_plan(
+            } => cmd_native_plan(NativePlanOptions {
                 provider,
                 workspace,
                 agent_profile,
                 risk,
                 deny_syscalls,
+                seccomp_profile,
                 max_processes,
                 command,
-            ),
+            }),
             AgentPodCommands::Review {
                 session_id,
                 json,
@@ -9467,6 +9534,7 @@ async fn main() {
             max_processes,
             timeout_seconds,
             deny_syscalls,
+            seccomp_profile,
             read_only_mounts,
             credential_files,
             credential_env,
@@ -9496,6 +9564,7 @@ async fn main() {
                 max_processes,
                 timeout_seconds,
                 deny_syscalls,
+                seccomp_profile,
                 read_only_mounts,
                 credential_files,
                 credential_env,
@@ -9559,6 +9628,7 @@ async fn main() {
             network_mode,
             read_only_mounts,
             deny_syscalls,
+            seccomp_profile,
             credential_files,
             credential_env,
             credential_sockets,
@@ -9579,6 +9649,7 @@ async fn main() {
             allow_domains,
             read_only_mounts,
             deny_syscalls,
+            seccomp_profile,
             credential_files,
             credential_env,
             credential_sockets,
@@ -9757,17 +9828,19 @@ async fn main() {
             agent_profile,
             risk,
             deny_syscalls,
+            seccomp_profile,
             max_processes,
             command,
-        } => cmd_native_plan(
+        } => cmd_native_plan(NativePlanOptions {
             provider,
             workspace,
             agent_profile,
             risk,
             deny_syscalls,
+            seccomp_profile,
             max_processes,
             command,
-        ),
+        }),
         Commands::MinipodInspect { session_id, json } => cmd_minipod_inspect(session_id, json),
         Commands::Review {
             session_id,
@@ -9951,15 +10024,16 @@ mod tests {
             ),
             ("agentpod-windows", "job_object", "execution is not wired"),
         ] {
-            let plan = build_native_plan_json(
-                provider,
-                workspace.clone(),
-                "general".into(),
-                "high".into(),
-                Vec::new(),
-                None,
-                vec!["echo".into(), "demo".into()],
-            )
+            let plan = build_native_plan_json(NativePlanBuildOptions {
+                provider: provider.into(),
+                workspace: workspace.clone(),
+                agent_profile: "general".into(),
+                risk: "high".into(),
+                deny_syscalls: Vec::new(),
+                seccomp_profile: None,
+                max_processes: None,
+                command: vec!["echo".into(), "demo".into()],
+            })
             .unwrap();
 
             assert_eq!(plan["schema_version"], 1);
@@ -10055,16 +10129,92 @@ mod tests {
     }
 
     #[test]
-    fn native_plan_json_rejects_empty_commands() {
-        let err = build_native_plan_json(
-            "agentpod-macos",
-            PathBuf::from("/tmp/agentbox-native-plan-test"),
-            "general".into(),
-            "medium".into(),
-            Vec::new(),
-            None,
-            vec![],
+    fn native_plan_json_imports_seccomp_profile_file() {
+        let root = std::env::temp_dir().join(format!(
+            "agentbox-cli-seccomp-profile-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let profile_path = root.join("kill-deny.json");
+        std::fs::write(
+            &profile_path,
+            serde_json::json!({
+                "defaultAction": "SCMP_ACT_ALLOW",
+                "architectures": [test_seccomp_architecture()],
+                "syscalls": [
+                    {
+                        "names": ["kill"],
+                        "action": "SCMP_ACT_ERRNO",
+                        "errnoRet": libc::EPERM,
+                        "comment": "block signal fanout"
+                    }
+                ]
+            })
+            .to_string(),
         )
+        .unwrap();
+
+        let plan = build_native_plan_json(NativePlanBuildOptions {
+            provider: "agentpod-linux".into(),
+            workspace: root.join("workspace"),
+            agent_profile: "general".into(),
+            risk: "high".into(),
+            deny_syscalls: Vec::new(),
+            seccomp_profile: Some(profile_path.clone()),
+            max_processes: None,
+            command: vec!["/bin/true".into()],
+        })
+        .unwrap();
+
+        assert_eq!(plan["seccomp"]["enabled"], true);
+        assert_eq!(plan["seccomp"]["syscall_rules"][0]["syscall"], "kill");
+        assert_eq!(plan["seccomp"]["import_descriptor"]["import_enabled"], true);
+        assert_eq!(
+            plan["seccomp"]["import_descriptor"]["generated_oci_profile"],
+            false
+        );
+        assert!(plan["seccomp"]["syscall_rules"][0]["reason"]
+            .as_str()
+            .unwrap()
+            .contains(&profile_path.display().to_string()));
+        assert!(plan["seccomp"]["denied_syscall_fixture"]["claim_boundary"]
+            .as_str()
+            .unwrap()
+            .contains("imported OCI/libseccomp"));
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    fn test_seccomp_architecture() -> &'static str {
+        if cfg!(target_arch = "x86_64") {
+            "SCMP_ARCH_X86_64"
+        } else if cfg!(target_arch = "aarch64") {
+            "SCMP_ARCH_AARCH64"
+        } else if cfg!(target_arch = "arm") {
+            "SCMP_ARCH_ARM"
+        } else if cfg!(target_arch = "x86") {
+            "SCMP_ARCH_X86"
+        } else {
+            "SCMP_ARCH_NATIVE"
+        }
+    }
+
+    #[test]
+    fn native_plan_json_rejects_empty_commands() {
+        let err = build_native_plan_json(NativePlanBuildOptions {
+            provider: "agentpod-macos".into(),
+            workspace: PathBuf::from("/tmp/agentbox-native-plan-test"),
+            agent_profile: "general".into(),
+            risk: "medium".into(),
+            deny_syscalls: Vec::new(),
+            seccomp_profile: None,
+            max_processes: None,
+            command: vec![],
+        })
         .unwrap_err();
 
         assert!(err.contains("native plan command cannot be empty"));
@@ -11537,6 +11687,79 @@ mod tests {
             assert!(json);
             assert_eq!(risk, "low");
             assert_eq!(command, vec!["echo", "contract"]);
+        });
+    }
+
+    #[test]
+    fn agentpod_run_alias_parses_seccomp_profile_import_path() {
+        run_cli_parse_test(|| {
+            let cli = Cli::try_parse_from([
+                "agentbox",
+                "agentpod",
+                "run",
+                "--provider",
+                "agentpod-linux",
+                "--seccomp-profile",
+                "fixtures/seccomp/kill-deny.json",
+                "--",
+                "echo",
+                "contract",
+            ])
+            .unwrap();
+
+            let Commands::Agentpod {
+                command:
+                    AgentPodCommands::Run {
+                        provider,
+                        seccomp_profile,
+                        command,
+                        ..
+                    },
+            } = cli.command
+            else {
+                panic!("expected agentpod run command");
+            };
+
+            assert_eq!(provider, "agentpod-linux");
+            assert_eq!(
+                seccomp_profile.unwrap(),
+                PathBuf::from("fixtures/seccomp/kill-deny.json")
+            );
+            assert_eq!(command, vec!["echo", "contract"]);
+        });
+    }
+
+    #[test]
+    fn native_plan_parses_seccomp_profile_import_path() {
+        run_cli_parse_test(|| {
+            let cli = Cli::try_parse_from([
+                "agentbox",
+                "native-plan",
+                "--provider",
+                "agentpod-linux",
+                "--seccomp-profile",
+                "fixtures/seccomp/kill-deny.json",
+                "--",
+                "/bin/true",
+            ])
+            .unwrap();
+
+            let Commands::NativePlan {
+                provider,
+                seccomp_profile,
+                command,
+                ..
+            } = cli.command
+            else {
+                panic!("expected native-plan command");
+            };
+
+            assert_eq!(provider, "agentpod-linux");
+            assert_eq!(
+                seccomp_profile.unwrap(),
+                PathBuf::from("fixtures/seccomp/kill-deny.json")
+            );
+            assert_eq!(command, vec!["/bin/true"]);
         });
     }
 

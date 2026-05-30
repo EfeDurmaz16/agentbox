@@ -382,6 +382,26 @@ pub struct SeccompProfile {
     pub default_action: SeccompAction,
     pub rules: Vec<SeccompRule>,
     pub requires_linux: bool,
+    #[serde(
+        default,
+        skip_serializing_if = "SeccompProfileSource::is_agentbox_generated"
+    )]
+    pub source: SeccompProfileSource,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum SeccompProfileSource {
+    #[default]
+    AgentboxGenerated,
+    ImportedOciLibseccomp {
+        source: String,
+    },
+}
+
+impl SeccompProfileSource {
+    pub fn is_agentbox_generated(&self) -> bool {
+        matches!(self, Self::AgentboxGenerated)
+    }
 }
 
 impl Default for SeccompProfile {
@@ -391,6 +411,7 @@ impl Default for SeccompProfile {
             default_action: SeccompAction::Allow,
             rules: vec![],
             requires_linux: true,
+            source: SeccompProfileSource::AgentboxGenerated,
         }
     }
 }
@@ -410,6 +431,7 @@ impl SeccompProfile {
                 })
                 .collect(),
             requires_linux: true,
+            source: SeccompProfileSource::AgentboxGenerated,
         }
     }
 }

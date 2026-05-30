@@ -297,8 +297,9 @@ Podman compatibility is not presented as domain or packet-level policy
 enforcement. Linux AgentPod work has started with user, mount, PID namespace,
 cgroups v2, no-new-privs, seccomp profile, and Landlock filesystem primitives,
 plus a gated prototype executor with a narrow BPF seccomp loader for supported
-syscall deny rules, a coarse connect-deny network guard for deny-all Linux
-network modes, and a read/write/execute Landlock path-beneath loader. macOS
+generated or imported OCI/libseccomp subset syscall deny rules, a coarse
+connect-deny network guard for deny-all Linux network modes, and a
+read/write/execute Landlock path-beneath loader. macOS
 AgentPod now has a native plan compiler for the Apple Virtualization, Endpoint
 Security, Network Extension, entitlement, host bridge, and evidence surfaces,
 but provider execution remains unavailable until live runner and enforcement

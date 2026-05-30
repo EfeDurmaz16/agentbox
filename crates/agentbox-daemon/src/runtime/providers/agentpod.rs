@@ -355,7 +355,7 @@ impl RuntimeProvider for AgentPodProvider {
                             "gated prototype Landlock read/write/execute path-beneath ruleset loader before exec with explicit runtime support paths"
                         }
                         AgentPodPrimitive::Seccomp => {
-                            "gated prototype BPF seccomp loader for supported syscall deny rules plus coarse connect-deny network guard; not a complete libseccomp profile loader or packet/domain firewall"
+                            "gated prototype BPF seccomp loader for supported generated/imported syscall deny rules plus coarse connect-deny network guard; not a complete libseccomp profile loader or packet/domain firewall"
                         }
                         AgentPodPrimitive::EBpf => {
                             "eBPF observability descriptor only; probe loading is not wired"

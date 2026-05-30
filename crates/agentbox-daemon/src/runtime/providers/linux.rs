@@ -3,7 +3,8 @@ use serde::{Deserialize, Serialize};
 use crate::runtime::provider::RuntimeError;
 use crate::runtime::types::{
     AgentPodRiskLevel, AgentPodWorkspaceMode, CommandResult, ExecCommand, MinipodSpec, MountMode,
-    NetworkMode, ResourcePolicy, SeccompAction, SeccompProfile, WorkspaceOverlayMode,
+    NetworkMode, ResourcePolicy, SeccompAction, SeccompProfile, SeccompProfileSource,
+    WorkspaceOverlayMode,
 };
 
 const LINUX_AGENTPOD_PIDS_MAX_LOW_RISK: u32 = 256;
@@ -568,6 +569,15 @@ impl LinuxSeccompPlan {
             requires_linux: true,
         };
         refresh_linux_seccomp_generated_profile(&mut plan);
+        if let SeccompProfileSource::ImportedOciLibseccomp { source } = &profile.source {
+            plan.import_descriptor =
+                LinuxSeccompProfileImportDescriptor::for_imported_profile(source);
+            if let Some(fixture) = &mut plan.denied_syscall_fixture {
+                fixture.claim_boundary =
+                    "fixture proves imported OCI/libseccomp deny rule is compiled into the Agentbox BPF seccomp loader; this is still a supported subset, not complete libseccomp compatibility"
+                        .into();
+            }
+        }
         plan
     }
 }
@@ -637,6 +647,21 @@ impl LinuxSeccompProfileImportDescriptor {
             claim_boundary: "external OCI/libseccomp profile import is described but not accepted or applied yet".into(),
         }
     }
+
+    fn for_imported_profile(source: &str) -> Self {
+        Self {
+            schema_version: 1,
+            supported_formats: vec!["oci-seccomp-v1-json".into(), "libseccomp-json".into()],
+            generated_oci_profile: false,
+            import_enabled: true,
+            loader_scope: format!(
+                "validated imported OCI/libseccomp profile subset from {source}: default allow plus supported syscall deny actions compiled into the Agentbox BPF loader"
+            ),
+            claim_boundary:
+                "supported OCI/libseccomp subset only: default SCMP_ACT_ALLOW with unconditional syscall SCMP_ACT_ERRNO or SCMP_ACT_KILL_PROCESS rules; unsupported args, includes/excludes, seccomp notify/listeners, default-deny profiles, unknown fields, unsupported architectures, and unsupported syscalls fail closed"
+                    .into(),
+        }
+    }
 }
 
 fn seccomp_action_to_oci(action: &SeccompAction) -> (String, Option<i32>) {
@@ -675,6 +700,64 @@ impl LinuxSeccompProfileLoader {
         Ok(LinuxSeccompPlan::from_profile(profile))
     }
 
+    pub fn import_oci_profile_json(
+        profile_json: &str,
+        source: &str,
+    ) -> Result<LinuxSeccompPlan, RuntimeError> {
+        let profile = Self::profile_from_oci_profile_json(profile_json, source)?;
+        Ok(LinuxSeccompPlan::from_profile(&profile))
+    }
+
+    pub fn profile_from_oci_profile_json(
+        profile_json: &str,
+        source: &str,
+    ) -> Result<SeccompProfile, RuntimeError> {
+        let imported: ImportedLinuxSeccompOciProfile =
+            serde_json::from_str(profile_json).map_err(|err| {
+                RuntimeError::ManifestRejected(format!(
+                    "invalid OCI/libseccomp seccomp profile {source}: {err}"
+                ))
+            })?;
+        imported.validate(source)?;
+
+        let mut rules = Vec::new();
+        for syscall in imported.syscalls {
+            syscall.validate(source)?;
+            let action = imported_seccomp_rule_action(&syscall.action, syscall.errno_ret, source)?;
+            let comment = syscall.comment.unwrap_or_else(|| syscall.action.clone());
+            for name in syscall.names {
+                if !linux_seccomp_supported_syscall_name(&name) {
+                    return Err(RuntimeError::ManifestRejected(format!(
+                        "unsupported seccomp syscall `{name}` in imported profile {source}; supported prototype loader syscalls: {}",
+                        supported_linux_seccomp_syscall_names().join(", ")
+                    )));
+                }
+                rules.push(crate::runtime::types::SeccompRule {
+                    syscall: name,
+                    action: action.clone(),
+                    reason: format!("imported OCI/libseccomp profile {source}: {comment}"),
+                });
+            }
+        }
+
+        if rules.is_empty() {
+            return Err(RuntimeError::ManifestRejected(format!(
+                "imported OCI/libseccomp seccomp profile {source} produced no supported syscall rules"
+            )));
+        }
+
+        let profile = SeccompProfile {
+            enabled: true,
+            default_action: SeccompAction::Allow,
+            rules,
+            requires_linux: true,
+            source: SeccompProfileSource::ImportedOciLibseccomp {
+                source: source.into(),
+            },
+        };
+        Ok(profile)
+    }
+
     #[cfg(target_os = "linux")]
     pub fn apply(plan: &LinuxSeccompPlan) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let Some(filter) = compile_linux_seccomp_filter(plan)? else {
@@ -687,6 +770,148 @@ impl LinuxSeccompProfileLoader {
     #[cfg(not(target_os = "linux"))]
     pub fn apply(_plan: &LinuxSeccompPlan) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         Err("Linux seccomp profiles are only available on Linux".into())
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ImportedLinuxSeccompOciProfile {
+    default_action: String,
+    #[serde(default)]
+    architectures: Vec<String>,
+    #[serde(default)]
+    syscalls: Vec<ImportedLinuxSeccompOciSyscall>,
+    #[serde(default)]
+    default_errno_ret: Option<i32>,
+    #[serde(default)]
+    flags: Option<serde_json::Value>,
+    #[serde(default)]
+    listener_path: Option<String>,
+    #[serde(default)]
+    listener_metadata: Option<String>,
+}
+
+impl ImportedLinuxSeccompOciProfile {
+    fn validate(&self, source: &str) -> Result<(), RuntimeError> {
+        if self.default_action != "SCMP_ACT_ALLOW" {
+            return Err(RuntimeError::ManifestRejected(format!(
+                "unsupported seccomp defaultAction `{}` in imported profile {source}; Agentbox currently imports default SCMP_ACT_ALLOW profiles with explicit deny rules only",
+                self.default_action
+            )));
+        }
+        if self.default_errno_ret.is_some() {
+            return Err(RuntimeError::ManifestRejected(format!(
+                "unsupported seccomp defaultErrnoRet in imported profile {source}; default-deny errno profiles are not supported by this loader"
+            )));
+        }
+        if self.flags.is_some() {
+            return Err(RuntimeError::ManifestRejected(format!(
+                "unsupported seccomp flags in imported profile {source}; loader flags are not supported"
+            )));
+        }
+        if self.listener_path.is_some() || self.listener_metadata.is_some() {
+            return Err(RuntimeError::ManifestRejected(format!(
+                "unsupported seccomp notify/listener fields in imported profile {source}; listenerPath/listenerMetadata are not supported"
+            )));
+        }
+        let current_arch = current_seccomp_architecture();
+        if self.architectures.is_empty() {
+            return Err(RuntimeError::ManifestRejected(format!(
+                "imported seccomp profile {source} must declare architectures including {current_arch}"
+            )));
+        }
+        if !self
+            .architectures
+            .iter()
+            .any(|architecture| architecture == current_arch)
+        {
+            return Err(RuntimeError::ManifestRejected(format!(
+                "imported seccomp profile {source} does not support current architecture {current_arch}; declared architectures: {}",
+                self.architectures.join(", ")
+            )));
+        }
+        if self.syscalls.is_empty() {
+            return Err(RuntimeError::ManifestRejected(format!(
+                "imported OCI/libseccomp seccomp profile {source} must contain at least one syscall rule"
+            )));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ImportedLinuxSeccompOciSyscall {
+    #[serde(default)]
+    names: Vec<String>,
+    action: String,
+    #[serde(default)]
+    errno_ret: Option<i32>,
+    #[serde(default)]
+    comment: Option<String>,
+    #[serde(default)]
+    args: Option<Vec<serde_json::Value>>,
+    #[serde(default)]
+    includes: Option<serde_json::Value>,
+    #[serde(default)]
+    excludes: Option<serde_json::Value>,
+}
+
+impl ImportedLinuxSeccompOciSyscall {
+    fn validate(&self, source: &str) -> Result<(), RuntimeError> {
+        if self.names.is_empty() {
+            return Err(RuntimeError::ManifestRejected(format!(
+                "imported seccomp syscall rule in {source} must contain at least one name"
+            )));
+        }
+        if self
+            .names
+            .iter()
+            .any(|name| name.trim().is_empty() || name.contains(char::is_whitespace))
+        {
+            return Err(RuntimeError::ManifestRejected(format!(
+                "imported seccomp syscall names in {source} must be non-empty syscall identifiers"
+            )));
+        }
+        if self.args.as_ref().is_some_and(|args| !args.is_empty()) {
+            return Err(RuntimeError::ManifestRejected(format!(
+                "unsupported seccomp syscall args in imported profile {source}; argument-conditional libseccomp rules are not supported"
+            )));
+        }
+        if self.includes.is_some() || self.excludes.is_some() {
+            return Err(RuntimeError::ManifestRejected(format!(
+                "unsupported seccomp includes/excludes in imported profile {source}; conditional profile sections are not supported"
+            )));
+        }
+        Ok(())
+    }
+}
+
+fn imported_seccomp_rule_action(
+    action: &str,
+    errno_ret: Option<i32>,
+    source: &str,
+) -> Result<SeccompAction, RuntimeError> {
+    match action {
+        "SCMP_ACT_ERRNO" => {
+            let errno = errno_ret.unwrap_or(libc::EPERM);
+            if errno <= 0 || errno > 4095 {
+                return Err(RuntimeError::ManifestRejected(format!(
+                    "unsupported seccomp errnoRet `{errno}` in imported profile {source}; expected Linux errno range 1..=4095"
+                )));
+            }
+            Ok(SeccompAction::Errno(errno))
+        }
+        "SCMP_ACT_KILL_PROCESS" => Ok(SeccompAction::KillProcess),
+        "SCMP_ACT_ALLOW" | "SCMP_ACT_LOG" | "SCMP_ACT_TRACE" | "SCMP_ACT_TRAP"
+        | "SCMP_ACT_NOTIFY" | "SCMP_ACT_KILL" | "SCMP_ACT_KILL_THREAD" => Err(
+            RuntimeError::ManifestRejected(format!(
+                "unsupported seccomp syscall action `{action}` in imported profile {source}; Agentbox currently imports unconditional deny actions only"
+            )),
+        ),
+        other => Err(RuntimeError::ManifestRejected(format!(
+            "unknown seccomp syscall action `{other}` in imported profile {source}"
+        ))),
     }
 }
 
@@ -2483,15 +2708,29 @@ fn seccomp_action_to_bpf(
 #[cfg(target_os = "linux")]
 fn linux_syscall_number(syscall: &str) -> Option<u32> {
     match syscall {
-        "bpf" => Some(libc::SYS_bpf as u32),
-        "clone" => Some(libc::SYS_clone as u32),
-        "clone3" => Some(libc::SYS_clone3 as u32),
-        "connect" => Some(libc::SYS_connect as u32),
-        "kill" => Some(libc::SYS_kill as u32),
-        "ptrace" => Some(libc::SYS_ptrace as u32),
-        "unshare" => Some(libc::SYS_unshare as u32),
+        "bpf" if linux_seccomp_supported_syscall_name(syscall) => Some(libc::SYS_bpf as u32),
+        "clone" if linux_seccomp_supported_syscall_name(syscall) => Some(libc::SYS_clone as u32),
+        "clone3" if linux_seccomp_supported_syscall_name(syscall) => Some(libc::SYS_clone3 as u32),
+        "connect" if linux_seccomp_supported_syscall_name(syscall) => {
+            Some(libc::SYS_connect as u32)
+        }
+        "kill" if linux_seccomp_supported_syscall_name(syscall) => Some(libc::SYS_kill as u32),
+        "ptrace" if linux_seccomp_supported_syscall_name(syscall) => Some(libc::SYS_ptrace as u32),
+        "unshare" if linux_seccomp_supported_syscall_name(syscall) => {
+            Some(libc::SYS_unshare as u32)
+        }
         _ => None,
     }
+}
+
+fn linux_seccomp_supported_syscall_name(syscall: &str) -> bool {
+    supported_linux_seccomp_syscall_names().contains(&syscall)
+}
+
+fn supported_linux_seccomp_syscall_names() -> &'static [&'static str] {
+    &[
+        "bpf", "clone", "clone3", "connect", "kill", "ptrace", "unshare",
+    ]
 }
 
 #[cfg(target_os = "linux")]
@@ -3393,6 +3632,165 @@ printf landlock-policy-ok
             .import_descriptor
             .claim_boundary
             .contains("external OCI/libseccomp profile import"));
+    }
+
+    #[test]
+    fn seccomp_import_accepts_supported_oci_libseccomp_profile() {
+        let profile_json = serde_json::json!({
+            "defaultAction": "SCMP_ACT_ALLOW",
+            "architectures": [current_seccomp_architecture()],
+            "syscalls": [
+                {
+                    "names": ["kill", "ptrace"],
+                    "action": "SCMP_ACT_ERRNO",
+                    "errnoRet": libc::EPERM,
+                    "comment": "block signal and debugger authority"
+                }
+            ]
+        })
+        .to_string();
+
+        let plan = LinuxSeccompProfileLoader::import_oci_profile_json(
+            &profile_json,
+            "fixture-seccomp.json",
+        )
+        .unwrap();
+
+        assert!(plan.enabled);
+        assert!(plan.requires_loader);
+        assert_eq!(plan.default_action, SeccompAction::Allow);
+        assert_eq!(plan.syscall_rules.len(), 2);
+        assert_eq!(plan.syscall_rules[0].syscall, "kill");
+        assert_eq!(
+            plan.syscall_rules[0].action,
+            SeccompAction::Errno(libc::EPERM)
+        );
+        assert_eq!(plan.syscall_rules[1].syscall, "ptrace");
+        assert!(plan.syscall_rules[0]
+            .reason
+            .contains("fixture-seccomp.json"));
+        assert!(plan.import_descriptor.import_enabled);
+        assert!(!plan.import_descriptor.generated_oci_profile);
+        assert!(plan
+            .import_descriptor
+            .loader_scope
+            .contains("validated imported OCI/libseccomp"));
+        assert!(plan
+            .import_descriptor
+            .claim_boundary
+            .contains("supported OCI/libseccomp subset"));
+        assert!(plan
+            .denied_syscall_fixture
+            .as_ref()
+            .unwrap()
+            .claim_boundary
+            .contains("imported OCI/libseccomp"));
+    }
+
+    #[test]
+    fn seccomp_import_rejects_unsupported_conditional_args() {
+        let profile_json = serde_json::json!({
+            "defaultAction": "SCMP_ACT_ALLOW",
+            "architectures": [current_seccomp_architecture()],
+            "syscalls": [
+                {
+                    "names": ["kill"],
+                    "action": "SCMP_ACT_ERRNO",
+                    "errnoRet": libc::EPERM,
+                    "args": [
+                        {
+                            "index": 0,
+                            "value": 1,
+                            "op": "SCMP_CMP_EQ"
+                        }
+                    ]
+                }
+            ]
+        })
+        .to_string();
+
+        let err = LinuxSeccompProfileLoader::import_oci_profile_json(&profile_json, "args.json")
+            .unwrap_err();
+
+        assert!(matches!(err, RuntimeError::ManifestRejected(_)));
+        assert!(err.to_string().contains("unsupported seccomp syscall args"));
+    }
+
+    #[test]
+    fn seccomp_import_rejects_wrong_architecture() {
+        let profile_json = serde_json::json!({
+            "defaultAction": "SCMP_ACT_ALLOW",
+            "architectures": ["SCMP_ARCH_MIPS"],
+            "syscalls": [
+                {
+                    "names": ["kill"],
+                    "action": "SCMP_ACT_ERRNO",
+                    "errnoRet": libc::EPERM
+                }
+            ]
+        })
+        .to_string();
+
+        let err = LinuxSeccompProfileLoader::import_oci_profile_json(&profile_json, "mips.json")
+            .unwrap_err();
+
+        assert!(matches!(err, RuntimeError::ManifestRejected(_)));
+        assert!(err.to_string().contains("architecture"));
+        assert!(err.to_string().contains(current_seccomp_architecture()));
+    }
+
+    #[test]
+    fn seccomp_import_rejects_unsupported_syscall_names_before_apply() {
+        let profile_json = serde_json::json!({
+            "defaultAction": "SCMP_ACT_ALLOW",
+            "architectures": [current_seccomp_architecture()],
+            "syscalls": [
+                {
+                    "names": ["definitely_not_a_syscall"],
+                    "action": "SCMP_ACT_ERRNO",
+                    "errnoRet": libc::EPERM
+                }
+            ]
+        })
+        .to_string();
+
+        let err =
+            LinuxSeccompProfileLoader::import_oci_profile_json(&profile_json, "bad-syscall.json")
+                .unwrap_err();
+
+        assert!(matches!(err, RuntimeError::ManifestRejected(_)));
+        assert!(err.to_string().contains("unsupported seccomp syscall"));
+        assert!(err.to_string().contains("definitely_not_a_syscall"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn imported_seccomp_denied_syscall_fixture_fails_with_expected_evidence() {
+        let profile_json = serde_json::json!({
+            "defaultAction": "SCMP_ACT_ALLOW",
+            "architectures": [current_seccomp_architecture()],
+            "syscalls": [
+                {
+                    "names": ["kill"],
+                    "action": "SCMP_ACT_ERRNO",
+                    "errnoRet": libc::EPERM,
+                    "comment": "block signal fanout imported from OCI profile"
+                }
+            ]
+        })
+        .to_string();
+        let plan =
+            LinuxSeccompProfileLoader::import_oci_profile_json(&profile_json, "kill-deny.json")
+                .unwrap();
+
+        let result =
+            run_linux_seccomp_denied_syscall_fixture(&plan, "session-imported-seccomp").unwrap();
+
+        assert_eq!(result.exit_code, Some(0));
+        assert!(result.stdout.contains("kill_status:1"));
+        assert!(result.stderr.contains("Operation not permitted"));
+        assert_eq!(result.evidence.syscall, "kill");
+        assert!(result.evidence.claim.contains("imported OCI/libseccomp"));
     }
 
     #[test]

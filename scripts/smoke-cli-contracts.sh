@@ -10,6 +10,39 @@ MACOS_VM_RUNNER=(cargo run --locked -q -p agentbox-daemon --bin agentbox-macos-v
 TMPDIR="$(mktemp -d)"
 trap 'rm -rf "$TMPDIR"' EXIT
 
+case "$(uname -m)" in
+  x86_64 | amd64)
+    SECCOMP_ARCH="SCMP_ARCH_X86_64"
+    ;;
+  arm64 | aarch64)
+    SECCOMP_ARCH="SCMP_ARCH_AARCH64"
+    ;;
+  arm | armv7l)
+    SECCOMP_ARCH="SCMP_ARCH_ARM"
+    ;;
+  i386 | i686)
+    SECCOMP_ARCH="SCMP_ARCH_X86"
+    ;;
+  *)
+    SECCOMP_ARCH="SCMP_ARCH_NATIVE"
+    ;;
+esac
+
+cat >"$TMPDIR/seccomp-kill-deny.json" <<EOF
+{
+  "defaultAction": "SCMP_ACT_ALLOW",
+  "architectures": ["$SECCOMP_ARCH"],
+  "syscalls": [
+    {
+      "names": ["kill"],
+      "action": "SCMP_ACT_ERRNO",
+      "errnoRet": 1,
+      "comment": "block signal fanout from imported OCI/libseccomp profile"
+    }
+  ]
+}
+EOF
+
 log() {
   printf '\n==> %s\n' "$*"
 }
@@ -158,6 +191,9 @@ validate_json "$TMPDIR/run-plan-low.json" \
 "${CLI[@]}" run --plan --provider agentpod-linux --deny-syscall kill --max-processes 64 --json -- /bin/true >"$TMPDIR/run-plan-seccomp.json"
 validate_json "$TMPDIR/run-plan-seccomp.json" \
   "data.get('manifest', {}).get('seccomp', {}).get('enabled') == True and data.get('manifest', {}).get('seccomp', {}).get('rules', [])[0].get('syscall') == 'kill' and data.get('manifest', {}).get('labels', {}).get('agentbox.resources.pids_max') == '64' and any(status.get('primitive') == 'seccomp' and 'BPF seccomp loader' in status.get('enforcement_scope', '') for status in data.get('selected_provider', {}).get('boundary_primitive_statuses', []))"
+"${CLI[@]}" run --plan --provider agentpod-linux --seccomp-profile "$TMPDIR/seccomp-kill-deny.json" --json -- /bin/true >"$TMPDIR/run-plan-imported-seccomp.json"
+validate_json "$TMPDIR/run-plan-imported-seccomp.json" \
+  "data.get('manifest', {}).get('seccomp', {}).get('enabled') == True and data.get('manifest', {}).get('seccomp', {}).get('rules', [])[0].get('syscall') == 'kill' and '$TMPDIR/seccomp-kill-deny.json' in data.get('manifest', {}).get('seccomp', {}).get('rules', [])[0].get('reason', '') and 'ImportedOciLibseccomp' in data.get('manifest', {}).get('seccomp', {}).get('source', {})"
 "${CLI[@]}" run --provider direct-host --risk low --json -- echo agentbox-contract >"$TMPDIR/run-direct-host.json"
 validate_json "$TMPDIR/run-direct-host.json" \
   "data.get('schema_version') == 1 and data.get('session', {}).get('provider') == 'direct-host' and data.get('command_result', {}).get('stdout') == 'agentbox-contract\n' and data.get('destroyed') == True"
@@ -215,6 +251,13 @@ validate_json "$TMPDIR/native-plan-linux-seccomp.json" \
   "data.get('provider') == 'agentpod-linux' and data.get('seccomp', {}).get('enabled') == True and data.get('seccomp', {}).get('syscall_rules', [])[0].get('syscall') == 'kill' and data.get('seccomp', {}).get('import_descriptor', {}).get('generated_oci_profile') == True and data.get('seccomp', {}).get('import_descriptor', {}).get('import_enabled') == False and 'external OCI/libseccomp profile import' in data.get('seccomp', {}).get('import_descriptor', {}).get('claim_boundary', '') and data.get('network_enforcement', {}).get('env_var') == 'AGENTBOX_LINUX_NETWORK_GUARD' and data.get('network_enforcement', {}).get('enabled') == False and 'descriptor only' in data.get('network_enforcement', {}).get('enforcement_claim', '') and data.get('nftables', {}).get('live_gate', {}).get('env_var') == 'AGENTBOX_LINUX_NFTABLES' and data.get('nftables', {}).get('live_gate', {}).get('enabled') == False and 'no egress hook' in data.get('nftables', {}).get('live_gate', {}).get('lifecycle_claim', '') and data.get('cgroup', {}).get('pids_max') == 64 and data.get('mount_namespace', {}).get('workspace_bind_mount_wired') == True and 'agentbox-linux-runner' in data.get('mount_namespace', {}).get('workspace_mount_claim', '') and 'runner-managed workspace mount' in data.get('security_claim', '') and data.get('mount_namespace', {}).get('overlayfs', {}).get('requires_overlayfs') == True and any(p.get('name') == 'bind-workspace' and p.get('status') == 'prototype' and p.get('evidence_event') == 'agentpod.linux.runner.workspace.mounted' for p in data.get('runner_phases', [])) and any(p.get('name') == 'apply-overlayfs' and p.get('status') == 'prototype' and p.get('evidence_event') == 'agentpod.linux.runner.overlayfs.applied' and 'mount overlayfs' in p.get('claim', '') for p in data.get('runner_phases', [])) and any(p.get('name') == 'apply-seccomp' and p.get('status') == 'prototype' and p.get('evidence_event') == 'agentpod.linux.runner.seccomp.applied' for p in data.get('runner_phases', [])) and any(p.get('name') == 'apply-network-guard' and p.get('status') == 'inactive' and p.get('evidence_event') == 'agentpod.linux.runner.network_guard.applied' for p in data.get('runner_phases', [])) and any(p.get('name') == 'apply-nftables' and p.get('status') == 'inactive' and p.get('evidence_event') == 'agentpod.linux.runner.nftables.skeleton.applied' for p in data.get('runner_phases', []))"
 validate_json "$TMPDIR/native-plan-linux-seccomp.json" \
   "data.get('ebpf', {}).get('enforcement') == 'ObservedOnly' and len(data.get('ebpf', {}).get('receipts', [])) == len(data.get('ebpf', {}).get('event_sources', [])) and any(r.get('event_type') == 'linux.process.exec' and r.get('status') == 'descriptor-only-or-unobserved' and r.get('enforcement') == 'observed-only' and r.get('session_id') == data.get('session_id') and r.get('correlation', {}).get('pid_fallback') == True and 'session_id' in r.get('process_identity_fields', []) and 'cgroup_path' in r.get('process_identity_fields', []) and 'not enforcement proof' in r.get('claim_boundary', '') for r in data.get('ebpf', {}).get('receipts', [])) and any(r.get('event_type') == 'linux.network.connect' and 'destination' in r.get('event_identity_fields', []) for r in data.get('ebpf', {}).get('receipts', []))"
+"${CLI[@]}" native-plan \
+  --provider agentpod-linux \
+  --workspace "$TMPDIR" \
+  --seccomp-profile "$TMPDIR/seccomp-kill-deny.json" \
+  -- /bin/true >"$TMPDIR/native-plan-linux-imported-seccomp.json"
+validate_json "$TMPDIR/native-plan-linux-imported-seccomp.json" \
+  "data.get('provider') == 'agentpod-linux' and data.get('seccomp', {}).get('enabled') == True and data.get('seccomp', {}).get('syscall_rules', [])[0].get('syscall') == 'kill' and '$TMPDIR/seccomp-kill-deny.json' in data.get('seccomp', {}).get('syscall_rules', [])[0].get('reason', '') and data.get('seccomp', {}).get('import_descriptor', {}).get('import_enabled') == True and data.get('seccomp', {}).get('import_descriptor', {}).get('generated_oci_profile') == False and 'validated imported OCI/libseccomp' in data.get('seccomp', {}).get('import_descriptor', {}).get('loader_scope', '') and 'supported OCI/libseccomp subset' in data.get('seccomp', {}).get('import_descriptor', {}).get('claim_boundary', '') and 'imported OCI/libseccomp' in data.get('seccomp', {}).get('denied_syscall_fixture', {}).get('claim_boundary', '') and any(p.get('name') == 'apply-seccomp' and p.get('status') == 'prototype' for p in data.get('runner_phases', []))"
 
 log "checking high-risk provider recommendation truth"
 "${CLI[@]}" run --plan --risk high --json -- echo agentbox-contract >"$TMPDIR/run-plan-high.json"
