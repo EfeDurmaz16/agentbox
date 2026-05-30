@@ -97,6 +97,10 @@ cargo run -p agentbox-cli -- start
 cargo run -p agentbox-cli -- status
 ```
 
+For a reproducible local source install with a prefix, dry run, rollback notes,
+and exact verification command, see
+[docs/local-install.md](docs/local-install.md).
+
 ## Out-of-Band Approvals (ntfy)
 
 Agentbox uses [ntfy](https://ntfy.sh) for approval notifications. The default setup is phone-based, free, and does not require an account; self-hosted ntfy also works.
