@@ -114,12 +114,14 @@ plans and post-run evidence use the same lifecycle vocabulary. The plan also
 exposes fail-closed lifecycle gates for setup failure, timeout cgroup
 process-tree kill, runner request-file cleanup, session cgroup cleanup, and
 Agentbox-owned nftables table cleanup. Workspace bind, overlayfs, Landlock, and
-seccomp are prototype phases. The Linux eBPF descriptor
-also exposes observability receipt templates for process exec, process exit,
-and network connect events; each template identifies provider, session, cgroup
-path, PID/TGID fallback fields, and event identity fields while staying
-`descriptor-only-or-unobserved` and `observed-only`. This is still a prototype
-primitive: live execution must be explicitly gated with
+seccomp are prototype phases. The Linux eBPF descriptor also exposes
+observability receipt templates and a gated `AGENTBOX_LINUX_EBPF=1` collector
+contract for process exec, process exit, and network connect events; each
+template identifies provider, session, cgroup path, PID/TGID fallback fields,
+and event identity fields while staying `descriptor-only-or-unobserved`,
+unavailable by default, and `observed-only`. The collector can export redacted
+observed events into evidence, but it does not load probes or enforce policy.
+This is still a prototype primitive: live execution must be explicitly gated with
 `AGENTBOX_LINUX_NATIVE`, and it is not a complete sandbox claim until the
 issue-mapped [Linux hardening gaps](linux-hardening-gaps.md) are wired and
 tested on Linux.

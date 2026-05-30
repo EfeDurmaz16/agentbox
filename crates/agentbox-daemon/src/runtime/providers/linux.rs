@@ -6,6 +6,7 @@ use crate::runtime::types::{
     NetworkMode, ResourcePolicy, SeccompAction, SeccompProfile, SeccompProfileSource,
     WorkspaceOverlayMode,
 };
+use std::collections::BTreeMap;
 
 const LINUX_AGENTPOD_PIDS_MAX_LOW_RISK: u32 = 256;
 const LINUX_AGENTPOD_PIDS_MAX_MEDIUM_RISK: u32 = 128;
@@ -2720,6 +2721,7 @@ pub struct LinuxEbpfObservabilityPlan {
     pub correlation: LinuxEbpfCorrelationPlan,
     pub event_sources: Vec<LinuxEbpfEventSourcePlan>,
     pub receipts: Vec<LinuxEbpfObservabilityReceiptPlan>,
+    pub collector: LinuxEbpfCollectorPlan,
     pub required_capabilities: Vec<String>,
     pub required_maps: Vec<String>,
     pub enforcement: LinuxEbpfEnforcementMode,
@@ -2757,6 +2759,82 @@ pub struct LinuxEbpfObservabilityReceiptPlan {
     pub status: String,
     pub enforcement: String,
     pub claim_boundary: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LinuxEbpfCollectorPlan {
+    pub schema_version: i64,
+    pub env_var: String,
+    pub enabled: bool,
+    pub status: String,
+    pub unavailable_reason: String,
+    pub failure_mode: String,
+    pub event_status: String,
+    pub required_kernel_features: Vec<String>,
+    pub required_privileges: Vec<String>,
+    pub claim_boundary: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LinuxEbpfObservedEvent {
+    pub schema_version: i64,
+    pub provider: String,
+    pub session_id: String,
+    pub cgroup_path: String,
+    pub pid: u32,
+    pub tgid: u32,
+    pub event_type: String,
+    pub metadata: BTreeMap<String, String>,
+    pub status: String,
+    pub enforcement: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LinuxEbpfObservationEvidence {
+    pub schema_version: i64,
+    pub provider: String,
+    pub session_id: String,
+    pub cgroup_path: String,
+    pub pid: u32,
+    pub tgid: u32,
+    pub event_type: String,
+    pub evidence_stream: String,
+    pub metadata: BTreeMap<String, String>,
+    pub status: String,
+    pub enforcement: String,
+    pub claim_boundary: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LinuxEbpfCollectorReport {
+    pub schema_version: i64,
+    pub provider: String,
+    pub session_id: String,
+    pub cgroup_path: String,
+    pub status: String,
+    pub unavailable_reason: String,
+    pub enforcement: String,
+    pub observed_events: Vec<LinuxEbpfObservationEvidence>,
+    pub claim_boundary: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LinuxEbpfCollectorProbe {
+    pub available: bool,
+    pub unavailable_reason: String,
+}
+
+impl LinuxEbpfCollectorProbe {
+    pub fn unavailable_for_tests(reason: impl Into<String>) -> Self {
+        Self {
+            available: false,
+            unavailable_reason: reason.into(),
+        }
+    }
+
+    pub fn current() -> Self {
+        linux_ebpf_current_probe()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2801,6 +2879,34 @@ impl LinuxEbpfObserverDescriptor {
         ];
         let receipts =
             linux_ebpf_observability_receipts(&provider, &session_id, &correlation, &event_sources);
+        let collector_enabled = linux_ebpf_live_collector_enabled();
+        let collector = LinuxEbpfCollectorPlan {
+            schema_version: 1,
+            env_var: "AGENTBOX_LINUX_EBPF".into(),
+            enabled: collector_enabled,
+            status: if collector_enabled {
+                "probe-required".into()
+            } else {
+                "unavailable".into()
+            },
+            unavailable_reason: if collector_enabled {
+                "host-probe-required".into()
+            } else {
+                "gate-disabled".into()
+            },
+            failure_mode: "skip-or-unavailable-not-pass".into(),
+            event_status: "observed-only".into(),
+            required_kernel_features: vec![
+                "BTF vmlinux".into(),
+                "bpffs".into(),
+                "tracepoint support".into(),
+                "cgroup connect attach support".into(),
+            ],
+            required_privileges: vec!["CAP_BPF".into(), "CAP_PERFMON".into()],
+            claim_boundary:
+                "gated eBPF collector exports observed-only evidence and does not enforce policy or prove denial"
+                    .into(),
+        };
 
         Ok(LinuxEbpfObservabilityPlan {
             schema_version: 1,
@@ -2809,6 +2915,7 @@ impl LinuxEbpfObserverDescriptor {
             correlation,
             event_sources,
             receipts,
+            collector,
             required_capabilities: vec!["CAP_BPF".into(), "CAP_PERFMON".into()],
             required_maps: vec![
                 "agentbox_session_correlation".into(),
@@ -2821,6 +2928,202 @@ impl LinuxEbpfObserverDescriptor {
                 "eBPF observer descriptor only; observed events are not enforcement proof".into(),
         })
     }
+}
+
+pub struct LinuxEbpfLiveCollector;
+
+impl LinuxEbpfLiveCollector {
+    pub fn collect(
+        plan: &LinuxEbpfObservabilityPlan,
+    ) -> Result<LinuxEbpfCollectorReport, RuntimeError> {
+        Self::collect_with_probe(plan, LinuxEbpfCollectorProbe::current())
+    }
+
+    pub fn collect_with_probe(
+        plan: &LinuxEbpfObservabilityPlan,
+        probe: LinuxEbpfCollectorProbe,
+    ) -> Result<LinuxEbpfCollectorReport, RuntimeError> {
+        if !plan.collector.enabled {
+            return Ok(linux_ebpf_unavailable_report(plan, "gate-disabled"));
+        }
+        if !probe.available {
+            return Ok(linux_ebpf_unavailable_report(
+                plan,
+                &probe.unavailable_reason,
+            ));
+        }
+
+        Ok(linux_ebpf_unavailable_report(
+            plan,
+            "probe-loader-not-wired",
+        ))
+    }
+}
+
+pub struct LinuxEbpfEvidenceExporter;
+
+impl LinuxEbpfEvidenceExporter {
+    pub fn export_observed_events(
+        plan: &LinuxEbpfObservabilityPlan,
+        events: Vec<LinuxEbpfObservedEvent>,
+    ) -> Result<Vec<LinuxEbpfObservationEvidence>, RuntimeError> {
+        events
+            .into_iter()
+            .map(|event| linux_ebpf_export_observed_event(plan, event))
+            .collect()
+    }
+}
+
+fn linux_ebpf_unavailable_report(
+    plan: &LinuxEbpfObservabilityPlan,
+    reason: &str,
+) -> LinuxEbpfCollectorReport {
+    LinuxEbpfCollectorReport {
+        schema_version: 1,
+        provider: plan.provider.clone(),
+        session_id: plan.session_id.clone(),
+        cgroup_path: plan.correlation.cgroup_path.clone(),
+        status: "unavailable".into(),
+        unavailable_reason: reason.into(),
+        enforcement: "observed-only".into(),
+        observed_events: Vec::new(),
+        claim_boundary:
+            "eBPF collector unavailable; observed events are telemetry only and not enforcement proof"
+                .into(),
+    }
+}
+
+fn linux_ebpf_export_observed_event(
+    plan: &LinuxEbpfObservabilityPlan,
+    event: LinuxEbpfObservedEvent,
+) -> Result<LinuxEbpfObservationEvidence, RuntimeError> {
+    if event.provider != plan.provider {
+        return Err(RuntimeError::ManifestRejected(
+            "eBPF observed event provider does not match plan".into(),
+        ));
+    }
+    if event.session_id != plan.session_id {
+        return Err(RuntimeError::ManifestRejected(
+            "eBPF observed event session id does not match plan".into(),
+        ));
+    }
+    if event.cgroup_path != plan.correlation.cgroup_path {
+        return Err(RuntimeError::ManifestRejected(
+            "eBPF observed event cgroup path does not match plan".into(),
+        ));
+    }
+    if event.enforcement != "observed-only" {
+        return Err(RuntimeError::ManifestRejected(
+            "eBPF observed event must be observed-only".into(),
+        ));
+    }
+
+    Ok(LinuxEbpfObservationEvidence {
+        schema_version: 1,
+        provider: event.provider,
+        session_id: event.session_id,
+        cgroup_path: event.cgroup_path,
+        pid: event.pid,
+        tgid: event.tgid,
+        event_type: event.event_type,
+        evidence_stream: format!("{}/{}/ebpf-observability", plan.provider, plan.session_id),
+        metadata: linux_ebpf_redact_metadata(event.metadata),
+        status: event.status,
+        enforcement: event.enforcement,
+        claim_boundary:
+            "eBPF observed event exported as telemetry; observation is not enforcement proof".into(),
+    })
+}
+
+fn linux_ebpf_redact_metadata(metadata: BTreeMap<String, String>) -> BTreeMap<String, String> {
+    metadata
+        .into_iter()
+        .map(|(key, value)| {
+            if linux_ebpf_metadata_is_sensitive(&key, &value) {
+                (key, "[redacted]".into())
+            } else {
+                (key, value)
+            }
+        })
+        .collect()
+}
+
+fn linux_ebpf_metadata_is_sensitive(key: &str, value: &str) -> bool {
+    let key = key.to_ascii_lowercase();
+    let value = value.to_ascii_lowercase();
+    matches!(
+        key.as_str(),
+        "argv" | "args" | "env" | "environment" | "authorization" | "token"
+    ) || value.contains("authorization:")
+        || value.contains("bearer")
+        || value.contains("api_key")
+        || value.contains("secret")
+        || value.contains("token")
+}
+
+fn linux_ebpf_live_collector_enabled() -> bool {
+    linux_ebpf_live_collector_enabled_value(std::env::var("AGENTBOX_LINUX_EBPF").ok().as_deref())
+}
+
+fn linux_ebpf_live_collector_enabled_value(value: Option<&str>) -> bool {
+    matches!(value, Some("1"))
+}
+
+fn linux_ebpf_current_probe() -> LinuxEbpfCollectorProbe {
+    #[cfg(target_os = "linux")]
+    {
+        linux_ebpf_current_probe_linux()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        LinuxEbpfCollectorProbe {
+            available: false,
+            unavailable_reason: "linux-only".into(),
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn linux_ebpf_current_probe_linux() -> LinuxEbpfCollectorProbe {
+    if !std::path::Path::new("/sys/kernel/btf/vmlinux").exists() {
+        return LinuxEbpfCollectorProbe {
+            available: false,
+            unavailable_reason: "missing-btf".into(),
+        };
+    }
+    if !std::path::Path::new("/sys/fs/bpf").exists() {
+        return LinuxEbpfCollectorProbe {
+            available: false,
+            unavailable_reason: "missing-bpffs".into(),
+        };
+    }
+    if !linux_process_has_capability(39) || !linux_process_has_capability(38) {
+        return LinuxEbpfCollectorProbe {
+            available: false,
+            unavailable_reason: "missing-cap-bpf-or-cap-perfmon".into(),
+        };
+    }
+    LinuxEbpfCollectorProbe {
+        available: true,
+        unavailable_reason: String::new(),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn linux_process_has_capability(bit: u32) -> bool {
+    let Ok(status) = std::fs::read_to_string("/proc/self/status") else {
+        return false;
+    };
+    let Some(line) = status.lines().find(|line| line.starts_with("CapEff:")) else {
+        return false;
+    };
+    let Some(hex) = line.split_whitespace().nth(1) else {
+        return false;
+    };
+    let Ok(mask) = u64::from_str_radix(hex, 16) else {
+        return false;
+    };
+    bit < 64 && (mask & (1u64 << bit)) != 0
 }
 
 fn linux_ebpf_observability_receipts(
@@ -6050,6 +6353,130 @@ printf landlock-policy-ok
         assert_eq!(plan.enforcement, LinuxEbpfEnforcementMode::ObservedOnly);
         assert!(plan.requires_loader);
         assert!(plan.evidence_claim.contains("not enforcement proof"));
+    }
+
+    #[test]
+    fn ebpf_collector_contract_is_gated_and_unavailable_by_default() {
+        let spec = MinipodSpec::for_agent_task("hermes", "/tmp/agentbox-work");
+
+        let plan = LinuxEbpfObserverDescriptor::plan(&spec).unwrap();
+
+        assert_eq!(plan.collector.schema_version, 1);
+        assert_eq!(plan.collector.env_var, "AGENTBOX_LINUX_EBPF");
+        assert!(!plan.collector.enabled);
+        assert_eq!(plan.collector.status, "unavailable");
+        assert_eq!(plan.collector.unavailable_reason, "gate-disabled");
+        assert_eq!(plan.collector.failure_mode, "skip-or-unavailable-not-pass");
+        assert_eq!(plan.collector.event_status, "observed-only");
+        assert!(plan
+            .collector
+            .claim_boundary
+            .contains("does not enforce policy"));
+    }
+
+    #[test]
+    fn linux_ebpf_collector_live_gate_value_requires_exact_one() {
+        assert!(linux_ebpf_live_collector_enabled_value(Some("1")));
+        assert!(!linux_ebpf_live_collector_enabled_value(None));
+        assert!(!linux_ebpf_live_collector_enabled_value(Some("")));
+        assert!(!linux_ebpf_live_collector_enabled_value(Some("true")));
+        assert!(!linux_ebpf_live_collector_enabled_value(Some("yes")));
+    }
+
+    #[test]
+    fn linux_ebpf_collector_reports_unavailable_without_kernel_support() {
+        let spec = MinipodSpec::for_agent_task("hermes", "/tmp/agentbox-work");
+        let mut plan = LinuxEbpfObserverDescriptor::plan(&spec).unwrap();
+        plan.collector.enabled = true;
+        plan.collector.status = "probe-required".into();
+        plan.collector.unavailable_reason = "host-probe-required".into();
+        let probe = LinuxEbpfCollectorProbe::unavailable_for_tests("missing-btf-or-bpf-fs");
+
+        let report = LinuxEbpfLiveCollector::collect_with_probe(&plan, probe).unwrap();
+
+        assert_eq!(report.schema_version, 1);
+        assert_eq!(report.provider, "agentpod-linux");
+        assert_eq!(report.session_id, spec.id);
+        assert_eq!(report.status, "unavailable");
+        assert_eq!(report.unavailable_reason, "missing-btf-or-bpf-fs");
+        assert_eq!(report.enforcement, "observed-only");
+        assert!(report.observed_events.is_empty());
+        assert!(report.claim_boundary.contains("not enforcement proof"));
+    }
+
+    #[test]
+    fn linux_ebpf_live_collector_reports_unavailable_or_unwired_on_current_host() {
+        let spec = MinipodSpec::for_agent_task("hermes", "/tmp/agentbox-work");
+        let plan = LinuxEbpfObserverDescriptor::plan(&spec).unwrap();
+
+        let report = LinuxEbpfLiveCollector::collect(&plan).unwrap();
+
+        assert_eq!(report.schema_version, 1);
+        assert_eq!(report.provider, "agentpod-linux");
+        assert_eq!(report.session_id, spec.id);
+        assert_eq!(report.status, "unavailable");
+        assert_eq!(report.enforcement, "observed-only");
+        assert!(matches!(
+            report.unavailable_reason.as_str(),
+            "gate-disabled"
+                | "linux-only"
+                | "missing-btf"
+                | "missing-bpffs"
+                | "missing-cap-bpf-or-cap-perfmon"
+                | "probe-loader-not-wired"
+        ));
+        assert!(report.observed_events.is_empty());
+    }
+
+    #[test]
+    fn ebpf_observed_event_export_redacts_metadata_without_enforcement_claim() {
+        let mut spec = MinipodSpec::for_agent_task("hermes", "/tmp/agentbox-work");
+        spec.id = "session-ebpf".into();
+        let plan = LinuxEbpfObserverDescriptor::plan(&spec).unwrap();
+        let event = LinuxEbpfObservedEvent {
+            schema_version: 1,
+            provider: "agentpod-linux".into(),
+            session_id: "session-ebpf".into(),
+            cgroup_path: "/sys/fs/cgroup/agentbox-session-ebpf".into(),
+            pid: 42,
+            tgid: 40,
+            event_type: "linux.process.exec".into(),
+            metadata: std::collections::BTreeMap::from([
+                ("binary".into(), "/usr/bin/curl".into()),
+                (
+                    "argv".into(),
+                    "curl -H Authorization:Bearer-secret https://example.com".into(),
+                ),
+            ]),
+            status: "observed".into(),
+            enforcement: "observed-only".into(),
+        };
+
+        let exported = LinuxEbpfEvidenceExporter::export_observed_events(&plan, vec![event])
+            .expect("observed eBPF event should export into evidence");
+
+        assert_eq!(exported.len(), 1);
+        let evidence = &exported[0];
+        assert_eq!(evidence.provider, "agentpod-linux");
+        assert_eq!(evidence.session_id, "session-ebpf");
+        assert_eq!(evidence.pid, 42);
+        assert_eq!(evidence.tgid, 40);
+        assert_eq!(evidence.event_type, "linux.process.exec");
+        assert_eq!(evidence.status, "observed");
+        assert_eq!(evidence.enforcement, "observed-only");
+        assert_eq!(
+            evidence.evidence_stream,
+            "agentpod-linux/session-ebpf/ebpf-observability"
+        );
+        assert_eq!(
+            evidence.metadata.get("argv").map(String::as_str),
+            Some("[redacted]")
+        );
+        assert_eq!(
+            evidence.metadata.get("binary").map(String::as_str),
+            Some("/usr/bin/curl")
+        );
+        assert!(evidence.claim_boundary.contains("not enforcement proof"));
     }
 
     #[test]

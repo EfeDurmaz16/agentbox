@@ -105,9 +105,21 @@ loader is wired. Each template is deliberately marked
 - event identity fields for process exec, process exit, or network connect
 
 These receipts are evidence schemas, not observed kernel events. A session can
-use them to explain how a future collector will join kernel events back to an
+use them to explain how the gated collector joins kernel events back to an
 AgentPod process/session, but the receipts must not be interpreted as denial or
 policy enforcement proof.
+
+The native plan also carries a gated collector contract:
+
+- gate: `AGENTBOX_LINUX_EBPF=1`
+- default status: `unavailable`
+- failure mode: `skip-or-unavailable-not-pass`
+- event status: `observed-only`
+- required privileges: `CAP_BPF` and `CAP_PERFMON`
+
+The current collector path can export already-observed process/network events
+into redacted Agentbox evidence and report missing host support as unavailable.
+It still does not load eBPF programs or claim live kernel capture.
 
 ## Implementation Path
 
@@ -116,11 +128,15 @@ policy enforcement proof.
    capabilities, map names, event schemas, and descriptor-only observability
    receipts. The native execution plan now carries this observed-only descriptor
    without adding a live loader.
-3. Add a userspace collector interface that can ingest events from a future eBPF
-   loader without depending on the loader in the core runtime.
-4. Add session evidence export for observed process and network events.
-5. Add live tests gated by `AGENTBOX_LINUX_LIVE_TESTS=1`.
-6. Only after live tests pass, consider a Linux-only dependency.
+3. Add a userspace collector interface that can ingest observed events without
+   depending on a privileged loader in the core runtime. This is now wired as a
+   gated collector contract.
+4. Add session evidence export for observed process and network events. This is
+   now wired for redacted observed-only evidence records.
+5. Add live tests gated by `AGENTBOX_LINUX_EBPF=1` that fail as unavailable
+   when kernel support or privileges are missing.
+6. Only after the collector contract is stable, consider a Linux-only eBPF
+   loader dependency.
 
 ## Dependency Direction
 
@@ -154,15 +170,15 @@ git diff --check
 cargo test --workspace
 ```
 
-Future Linux live gate:
+Linux live gate:
 
 ```sh
-AGENTBOX_LINUX_LIVE_TESTS=1 cargo test -p agentbox-daemon linux_ebpf
+AGENTBOX_LINUX_EBPF=1 cargo test -p agentbox-daemon linux_ebpf
 ```
 
-The live gate should skip only when kernel support or privileges are absent. If
-the hook loads and observes the wrong session or misses expected events, it
-should fail.
+The live gate reports unavailable when kernel support or privileges are absent.
+When a future hook loader is wired, observing the wrong session or missing
+expected events should fail.
 
 ## References
 

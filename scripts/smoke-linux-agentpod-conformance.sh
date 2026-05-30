@@ -122,6 +122,16 @@ assert any(
     and receipt["enforcement"] == "observed-only"
     for receipt in plan["ebpf"]["receipts"]
 )
+collector = plan["ebpf"]["collector"]
+assert collector["env_var"] == "AGENTBOX_LINUX_EBPF"
+assert collector["enabled"] is False
+assert collector["status"] == "unavailable"
+assert collector["unavailable_reason"] == "gate-disabled"
+assert collector["failure_mode"] == "skip-or-unavailable-not-pass"
+assert collector["event_status"] == "observed-only"
+assert "CAP_BPF" in collector["required_privileges"]
+assert "CAP_PERFMON" in collector["required_privileges"]
+assert "does not enforce policy" in collector["claim_boundary"]
 PY
 
 log "checking Linux native smoke syntax"
