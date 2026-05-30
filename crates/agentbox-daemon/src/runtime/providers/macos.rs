@@ -9,7 +9,8 @@ use crate::runtime::bridge::{
 };
 use crate::runtime::provider::RuntimeError;
 use crate::runtime::types::{
-    CommandResult, ExecCommand, FileAccessMode, MinipodSpec, MountKind, MountMode, NetworkMode,
+    AgentPodWorkspaceMode, CommandResult, ExecCommand, FileAccessMode, MinipodSpec, MountKind,
+    MountMode, NetworkMode, WorkspaceOverlayMode, WorkspaceWritePolicy,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -60,10 +61,40 @@ pub struct MacOsVmCellCleanupPolicy {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MacOsWorkspaceMountPlan {
+    pub schema_version: i64,
     pub host_path: String,
     pub guest_path: String,
+    pub workspace_mode: String,
+    pub share_kind: String,
+    pub write_policy: WorkspaceWritePolicy,
     pub writable: bool,
     pub review_required: bool,
+    pub overlay: Option<MacOsWorkspaceOverlayMountPlan>,
+    pub evidence_refs: MacOsWorkspaceMountEvidenceRefs,
+    pub claim_boundary: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MacOsWorkspaceOverlayMountPlan {
+    pub mode: WorkspaceOverlayMode,
+    pub lower_host_path: String,
+    pub upper_host_path: Option<String>,
+    pub work_host_path: Option<String>,
+    pub review_host_path: Option<String>,
+    pub merged_guest_path: String,
+    pub review_required: bool,
+    pub commit_required: bool,
+    pub discard_on_destroy: bool,
+    pub claim_boundary: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MacOsWorkspaceMountEvidenceRefs {
+    pub mount_ref: String,
+    pub review_ref: Option<String>,
+    pub apply_ref: Option<String>,
+    pub discard_ref: Option<String>,
+    pub evidence_stream: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -147,11 +178,16 @@ impl MacOsVirtualizationCellPlan {
             ));
         }
 
+        let workspace_mount = macos_workspace_mount_plan(spec);
         let mut shared_directories = vec![MacOsSharedDirectoryPlan {
-            host_path: spec.filesystem.workspace_host_path.display().to_string(),
-            guest_path: spec.filesystem.workspace_guest_path.clone(),
+            host_path: workspace_mount.host_path.clone(),
+            guest_path: workspace_mount.guest_path.clone(),
             read_only: false,
-            kind: MountKind::Workspace,
+            kind: if workspace_mount.overlay.is_some() {
+                MountKind::WorkspaceOverlay
+            } else {
+                MountKind::Workspace
+            },
         }];
         shared_directories.extend(spec.filesystem.mounts.iter().map(|mount| {
             MacOsSharedDirectoryPlan {
@@ -162,15 +198,6 @@ impl MacOsVirtualizationCellPlan {
             }
         }));
 
-        let workspace_mount = MacOsWorkspaceMountPlan {
-            host_path: spec.filesystem.workspace_host_path.display().to_string(),
-            guest_path: spec.filesystem.workspace_guest_path.clone(),
-            writable: true,
-            review_required: !matches!(
-                spec.workspace_mode,
-                crate::runtime::types::AgentPodWorkspaceMode::Direct
-            ),
-        };
         let credential_channels = spec
             .credentials
             .grants
@@ -187,7 +214,7 @@ impl MacOsVirtualizationCellPlan {
             guest_os: "linux".into(),
             cpu_count: cpu_shares_to_vcpu(spec.resources.cpu_shares),
             memory_bytes: spec.resources.memory_bytes,
-            workspace_host_path: spec.filesystem.workspace_host_path.display().to_string(),
+            workspace_host_path: workspace_mount.host_path.clone(),
             workspace_guest_path: spec.filesystem.workspace_guest_path.clone(),
             cell_config: MacOsVmCellConfigPlan {
                 workspace_mount,
@@ -215,13 +242,14 @@ impl MacOsVmCellStorageLayout {
             .join("agentpods")
             .join("macos")
             .join(macos_agentpod_cell_safe_id(&spec.id));
+        let workspace_mount_host_path = macos_workspace_mount_host_path(spec);
         Self {
             schema_version: 1,
             cell_root_host_path: path_to_string(&cell_root),
             config_json_host_path: path_to_string(&cell_root.join("config").join("cell.json")),
             disk_image_host_path: path_to_string(&cell_root.join("disk").join("rootfs.img")),
             auxiliary_storage_host_path: path_to_string(&cell_root.join("disk").join("aux.img")),
-            workspace_mount_host_path: path_to_string(&spec.filesystem.workspace_host_path),
+            workspace_mount_host_path,
             credential_channel_host_path: path_to_string(&cell_root.join("credentials")),
             evidence_spool_host_path: path_to_string(&cell_root.join("evidence")),
             cleanup_policy: MacOsVmCellCleanupPolicy {
@@ -232,6 +260,105 @@ impl MacOsVmCellStorageLayout {
             },
         }
     }
+}
+
+fn macos_workspace_mount_plan(spec: &MinipodSpec) -> MacOsWorkspaceMountPlan {
+    let overlay = spec
+        .filesystem
+        .workspace_overlay
+        .is_enabled()
+        .then(|| macos_workspace_overlay_mount_plan(spec))
+        .flatten();
+    let host_path = overlay
+        .as_ref()
+        .and_then(|overlay| overlay.review_host_path.clone())
+        .unwrap_or_else(|| spec.filesystem.workspace_host_path.display().to_string());
+    let share_kind = match (&spec.workspace_mode, overlay.is_some()) {
+        (AgentPodWorkspaceMode::Direct, false) => "direct-shared-directory",
+        (AgentPodWorkspaceMode::OverlayReview, true) => "overlay-review-shared-directory",
+        (AgentPodWorkspaceMode::Ephemeral, true) => "ephemeral-overlay-shared-directory",
+        (AgentPodWorkspaceMode::CommitGated, true) => "commit-gated-overlay-shared-directory",
+        (_, true) => "workspace-overlay-shared-directory",
+        (_, false) => "direct-shared-directory",
+    }
+    .to_string();
+    let review_required = matches!(
+        spec.workspace_mode,
+        AgentPodWorkspaceMode::OverlayReview | AgentPodWorkspaceMode::CommitGated
+    );
+
+    MacOsWorkspaceMountPlan {
+        schema_version: 1,
+        host_path,
+        guest_path: spec.filesystem.workspace_guest_path.clone(),
+        workspace_mode: spec.workspace_mode.label().to_string(),
+        share_kind,
+        write_policy: spec.filesystem.workspace_write_policy.clone(),
+        writable: true,
+        review_required,
+        overlay,
+        evidence_refs: MacOsWorkspaceMountEvidenceRefs {
+            mount_ref: format!("agentpod-macos:{}:workspace:mount", spec.id),
+            review_ref: review_required
+                .then(|| format!("agentpod-macos:{}:workspace:review", spec.id)),
+            apply_ref: matches!(spec.workspace_mode, AgentPodWorkspaceMode::CommitGated)
+                .then(|| format!("agentpod-macos:{}:workspace:apply", spec.id)),
+            discard_ref: matches!(
+                spec.workspace_mode,
+                AgentPodWorkspaceMode::OverlayReview
+                    | AgentPodWorkspaceMode::Ephemeral
+                    | AgentPodWorkspaceMode::CommitGated
+            )
+            .then(|| format!("agentpod-macos:{}:workspace:discard", spec.id)),
+            evidence_stream: format!("agentpod-macos/{}/workspace", spec.id),
+        },
+        claim_boundary:
+            "workspace share contract only; Apple Virtualization directory sharing is not wired"
+                .into(),
+    }
+}
+
+fn macos_workspace_overlay_mount_plan(
+    spec: &MinipodSpec,
+) -> Option<MacOsWorkspaceOverlayMountPlan> {
+    let overlay = &spec.filesystem.workspace_overlay;
+    let lower_host_path = spec
+        .labels
+        .get("agentbox.workspace.lower")
+        .cloned()
+        .unwrap_or_else(|| spec.filesystem.workspace_host_path.display().to_string());
+    let upper_host_path = overlay
+        .upper_host_path
+        .as_ref()
+        .map(|path| path.display().to_string());
+    let work_host_path = overlay
+        .work_host_path
+        .as_ref()
+        .map(|path| path.display().to_string());
+    let review_host_path = spec
+        .labels
+        .get("agentbox.workspace.projected")
+        .cloned()
+        .or_else(|| upper_host_path.clone());
+
+    Some(MacOsWorkspaceOverlayMountPlan {
+        mode: overlay.mode.clone(),
+        lower_host_path,
+        upper_host_path,
+        work_host_path,
+        review_host_path,
+        merged_guest_path: overlay.guest_path.clone(),
+        review_required: matches!(overlay.mode, WorkspaceOverlayMode::ReviewRequired),
+        commit_required: matches!(spec.workspace_mode, AgentPodWorkspaceMode::CommitGated),
+        discard_on_destroy: matches!(spec.workspace_mode, AgentPodWorkspaceMode::Ephemeral),
+        claim_boundary:
+            "overlay workspace share contract only; APFS/virtiofs overlay lifecycle is not wired"
+                .into(),
+    })
+}
+
+fn macos_workspace_mount_host_path(spec: &MinipodSpec) -> String {
+    macos_workspace_mount_plan(spec).host_path
 }
 
 fn path_to_string(path: &std::path::Path) -> String {
@@ -607,6 +734,7 @@ impl MacOsVmCellBootRequest {
                 "macOS VM cell boot request paths cannot be empty".into(),
             ));
         }
+        validate_macos_workspace_mount_contract(&self.workspace_mount)?;
         if !self
             .required_entitlements
             .iter()
@@ -624,6 +752,57 @@ impl MacOsVmCellBootRequest {
         }
         Ok(())
     }
+}
+
+fn validate_macos_workspace_mount_contract(
+    mount: &MacOsWorkspaceMountPlan,
+) -> Result<(), RuntimeError> {
+    if mount.schema_version != 1 {
+        return Err(RuntimeError::ManifestRejected(
+            "macOS workspace mount contract schema_version must be 1".into(),
+        ));
+    }
+    if mount.workspace_mode.trim().is_empty()
+        || mount.share_kind.trim().is_empty()
+        || mount.evidence_refs.mount_ref.trim().is_empty()
+        || mount.evidence_refs.evidence_stream.trim().is_empty()
+    {
+        return Err(RuntimeError::ManifestRejected(
+            "macOS workspace mount contract metadata cannot be empty".into(),
+        ));
+    }
+    if mount.review_required && mount.evidence_refs.review_ref.is_none() {
+        return Err(RuntimeError::ManifestRejected(
+            "macOS workspace mount contract review-required plans need review evidence refs".into(),
+        ));
+    }
+    if !mount.claim_boundary.contains("not wired") {
+        return Err(RuntimeError::ManifestRejected(
+            "macOS workspace mount contract must keep an explicit non-execution claim boundary"
+                .into(),
+        ));
+    }
+    if let Some(overlay) = &mount.overlay {
+        if overlay.lower_host_path.trim().is_empty() || overlay.merged_guest_path.trim().is_empty()
+        {
+            return Err(RuntimeError::ManifestRejected(
+                "macOS workspace overlay contract paths cannot be empty".into(),
+            ));
+        }
+        if overlay.review_required && overlay.review_host_path.is_none() {
+            return Err(RuntimeError::ManifestRejected(
+                "macOS workspace overlay review contract requires a review host path".into(),
+            ));
+        }
+        if !overlay.claim_boundary.contains("not wired") {
+            return Err(RuntimeError::ManifestRejected(
+                "macOS workspace overlay contract must keep an explicit non-execution claim boundary"
+                    .into(),
+            ));
+        }
+    }
+
+    Ok(())
 }
 
 impl MacOsAgentPodRunnerRequest {
@@ -1255,7 +1434,10 @@ fn cpu_shares_to_vcpu(cpu_shares: u32) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runtime::types::{CredentialGrant, CredentialGrantKind, MountRule, ResourcePolicy};
+    use crate::runtime::types::{
+        AgentPodWorkspaceMode, CredentialGrant, CredentialGrantKind, MountRule, ResourcePolicy,
+        WorkspaceOverlayPolicy, WorkspaceWritePolicy,
+    };
     use std::collections::HashMap;
     use std::path::PathBuf;
 
@@ -1312,6 +1494,26 @@ mod tests {
             plan.cell_config.workspace_mount.host_path,
             "/tmp/agentbox-work"
         );
+        assert_eq!(plan.cell_config.workspace_mount.schema_version, 1);
+        assert_eq!(plan.cell_config.workspace_mount.workspace_mode, "direct");
+        assert_eq!(
+            plan.cell_config.workspace_mount.share_kind,
+            "direct-shared-directory"
+        );
+        assert_eq!(
+            plan.cell_config.workspace_mount.write_policy,
+            WorkspaceWritePolicy::Direct
+        );
+        assert!(plan.cell_config.workspace_mount.overlay.is_none());
+        assert_eq!(
+            plan.cell_config.workspace_mount.evidence_refs.mount_ref,
+            format!("agentpod-macos:{}:workspace:mount", spec.id)
+        );
+        assert!(plan
+            .cell_config
+            .workspace_mount
+            .claim_boundary
+            .contains("not wired"));
         assert_eq!(
             plan.cell_config.bridge_socket_guest_path,
             plan.host_bridge.guest_socket_path
@@ -1371,6 +1573,75 @@ mod tests {
         assert_eq!(plan.shared_directories.len(), 2);
         assert!(!plan.shared_directories[0].read_only);
         assert!(plan.shared_directories[1].read_only);
+    }
+
+    #[test]
+    fn macos_workspace_mount_contract_renders_overlay_review_paths_and_evidence_refs() {
+        let mut spec = MinipodSpec::for_agent_task("codex", "/tmp/agentbox-work");
+        spec.workspace_mode = AgentPodWorkspaceMode::OverlayReview;
+        spec.filesystem.workspace_write_policy = WorkspaceWritePolicy::WritableOverlay;
+        spec.filesystem.workspace_overlay = WorkspaceOverlayPolicy::review_required(Some(
+            PathBuf::from("/tmp/agentbox-overlay/session-1"),
+        ));
+
+        let plan = MacOsVirtualizationCellPlan::from_minipod_spec(&spec).unwrap();
+        let mount = &plan.cell_config.workspace_mount;
+        let overlay = mount.overlay.as_ref().unwrap();
+
+        assert_eq!(mount.workspace_mode, "overlay-review");
+        assert_eq!(mount.share_kind, "overlay-review-shared-directory");
+        assert_eq!(mount.write_policy, WorkspaceWritePolicy::WritableOverlay);
+        assert!(mount.writable);
+        assert!(mount.review_required);
+        assert_eq!(mount.host_path, "/tmp/agentbox-overlay/session-1/upper");
+        assert_eq!(mount.guest_path, "/workspace");
+        assert_eq!(overlay.mode, WorkspaceOverlayMode::ReviewRequired);
+        assert_eq!(overlay.lower_host_path, "/tmp/agentbox-work");
+        assert_eq!(
+            overlay.upper_host_path.as_deref(),
+            Some("/tmp/agentbox-overlay/session-1/upper")
+        );
+        assert_eq!(
+            overlay.work_host_path.as_deref(),
+            Some("/tmp/agentbox-overlay/session-1/work")
+        );
+        assert_eq!(
+            overlay.review_host_path.as_deref(),
+            Some("/tmp/agentbox-overlay/session-1/upper")
+        );
+        assert_eq!(overlay.merged_guest_path, "/workspace");
+        assert!(overlay.review_required);
+        assert!(!overlay.commit_required);
+        assert!(!overlay.discard_on_destroy);
+        assert!(overlay.claim_boundary.contains("not wired"));
+        assert_eq!(
+            mount.evidence_refs.mount_ref,
+            format!("agentpod-macos:{}:workspace:mount", spec.id)
+        );
+        let review_ref = format!("agentpod-macos:{}:workspace:review", spec.id);
+        let discard_ref = format!("agentpod-macos:{}:workspace:discard", spec.id);
+        assert_eq!(
+            mount.evidence_refs.review_ref.as_deref(),
+            Some(review_ref.as_str())
+        );
+        assert_eq!(
+            mount.evidence_refs.discard_ref.as_deref(),
+            Some(discard_ref.as_str())
+        );
+        assert!(mount.evidence_refs.apply_ref.is_none());
+        assert_eq!(
+            mount.evidence_refs.evidence_stream,
+            format!("agentpod-macos/{}/workspace", spec.id)
+        );
+        assert_eq!(
+            plan.storage_layout.workspace_mount_host_path,
+            "/tmp/agentbox-overlay/session-1/upper"
+        );
+        assert_eq!(
+            plan.shared_directories[0].host_path,
+            "/tmp/agentbox-overlay/session-1/upper"
+        );
+        assert_eq!(plan.shared_directories[0].kind, MountKind::WorkspaceOverlay);
     }
 
     #[test]
@@ -1573,6 +1844,19 @@ mod tests {
         let err = boot_request.validate().unwrap_err();
 
         assert!(err.to_string().contains("claim boundary"));
+    }
+
+    #[test]
+    fn macos_vm_cell_boot_request_rejects_fake_workspace_mount_claims() {
+        let spec = MinipodSpec::for_agent_task("codex", "/tmp/agentbox-work");
+        let exec = command(&["/bin/true"]);
+        let plan = MacOsAgentPodExecutionPlan::from_minipod_spec(&spec, &exec).unwrap();
+        let mut boot_request = MacOsVmCellBootRequest::from_execution_plan(&plan, &exec);
+        boot_request.workspace_mount.claim_boundary = "directory sharing is live".into();
+
+        let err = boot_request.validate().unwrap_err();
+
+        assert!(err.to_string().contains("workspace mount contract"));
     }
 
     #[test]

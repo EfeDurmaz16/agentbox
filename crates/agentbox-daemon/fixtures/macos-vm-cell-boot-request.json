@@ -17,7 +17,7 @@
     "config_json_host_path": "/Users/example/.agentbox/agentpods/macos/fixture-session/config/cell.json",
     "disk_image_host_path": "/Users/example/.agentbox/agentpods/macos/fixture-session/disk/rootfs.img",
     "auxiliary_storage_host_path": "/Users/example/.agentbox/agentpods/macos/fixture-session/disk/aux.img",
-    "workspace_mount_host_path": "/tmp/agentbox-work",
+    "workspace_mount_host_path": "/tmp/agentbox-overlay/session-1/upper",
     "credential_channel_host_path": "/Users/example/.agentbox/agentpods/macos/fixture-session/credentials",
     "evidence_spool_host_path": "/Users/example/.agentbox/agentpods/macos/fixture-session/evidence",
     "cleanup_policy": {
@@ -28,17 +28,41 @@
     }
   },
   "workspace_mount": {
-    "host_path": "/tmp/agentbox-work",
+    "schema_version": 1,
+    "host_path": "/tmp/agentbox-overlay/session-1/upper",
     "guest_path": "/workspace",
+    "workspace_mode": "overlay-review",
+    "share_kind": "overlay-review-shared-directory",
+    "write_policy": "WritableOverlay",
     "writable": true,
-    "review_required": true
+    "review_required": true,
+    "overlay": {
+      "mode": "ReviewRequired",
+      "lower_host_path": "/tmp/agentbox-work",
+      "upper_host_path": "/tmp/agentbox-overlay/session-1/upper",
+      "work_host_path": "/tmp/agentbox-overlay/session-1/work",
+      "review_host_path": "/tmp/agentbox-overlay/session-1/upper",
+      "merged_guest_path": "/workspace",
+      "review_required": true,
+      "commit_required": false,
+      "discard_on_destroy": false,
+      "claim_boundary": "overlay workspace share contract only; APFS/virtiofs overlay lifecycle is not wired"
+    },
+    "evidence_refs": {
+      "mount_ref": "agentpod-macos:fixture-session:workspace:mount",
+      "review_ref": "agentpod-macos:fixture-session:workspace:review",
+      "apply_ref": null,
+      "discard_ref": "agentpod-macos:fixture-session:workspace:discard",
+      "evidence_stream": "agentpod-macos/fixture-session/workspace"
+    },
+    "claim_boundary": "workspace share contract only; Apple Virtualization directory sharing is not wired"
   },
   "shared_directories": [
     {
-      "host_path": "/tmp/agentbox-work",
+      "host_path": "/tmp/agentbox-overlay/session-1/upper",
       "guest_path": "/workspace",
       "read_only": false,
-      "kind": "Workspace"
+      "kind": "WorkspaceOverlay"
     }
   ],
   "bridge_socket_guest_path": "/run/agentbox/bridge.sock",
