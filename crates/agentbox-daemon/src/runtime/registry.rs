@@ -99,10 +99,7 @@ impl RuntimeProviderRegistry {
             });
         }
 
-        let selected_provider = self
-            .auto_provider_for_risk(&request.risk)
-            .or_else(|| self.default_provider.clone())
-            .ok_or_else(|| RuntimeError::Unavailable("no runtime provider registered".into()))?;
+        let selected_provider = self.auto_provider_for_risk(&request.risk)?;
 
         self.get(&selected_provider)?;
 
@@ -113,29 +110,40 @@ impl RuntimeProviderRegistry {
         })
     }
 
-    fn auto_provider_for_risk(&self, risk: &AgentPodRiskLevel) -> Option<String> {
-        let platform_agentpod = match AgentPodProviderKind::current_platform_candidate() {
-            AgentPodProviderKind::MacOs => "agentpod-macos",
-            AgentPodProviderKind::Linux => "agentpod-linux",
-            AgentPodProviderKind::Windows => "agentpod-windows",
-        };
+    fn auto_provider_for_risk(&self, risk: &AgentPodRiskLevel) -> Result<String, RuntimeError> {
+        let platform_agentpod = platform_agentpod_provider_name();
 
         match risk {
-            AgentPodRiskLevel::Low => self
-                .providers
-                .contains_key("direct-host")
-                .then(|| "direct-host".to_string())
-                .or_else(|| self.providers.keys().next().cloned()),
+            AgentPodRiskLevel::Low => {
+                if self.providers.contains_key("direct-host") {
+                    Ok("direct-host".to_string())
+                } else {
+                    self.default_provider
+                        .clone()
+                        .ok_or_else(|| {
+                            RuntimeError::Unavailable("no runtime provider registered".into())
+                        })
+                }
+            }
             AgentPodRiskLevel::Medium => self
                 .providers
                 .contains_key("podman")
                 .then(|| "podman".to_string())
-                .or_else(|| self.providers.keys().next().cloned()),
+                .ok_or_else(|| {
+                    RuntimeError::Unavailable(
+                        "no medium-risk runtime provider registered: podman is required for automatic medium-risk selection; request an explicit provider to override".into(),
+                    )
+                }),
             AgentPodRiskLevel::High | AgentPodRiskLevel::VeryHigh => self
                 .providers
                 .contains_key(platform_agentpod)
                 .then(|| platform_agentpod.to_string())
-                .or_else(|| self.providers.keys().next().cloned()),
+                .ok_or_else(|| {
+                    RuntimeError::Unavailable(format!(
+                        "no platform AgentPod provider registered for {} risk: {platform_agentpod} is required for automatic high-risk selection; request an explicit provider to override",
+                        risk.label()
+                    ))
+                }),
         }
     }
 
@@ -175,6 +183,14 @@ impl RuntimeProviderRegistry {
         )));
         registry.register(Arc::new(RemoteAgentPodProvider::default()));
         registry
+    }
+}
+
+fn platform_agentpod_provider_name() -> &'static str {
+    match AgentPodProviderKind::current_platform_candidate() {
+        AgentPodProviderKind::MacOs => "agentpod-macos",
+        AgentPodProviderKind::Linux => "agentpod-linux",
+        AgentPodProviderKind::Windows => "agentpod-windows",
     }
 }
 
@@ -384,6 +400,42 @@ mod tests {
     }
 
     #[test]
+    fn high_risk_selection_refuses_fallback_when_platform_agentpod_missing() {
+        let mut registry = RuntimeProviderRegistry::new();
+        registry.register(Arc::new(NamedProvider("direct-host")));
+        registry.register(Arc::new(NamedProvider("podman")));
+
+        let err = registry
+            .explain_selection(&ProviderSelectionRequest {
+                preferred_provider: None,
+                risk: AgentPodRiskLevel::High,
+            })
+            .unwrap_err();
+
+        assert!(matches!(err, RuntimeError::Unavailable(_)));
+        assert!(err.to_string().contains("platform AgentPod provider"));
+        assert!(err.to_string().contains("high"));
+    }
+
+    #[test]
+    fn very_high_risk_selection_refuses_fallback_when_platform_agentpod_missing() {
+        let mut registry = RuntimeProviderRegistry::new();
+        registry.register(Arc::new(NamedProvider("direct-host")));
+        registry.register(Arc::new(NamedProvider("podman")));
+
+        let err = registry
+            .explain_selection(&ProviderSelectionRequest {
+                preferred_provider: None,
+                risk: AgentPodRiskLevel::VeryHigh,
+            })
+            .unwrap_err();
+
+        assert!(matches!(err, RuntimeError::Unavailable(_)));
+        assert!(err.to_string().contains("platform AgentPod provider"));
+        assert!(err.to_string().contains("very-high"));
+    }
+
+    #[test]
     fn medium_risk_selection_uses_available_compat_provider_until_native_ships() {
         let registry = RuntimeProviderRegistry::with_local_providers(
             "/tmp/agentbox.sock".into(),
@@ -395,6 +447,20 @@ mod tests {
 
         assert_eq!(explanation.selected_provider, "podman");
         assert!(explanation.reason.contains("governed local execution"));
+    }
+
+    #[test]
+    fn medium_risk_selection_refuses_direct_host_fallback() {
+        let mut registry = RuntimeProviderRegistry::new();
+        registry.register(Arc::new(NamedProvider("direct-host")));
+
+        let err = registry
+            .explain_selection(&ProviderSelectionRequest::default())
+            .unwrap_err();
+
+        assert!(matches!(err, RuntimeError::Unavailable(_)));
+        assert!(err.to_string().contains("medium"));
+        assert!(err.to_string().contains("podman"));
     }
 
     #[test]
