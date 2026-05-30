@@ -75,6 +75,42 @@ pub struct MacOsCredentialChannelPlan {
     pub guest_path: Option<String>,
     pub requires_approval: bool,
     pub one_time: bool,
+    pub scope: MacOsCredentialGrantScope,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<DateTime<Utc>>,
+    pub recipient: MacOsCredentialRecipient,
+    pub audit: MacOsCredentialAuditMetadata,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MacOsCredentialGrantScope {
+    pub session_id: String,
+    pub grant_name: String,
+    pub kind: crate::runtime::types::CredentialGrantKind,
+    pub target_ref: String,
+    pub delivery: String,
+    pub guest_path: Option<String>,
+    pub one_time: bool,
+    pub requires_approval: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MacOsCredentialRecipient {
+    pub provider: String,
+    pub session_id: String,
+    pub vm_bundle_id: String,
+    pub cell_safe_id: String,
+    pub guest_workspace_path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MacOsCredentialAuditMetadata {
+    pub grant_event_type: String,
+    pub revoke_event_type: String,
+    pub evidence_stream: String,
+    pub evidence_ref_prefix: String,
+    pub redacted: bool,
+    pub secret_values_forbidden: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -139,15 +175,7 @@ impl MacOsVirtualizationCellPlan {
             .credentials
             .grants
             .iter()
-            .map(|grant| MacOsCredentialChannelPlan {
-                name: grant.name.clone(),
-                kind: grant.kind.clone(),
-                target: grant.target.clone(),
-                delivery: macos_credential_delivery(&grant.kind).to_string(),
-                guest_path: macos_credential_guest_path(&grant.kind, &grant.name),
-                requires_approval: grant.requires_approval,
-                one_time: grant.one_time,
-            })
+            .map(|grant| macos_credential_channel_plan(spec, grant))
             .collect();
         let bridge_socket_guest_path = "/run/agentbox/bridge.sock".to_string();
 
@@ -237,6 +265,49 @@ fn macos_credential_delivery(kind: &crate::runtime::types::CredentialGrantKind) 
         crate::runtime::types::CredentialGrantKind::ProviderToken => {
             "broker-mediated-provider-token"
         }
+    }
+}
+
+fn macos_credential_channel_plan(
+    spec: &MinipodSpec,
+    grant: &crate::runtime::types::CredentialGrant,
+) -> MacOsCredentialChannelPlan {
+    let delivery = macos_credential_delivery(&grant.kind).to_string();
+    let guest_path = macos_credential_guest_path(&grant.kind, &grant.name);
+    MacOsCredentialChannelPlan {
+        name: grant.name.clone(),
+        kind: grant.kind.clone(),
+        target: grant.target.clone(),
+        delivery: delivery.clone(),
+        guest_path: guest_path.clone(),
+        requires_approval: grant.requires_approval,
+        one_time: grant.one_time,
+        scope: MacOsCredentialGrantScope {
+            session_id: spec.id.clone(),
+            grant_name: grant.name.clone(),
+            kind: grant.kind.clone(),
+            target_ref: grant.target.clone(),
+            delivery,
+            guest_path,
+            one_time: grant.one_time,
+            requires_approval: grant.requires_approval,
+        },
+        expires_at: grant.expires_at,
+        recipient: MacOsCredentialRecipient {
+            provider: "agentpod-macos".into(),
+            session_id: spec.id.clone(),
+            vm_bundle_id: format!("dev.agentbox.agentpod.{}", spec.id),
+            cell_safe_id: macos_agentpod_cell_safe_id(&spec.id),
+            guest_workspace_path: spec.filesystem.workspace_guest_path.clone(),
+        },
+        audit: MacOsCredentialAuditMetadata {
+            grant_event_type: "agentbox.credential.grant.requested".into(),
+            revoke_event_type: "agentbox.credential.grant.revoked".into(),
+            evidence_stream: format!("agentpod-macos/{}/credentials", spec.id),
+            evidence_ref_prefix: format!("agentpod-macos:{}:credential:{}", spec.id, grant.name),
+            redacted: true,
+            secret_values_forbidden: true,
+        },
     }
 }
 
@@ -1358,6 +1429,75 @@ mod tests {
             .iter()
             .any(|event| event.event_type == "macos.network.flow"));
         assert!(plan.security_claim.contains("execution is not wired"));
+    }
+
+    #[test]
+    fn macos_credential_channel_contract_carries_scope_expiry_recipient_and_audit_metadata() {
+        let mut spec = MinipodSpec::for_agent_task("codex", "/tmp/agentbox-work");
+        let expires_at = DateTime::parse_from_rfc3339("2026-06-01T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        spec.credentials.grants.push(CredentialGrant {
+            name: "OPENAI_API_KEY".into(),
+            kind: CredentialGrantKind::EnvVar,
+            target: "OPENAI_API_KEY".into(),
+            one_time: true,
+            requires_approval: true,
+            expires_at: Some(expires_at),
+        });
+
+        let plan = MacOsVirtualizationCellPlan::from_minipod_spec(&spec).unwrap();
+        let channel = plan
+            .cell_config
+            .credential_channels
+            .iter()
+            .find(|channel| channel.name == "OPENAI_API_KEY")
+            .unwrap();
+
+        assert_eq!(channel.scope.session_id, spec.id);
+        assert_eq!(channel.scope.grant_name, "OPENAI_API_KEY");
+        assert_eq!(channel.scope.kind, CredentialGrantKind::EnvVar);
+        assert_eq!(channel.scope.target_ref, "OPENAI_API_KEY");
+        assert_eq!(channel.expires_at, Some(expires_at));
+        assert_eq!(channel.recipient.session_id, spec.id);
+        assert_eq!(
+            channel.recipient.vm_bundle_id,
+            format!("dev.agentbox.agentpod.{}", spec.id)
+        );
+        assert_eq!(
+            channel.recipient.cell_safe_id,
+            macos_agentpod_cell_safe_id(&spec.id)
+        );
+        assert_eq!(channel.recipient.guest_workspace_path, "/workspace");
+        assert_eq!(
+            channel.audit.grant_event_type,
+            "agentbox.credential.grant.requested"
+        );
+        assert_eq!(
+            channel.audit.evidence_stream,
+            format!("agentpod-macos/{}/credentials", spec.id)
+        );
+        assert!(channel.audit.redacted);
+        assert!(channel.audit.secret_values_forbidden);
+        let encoded = serde_json::to_string(channel).unwrap();
+        assert!(!encoded.contains("sk-live-secret-value"));
+    }
+
+    #[test]
+    fn macos_provider_execution_contract_remains_unavailable_without_native_runner() {
+        let previous_gate = std::env::var_os("AGENTBOX_MACOS_NATIVE");
+        std::env::remove_var("AGENTBOX_MACOS_NATIVE");
+        let spec = MinipodSpec::for_agent_task("codex", "/tmp/agentbox-work");
+
+        let err =
+            MacOsAgentPodPrototypeExecutor::execute(&spec, &command(&["/bin/true"])).unwrap_err();
+
+        match previous_gate {
+            Some(value) => std::env::set_var("AGENTBOX_MACOS_NATIVE", value),
+            None => std::env::remove_var("AGENTBOX_MACOS_NATIVE"),
+        }
+
+        assert!(err.to_string().contains("requires AGENTBOX_MACOS_NATIVE=1"));
     }
 
     #[test]
