@@ -115,6 +115,7 @@ async fn run_direct_command(
 
     let mut process = Command::new(program);
     process.args(command.argv.iter().skip(1));
+    process.env_clear();
     process.envs(
         command
             .env
@@ -245,6 +246,57 @@ mod tests {
             .unwrap_err();
 
         assert!(err.to_string().contains("cannot be empty"));
+    }
+
+    #[tokio::test]
+    async fn direct_host_provider_does_not_inherit_parent_environment() {
+        let provider = DirectHostRuntimeProvider::new();
+        let env_key = format!("AGENTBOX_DIRECT_HOST_PARENT_ENV_{}", std::process::id());
+        unsafe {
+            std::env::set_var(&env_key, "host-only");
+        }
+
+        let result = provider
+            .exec(
+                "session",
+                &ExecCommand {
+                    argv: vec!["/usr/bin/env".into()],
+                    working_dir: None,
+                    env: HashMap::new(),
+                    timeout_seconds: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(result.exit_code, 0);
+        assert!(
+            !result.stdout.contains(&format!("{env_key}=host-only")),
+            "direct-host child inherited parent environment:\n{}",
+            result.stdout
+        );
+
+        let mut explicit_env = HashMap::new();
+        explicit_env.insert(env_key.clone(), "explicit".into());
+        let result = provider
+            .exec(
+                "session",
+                &ExecCommand {
+                    argv: vec!["/usr/bin/env".into()],
+                    working_dir: None,
+                    env: explicit_env,
+                    timeout_seconds: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        unsafe {
+            std::env::remove_var(&env_key);
+        }
+        assert_eq!(result.exit_code, 0);
+        assert!(result.stdout.contains(&format!("{env_key}=explicit")));
+        assert!(!result.stdout.contains(&format!("{env_key}=host-only")));
     }
 
     #[tokio::test]
