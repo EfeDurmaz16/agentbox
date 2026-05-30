@@ -7,6 +7,9 @@ cd "$ROOT"
 CLI=(cargo run --locked -q -p agentbox-cli --)
 REMOTE_WORKER=(cargo run --locked -q -p agentbox-remote-worker --)
 MACOS_VM_RUNNER=(cargo run --locked -q -p agentbox-daemon --bin agentbox-macos-vm-runner --)
+HOST_HOME="${HOME:-}"
+HOST_CARGO_HOME="${CARGO_HOME:-$HOST_HOME/.cargo}"
+HOST_RUSTUP_HOME="${RUSTUP_HOME:-$HOST_HOME/.rustup}"
 TMPDIR="$(mktemp -d)"
 trap 'rm -rf "$TMPDIR"' EXIT
 
@@ -68,6 +71,13 @@ safe_globals = {
 if not eval(expression, safe_globals, {}):
     raise SystemExit(f"JSON contract failed for {path}: {expression}")
 PY
+}
+
+run_cli_with_home() {
+  local home_dir="$1"
+  shift
+  HOME="$home_dir" CARGO_HOME="$HOST_CARGO_HOME" RUSTUP_HOME="$HOST_RUSTUP_HOME" \
+    "${CLI[@]}" "$@"
 }
 
 log "checking AgentPod release smoke suite"
@@ -173,6 +183,38 @@ validate_json "$TMPDIR/setup-dry-run-direct-host.json" \
 "${CLI[@]}" setup --dry-run --wizard --provider direct-host --json >"$TMPDIR/setup-wizard-direct-host.json"
 validate_json "$TMPDIR/setup-wizard-direct-host.json" \
   "data.get('schema_version') == 1 and data.get('wizard') == True and data.get('dry_run') == True and data.get('first_run_provider_plan', {}).get('recommended_provider') == 'direct-host' and any(option.get('provider') == 'direct-host' and option.get('recommended') == True and 'not a full sandbox' in option.get('claim_boundary', '') for option in data.get('first_run_provider_plan', {}).get('options', [])) and any(step.get('title') == 'Choose first-run provider' and step.get('command') == 'agentbox provider-readiness --provider direct-host' for step in data.get('wizard_steps', [])) and any(step.get('title') == 'Install local command shims' and step.get('command') == 'agentbox setup --provider direct-host' for step in data.get('wizard_steps', [])) and any(step.get('title') == 'Inspect provider bridge readiness' and step.get('command') == 'agentbox bridge-health --provider direct-host' for step in data.get('wizard_steps', [])) and any(step.get('title') == 'Verify readiness' and step.get('command') == 'agentbox doctor' for step in data.get('wizard_steps', []))"
+
+log "checking uninstall path preserves evidence by default"
+UNINSTALL_HOME="$TMPDIR/uninstall-home"
+UNINSTALL_ROOT="$UNINSTALL_HOME/.agentbox"
+mkdir -p "$UNINSTALL_ROOT/shims" "$UNINSTALL_ROOT/agentpods/session/evidence" "$UNINSTALL_ROOT/evidence"
+printf 'shim\n' >"$UNINSTALL_ROOT/shims/curl"
+printf 'not-a-pid\n' >"$UNINSTALL_ROOT/agentbox.pid"
+printf 'socket\n' >"$UNINSTALL_ROOT/agentbox.sock"
+printf 'config\n' >"$UNINSTALL_ROOT/config.toml"
+printf 'audit\n' >"$UNINSTALL_ROOT/audit.db"
+printf '{}\n' >"$UNINSTALL_ROOT/runtime-sessions.json"
+printf '{}\n' >"$UNINSTALL_ROOT/agentpods/session/evidence/receipt.json"
+printf '{}\n' >"$UNINSTALL_ROOT/evidence/export.jsonl"
+run_cli_with_home "$UNINSTALL_HOME" uninstall --dry-run --json >"$TMPDIR/uninstall-dry-run.json"
+validate_json "$TMPDIR/uninstall-dry-run.json" \
+  "data.get('schema_version') == 1 and data.get('dry_run') == True and data.get('purge_evidence') == False and data.get('evidence_policy') == 'preserved-by-default' and any(action.get('name') == 'remove command shims' and action.get('status') == 'planned' for action in data.get('actions', [])) and any(item.get('name') == 'audit database' for item in data.get('preserved', []))"
+if run_cli_with_home "$UNINSTALL_HOME" uninstall --purge-evidence --json >"$TMPDIR/uninstall-purge-without-yes.json" 2>"$TMPDIR/uninstall-purge-without-yes.err"; then
+  echo "uninstall accepted --purge-evidence without --yes" >&2
+  exit 1
+fi
+grep -F -- "--purge-evidence removes audit/session/evidence data and requires --yes" \
+  "$TMPDIR/uninstall-purge-without-yes.err" >/dev/null
+run_cli_with_home "$UNINSTALL_HOME" uninstall --json >"$TMPDIR/uninstall.json"
+validate_json "$TMPDIR/uninstall.json" \
+  "data.get('schema_version') == 1 and data.get('dry_run') == False and data.get('evidence_policy') == 'preserved-by-default' and any(action.get('name') == 'remove command shims' and action.get('status') == 'removed' for action in data.get('actions', [])) and any(item.get('name') == 'audit database' for item in data.get('preserved', []))"
+test ! -e "$UNINSTALL_ROOT/shims"
+test ! -e "$UNINSTALL_ROOT/agentbox.pid"
+test ! -e "$UNINSTALL_ROOT/agentbox.sock"
+test -e "$UNINSTALL_ROOT/config.toml"
+test -e "$UNINSTALL_ROOT/audit.db"
+test -e "$UNINSTALL_ROOT/runtime-sessions.json"
+test -e "$UNINSTALL_ROOT/agentpods/session/evidence/receipt.json"
 
 log "checking pods JSON truth"
 "${CLI[@]}" pods --json >"$TMPDIR/pods.json"

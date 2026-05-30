@@ -132,6 +132,24 @@ enum Commands {
     },
     /// Set up shims for dangerous commands
     Install,
+    /// Remove local shims and daemon artifacts while preserving evidence by default
+    Uninstall {
+        /// Emit JSON
+        #[arg(long)]
+        json: bool,
+
+        /// Show what uninstall would do without changing host state
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Remove audit/session/evidence data; requires --yes unless used with --dry-run
+        #[arg(long)]
+        purge_evidence: bool,
+
+        /// Confirm destructive evidence purge when --purge-evidence is set
+        #[arg(long)]
+        yes: bool,
+    },
     /// Add domain to network allowlist
     Allow {
         /// Domain to allow (e.g. api.example.com)
@@ -3282,6 +3300,289 @@ fn cmd_install() {
     println!("Then restart your shell or run:");
     println!();
     println!("  source ~/.zshrc");
+}
+
+#[derive(Debug, Clone, Copy)]
+struct UninstallOptions {
+    dry_run: bool,
+    purge_evidence: bool,
+    yes: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct UninstallReport {
+    schema_version: i64,
+    dry_run: bool,
+    purge_evidence: bool,
+    evidence_policy: String,
+    agentbox_dir: String,
+    actions: Vec<UninstallAction>,
+    preserved: Vec<UninstallPreservedArtifact>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct UninstallAction {
+    name: String,
+    status: String,
+    path: Option<String>,
+    detail: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct UninstallPreservedArtifact {
+    name: String,
+    path: String,
+    reason: String,
+}
+
+fn cmd_uninstall(json: bool, dry_run: bool, purge_evidence: bool, yes: bool) {
+    let options = UninstallOptions {
+        dry_run,
+        purge_evidence,
+        yes,
+    };
+    let report = uninstall_at(&agentbox_dir(), options).unwrap_or_else(|e| {
+        eprintln!("{e}");
+        std::process::exit(1);
+    });
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&report).expect("failed to serialize uninstall report")
+        );
+        return;
+    }
+
+    println!("Agentbox uninstall");
+    println!("{}", "-".repeat(64));
+    if report.dry_run {
+        println!("mode:     dry-run");
+    }
+    println!("state:    {}", report.agentbox_dir);
+    println!("evidence: {}", report.evidence_policy);
+    println!();
+    for action in &report.actions {
+        println!("{}: {}", action.status, action.detail);
+    }
+    if !report.preserved.is_empty() {
+        println!();
+        println!("Preserved:");
+        for artifact in &report.preserved {
+            println!(
+                "  {}: {} ({})",
+                artifact.name, artifact.path, artifact.reason
+            );
+        }
+    }
+}
+
+fn uninstall_at(base: &Path, options: UninstallOptions) -> Result<UninstallReport, String> {
+    if options.purge_evidence && !options.dry_run && !options.yes {
+        return Err(
+            "error: --purge-evidence removes audit/session/evidence data and requires --yes"
+                .to_string(),
+        );
+    }
+
+    let mut actions = vec![
+        uninstall_stop_daemon_action(base, options.dry_run)?,
+        uninstall_remove_action(
+            "remove daemon pid file",
+            base.join("agentbox.pid"),
+            options.dry_run,
+        )?,
+        uninstall_remove_action(
+            "remove daemon socket",
+            base.join("agentbox.sock"),
+            options.dry_run,
+        )?,
+        uninstall_remove_action("remove command shims", base.join("shims"), options.dry_run)?,
+    ];
+
+    let mut preserved = Vec::new();
+    push_preserved_if_present(
+        &mut preserved,
+        "config",
+        base.join("config.toml"),
+        "operator settings are left for explicit manual removal",
+    );
+
+    if options.purge_evidence {
+        for (name, path) in uninstall_evidence_paths(base) {
+            actions.push(uninstall_remove_action(name, path, options.dry_run)?);
+        }
+    } else {
+        for (name, path) in uninstall_evidence_paths(base) {
+            push_preserved_if_present(
+                &mut preserved,
+                name,
+                path,
+                "evidence data is preserved by default",
+            );
+        }
+    }
+
+    let evidence_policy = if options.purge_evidence {
+        if options.dry_run {
+            "purge-evidence-planned; rerun with --purge-evidence --yes to mutate".to_string()
+        } else {
+            "purged-after-explicit---yes".to_string()
+        }
+    } else {
+        "preserved-by-default".to_string()
+    };
+
+    Ok(UninstallReport {
+        schema_version: 1,
+        dry_run: options.dry_run,
+        purge_evidence: options.purge_evidence,
+        evidence_policy,
+        agentbox_dir: base.display().to_string(),
+        actions,
+        preserved,
+    })
+}
+
+fn uninstall_evidence_paths(base: &Path) -> Vec<(&'static str, PathBuf)> {
+    vec![
+        ("audit database", base.join("audit.db")),
+        ("runtime session store", base.join("runtime-sessions.json")),
+        ("AgentPod evidence/state directory", base.join("agentpods")),
+        ("evidence export directory", base.join("evidence")),
+    ]
+}
+
+fn push_preserved_if_present(
+    preserved: &mut Vec<UninstallPreservedArtifact>,
+    name: &str,
+    path: PathBuf,
+    reason: &str,
+) {
+    if path_present(&path) {
+        preserved.push(UninstallPreservedArtifact {
+            name: name.to_string(),
+            path: path.display().to_string(),
+            reason: reason.to_string(),
+        });
+    }
+}
+
+fn uninstall_stop_daemon_action(base: &Path, dry_run: bool) -> Result<UninstallAction, String> {
+    let path = base.join("agentbox.pid");
+    let Some(pid) = read_pid_at(base) else {
+        return Ok(UninstallAction {
+            name: "stop daemon".to_string(),
+            status: "missing".to_string(),
+            path: Some(path.display().to_string()),
+            detail: "daemon pid file is not present".to_string(),
+        });
+    };
+
+    if !process_alive(pid) {
+        return Ok(UninstallAction {
+            name: "stop daemon".to_string(),
+            status: "not-running".to_string(),
+            path: Some(path.display().to_string()),
+            detail: format!("daemon pid file points at non-running PID {pid}"),
+        });
+    }
+
+    if dry_run {
+        return Ok(UninstallAction {
+            name: "stop daemon".to_string(),
+            status: "planned".to_string(),
+            path: Some(path.display().to_string()),
+            detail: format!("would send SIGTERM to daemon PID {pid}"),
+        });
+    }
+
+    let kill_result = unsafe { libc::kill(pid as i32, libc::SIGTERM) };
+    if kill_result != 0 {
+        return Err(format!(
+            "error: failed to stop daemon PID {pid}: {}",
+            io::Error::last_os_error()
+        ));
+    }
+
+    for _ in 0..20 {
+        if !process_alive(pid) {
+            return Ok(UninstallAction {
+                name: "stop daemon".to_string(),
+                status: "stopped".to_string(),
+                path: Some(path.display().to_string()),
+                detail: format!("stopped daemon PID {pid}"),
+            });
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+
+    Err(format!(
+        "error: daemon PID {pid} did not stop after SIGTERM; stop it before uninstall"
+    ))
+}
+
+fn uninstall_remove_action(
+    name: &str,
+    path: PathBuf,
+    dry_run: bool,
+) -> Result<UninstallAction, String> {
+    let Some(metadata) = path_metadata(&path)? else {
+        return Ok(UninstallAction {
+            name: name.to_string(),
+            status: "missing".to_string(),
+            path: Some(path.display().to_string()),
+            detail: format!("{} is not present", path.display()),
+        });
+    };
+
+    if dry_run {
+        return Ok(UninstallAction {
+            name: name.to_string(),
+            status: "planned".to_string(),
+            path: Some(path.display().to_string()),
+            detail: format!("would remove {}", path.display()),
+        });
+    }
+
+    remove_path_with_metadata(&path, &metadata)?;
+    Ok(UninstallAction {
+        name: name.to_string(),
+        status: "removed".to_string(),
+        path: Some(path.display().to_string()),
+        detail: format!("removed {}", path.display()),
+    })
+}
+
+fn read_pid_at(base: &Path) -> Option<u32> {
+    fs::read_to_string(base.join("agentbox.pid"))
+        .ok()
+        .and_then(|s| s.trim().parse::<u32>().ok())
+}
+
+fn path_present(path: &Path) -> bool {
+    fs::symlink_metadata(path).is_ok()
+}
+
+fn path_metadata(path: &Path) -> Result<Option<fs::Metadata>, String> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => Ok(Some(metadata)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(format!(
+            "error: failed to inspect {}: {error}",
+            path.display()
+        )),
+    }
+}
+
+fn remove_path_with_metadata(path: &Path, metadata: &fs::Metadata) -> Result<(), String> {
+    if metadata.is_dir() {
+        fs::remove_dir_all(path)
+            .map_err(|error| format!("error: failed to remove {}: {error}", path.display()))
+    } else {
+        fs::remove_file(path)
+            .map_err(|error| format!("error: failed to remove {}: {error}", path.display()))
+    }
 }
 
 struct RunOptions {
@@ -9502,6 +9803,12 @@ async fn main() {
             tail,
         } => cmd_audit(limit, bucket, tail),
         Commands::Install => cmd_install(),
+        Commands::Uninstall {
+            json,
+            dry_run,
+            purge_evidence,
+            yes,
+        } => cmd_uninstall(json, dry_run, purge_evidence, yes),
         Commands::Allow { domain } => cmd_allow(domain),
         Commands::NetworkExplain {
             url,
@@ -10822,6 +11129,130 @@ mod tests {
         assert!(!setup_should_install_shims(Some("podman-compat")));
         assert!(!setup_should_install_shims(Some("remote-agentpod")));
         assert!(!setup_should_install_shims(Some("agentpod-macos")));
+    }
+
+    #[test]
+    fn uninstall_preserves_evidence_by_default() {
+        let root = std::env::temp_dir().join(format!(
+            "agentbox-cli-uninstall-preserve-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let base = root.join(".agentbox");
+        fs::create_dir_all(base.join("shims")).unwrap();
+        fs::create_dir_all(base.join("agentpods/session/evidence")).unwrap();
+        fs::write(base.join("shims/curl"), "shim").unwrap();
+        fs::write(base.join("agentbox.pid"), "not-a-pid").unwrap();
+        fs::write(base.join("agentbox.sock"), "socket").unwrap();
+        fs::write(base.join("config.toml"), "config").unwrap();
+        fs::write(base.join("audit.db"), "audit").unwrap();
+        fs::write(base.join("runtime-sessions.json"), "{}").unwrap();
+        fs::write(base.join("agentpods/session/evidence/receipt.json"), "{}").unwrap();
+
+        let report = uninstall_at(
+            &base,
+            UninstallOptions {
+                dry_run: false,
+                purge_evidence: false,
+                yes: false,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(report.schema_version, 1);
+        assert_eq!(report.evidence_policy, "preserved-by-default");
+        assert!(!base.join("shims").exists());
+        assert!(!base.join("agentbox.pid").exists());
+        assert!(!base.join("agentbox.sock").exists());
+        assert!(base.join("config.toml").exists());
+        assert!(base.join("audit.db").exists());
+        assert!(base.join("runtime-sessions.json").exists());
+        assert!(base
+            .join("agentpods/session/evidence/receipt.json")
+            .exists());
+        assert!(report
+            .actions
+            .iter()
+            .any(|action| action.name == "remove command shims" && action.status == "removed"));
+        assert!(report
+            .preserved
+            .iter()
+            .any(|artifact| artifact.name == "audit database"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn uninstall_requires_confirmation_before_evidence_purge() {
+        let root = std::env::temp_dir().join(format!(
+            "agentbox-cli-uninstall-confirm-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let base = root.join(".agentbox");
+        fs::create_dir_all(&base).unwrap();
+        fs::write(base.join("audit.db"), "audit").unwrap();
+
+        let error = uninstall_at(
+            &base,
+            UninstallOptions {
+                dry_run: false,
+                purge_evidence: true,
+                yes: false,
+            },
+        )
+        .unwrap_err();
+
+        assert!(error.contains("--purge-evidence"));
+        assert!(base.join("audit.db").exists());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn uninstall_purges_evidence_after_explicit_yes() {
+        let root = std::env::temp_dir().join(format!(
+            "agentbox-cli-uninstall-purge-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let base = root.join(".agentbox");
+        fs::create_dir_all(base.join("agentpods/session/evidence")).unwrap();
+        fs::create_dir_all(base.join("evidence")).unwrap();
+        fs::write(base.join("config.toml"), "config").unwrap();
+        fs::write(base.join("audit.db"), "audit").unwrap();
+        fs::write(base.join("runtime-sessions.json"), "{}").unwrap();
+        fs::write(base.join("agentpods/session/evidence/receipt.json"), "{}").unwrap();
+        fs::write(base.join("evidence/export.jsonl"), "{}").unwrap();
+
+        let report = uninstall_at(
+            &base,
+            UninstallOptions {
+                dry_run: false,
+                purge_evidence: true,
+                yes: true,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(report.evidence_policy, "purged-after-explicit---yes");
+        assert!(base.join("config.toml").exists());
+        assert!(!base.join("audit.db").exists());
+        assert!(!base.join("runtime-sessions.json").exists());
+        assert!(!base.join("agentpods").exists());
+        assert!(!base.join("evidence").exists());
+        assert!(report
+            .preserved
+            .iter()
+            .any(|artifact| artifact.name == "config"));
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
