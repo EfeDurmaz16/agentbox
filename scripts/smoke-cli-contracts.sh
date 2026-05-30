@@ -219,6 +219,59 @@ test -e "$UNINSTALL_ROOT/audit.db"
 test -e "$UNINSTALL_ROOT/runtime-sessions.json"
 test -e "$UNINSTALL_ROOT/agentpods/session/evidence/receipt.json"
 
+log "checking support bundle export redacts secrets"
+SUPPORT_HOME="$TMPDIR/support-home"
+SUPPORT_ROOT="$SUPPORT_HOME/.agentbox"
+SUPPORT_OUT="$TMPDIR/support-bundle"
+mkdir -p "$SUPPORT_ROOT/shims" "$SUPPORT_ROOT/agentpods/session/evidence"
+printf 'shim\n' >"$SUPPORT_ROOT/shims/curl"
+cat >"$SUPPORT_ROOT/config.toml" <<EOF
+socket_path = "$SUPPORT_ROOT/agentbox.sock"
+db_path = "$SUPPORT_ROOT/audit.db"
+session_store_path = "$SUPPORT_ROOT/runtime-sessions.json"
+ntfy_topic = "agentbox-secret-topic"
+allowed_domains = ["api.example.com"]
+EOF
+printf '{}\n' >"$SUPPORT_ROOT/runtime-sessions.json"
+printf '{}\n' >"$SUPPORT_ROOT/agentpods/session/evidence/receipt.json"
+python3 - "$SUPPORT_ROOT/audit.db" <<'PY'
+import sqlite3
+import sys
+
+conn = sqlite3.connect(sys.argv[1])
+conn.executescript("""
+CREATE TABLE audit_log (
+  id TEXT PRIMARY KEY,
+  timestamp TEXT NOT NULL,
+  command TEXT NOT NULL,
+  bucket TEXT NOT NULL,
+  decision TEXT NOT NULL,
+  event_hash TEXT
+);
+INSERT INTO audit_log (id, timestamp, command, bucket, decision, event_hash)
+VALUES ('evt_1', '2026-05-30T00:00:00Z', 'curl --token secret-value', 'approve', 'allowed', 'abc123');
+""")
+conn.close()
+PY
+run_cli_with_home "$SUPPORT_HOME" support-bundle --output "$SUPPORT_OUT" --json >"$TMPDIR/support-bundle.json"
+validate_json "$TMPDIR/support-bundle.json" \
+  "data.get('schema_version') == 1 and any(file.get('path') == 'manifest.json' for file in data.get('files', [])) and any(file.get('path') == 'doctor.json' for file in data.get('files', [])) and any(file.get('path') == 'providers.json' for file in data.get('files', [])) and any(file.get('path') == 'status.json' for file in data.get('files', [])) and any(file.get('path') == 'config-redacted.json' for file in data.get('files', [])) and any(file.get('path') == 'evidence-refs.json' for file in data.get('files', [])) and any(file.get('path') == 'logs.txt' for file in data.get('files', []))"
+test -e "$SUPPORT_OUT/manifest.json"
+test -e "$SUPPORT_OUT/doctor.json"
+test -e "$SUPPORT_OUT/providers.json"
+test -e "$SUPPORT_OUT/status.json"
+test -e "$SUPPORT_OUT/config-redacted.json"
+test -e "$SUPPORT_OUT/evidence-refs.json"
+test -e "$SUPPORT_OUT/logs.txt"
+grep -F "<redacted>" "$SUPPORT_OUT/config-redacted.json" >/dev/null
+grep -F '"event_count": 1' "$SUPPORT_OUT/evidence-refs.json" >/dev/null
+grep -F "abc123" "$SUPPORT_OUT/evidence-refs.json" >/dev/null
+if grep -R -E "agentbox-secret-topic|secret-value" "$SUPPORT_OUT" >/tmp/agentbox-support-bundle-secret.out; then
+  echo "support bundle leaked secret material" >&2
+  cat /tmp/agentbox-support-bundle-secret.out >&2
+  exit 1
+fi
+
 log "checking pods JSON truth"
 "${CLI[@]}" pods --json >"$TMPDIR/pods.json"
 validate_json "$TMPDIR/pods.json" \

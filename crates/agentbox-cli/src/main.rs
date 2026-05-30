@@ -539,6 +539,20 @@ enum Commands {
         #[arg(long)]
         provider: Option<String>,
     },
+    /// Export a redacted diagnostic bundle for support/debugging
+    SupportBundle {
+        /// Output directory for bundle files
+        #[arg(long, default_value = "agentbox-support-bundle")]
+        output: PathBuf,
+
+        /// Emit JSON summary
+        #[arg(long)]
+        json: bool,
+
+        /// Number of recent evidence references to include
+        #[arg(long, default_value_t = 20)]
+        evidence_limit: usize,
+    },
     /// Inspect provider host-bridge capability health without starting a session
     BridgeHealth {
         /// Emit JSON
@@ -3335,6 +3349,23 @@ struct UninstallPreservedArtifact {
     reason: String,
 }
 
+#[derive(Debug, Clone, Serialize)]
+struct SupportBundleReport {
+    schema_version: i64,
+    output_dir: String,
+    generated_at: String,
+    redaction: String,
+    files: Vec<SupportBundleFile>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct SupportBundleFile {
+    path: String,
+    description: String,
+    bytes: u64,
+    sha256: String,
+}
+
 fn cmd_uninstall(json: bool, dry_run: bool, purge_evidence: bool, yes: bool) {
     let options = UninstallOptions {
         dry_run,
@@ -3375,6 +3406,360 @@ fn cmd_uninstall(json: bool, dry_run: bool, purge_evidence: bool, yes: bool) {
             );
         }
     }
+}
+
+fn cmd_support_bundle(output: PathBuf, json: bool, evidence_limit: usize) {
+    let report =
+        write_support_bundle(&output, &agentbox_dir(), evidence_limit).unwrap_or_else(|e| {
+            eprintln!("{e}");
+            std::process::exit(1);
+        });
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&report)
+                .expect("failed to serialize support bundle report")
+        );
+        return;
+    }
+
+    println!("Agentbox support bundle");
+    println!("{}", "-".repeat(64));
+    println!("output:    {}", report.output_dir);
+    println!("redaction: {}", report.redaction);
+    println!("files:");
+    for file in &report.files {
+        println!("  {} ({} bytes)", file.path, file.bytes);
+    }
+}
+
+fn write_support_bundle(
+    output_dir: &Path,
+    base: &Path,
+    evidence_limit: usize,
+) -> Result<SupportBundleReport, String> {
+    if path_present(output_dir) && !output_dir.is_dir() {
+        return Err(format!(
+            "error: support bundle output path is not a directory: {}",
+            output_dir.display()
+        ));
+    }
+    fs::create_dir_all(output_dir).map_err(|error| {
+        format!(
+            "error: failed to create support bundle directory {}: {error}",
+            output_dir.display()
+        )
+    })?;
+
+    let files = vec![
+        write_support_json_file(
+            output_dir,
+            "doctor.json",
+            "Doctor readiness report",
+            &build_doctor_report(),
+        )?,
+        write_support_json_file(
+            output_dir,
+            "providers.json",
+            "Provider support/status truth table",
+            &provider_status_rows(),
+        )?,
+        write_support_json_file(
+            output_dir,
+            "status.json",
+            "Local daemon, socket, shim, and path status",
+            &support_status_snapshot(base),
+        )?,
+        write_support_json_file(
+            output_dir,
+            "config-redacted.json",
+            "Redacted local Agentbox config",
+            &support_config_snapshot(base),
+        )?,
+        write_support_json_file(
+            output_dir,
+            "evidence-refs.json",
+            "Evidence references and hash pointers without raw transcripts",
+            &support_evidence_refs(base, evidence_limit),
+        )?,
+        write_support_text_file(
+            output_dir,
+            "logs.txt",
+            "Redacted local diagnostic log notes",
+            &support_logs_text(base),
+        )?,
+    ];
+
+    let report = SupportBundleReport {
+        schema_version: 1,
+        output_dir: output_dir.display().to_string(),
+        generated_at: Utc::now().to_rfc3339(),
+        redaction: "secrets, tokens, credential paths, and raw transcript values are redacted"
+            .to_string(),
+        files,
+    };
+    let manifest_file = write_support_json_file(
+        output_dir,
+        "manifest.json",
+        "Support bundle manifest",
+        &report,
+    )?;
+    let mut report = report;
+    report.files.push(manifest_file);
+    Ok(report)
+}
+
+fn support_status_snapshot(base: &Path) -> serde_json::Value {
+    let pid = read_pid_at(base);
+    let daemon_running = pid.is_some_and(process_alive);
+    let socket = base.join("agentbox.sock");
+    let shims = base.join("shims");
+    serde_json::json!({
+        "schema_version": 1,
+        "agentbox_dir": base.display().to_string(),
+        "cli_version": env!("CARGO_PKG_VERSION"),
+        "pid": pid,
+        "daemon_running": daemon_running,
+        "pid_file": {
+            "path": base.join("agentbox.pid").display().to_string(),
+            "exists": path_present(&base.join("agentbox.pid")),
+        },
+        "socket": {
+            "path": socket.display().to_string(),
+            "exists": path_present(&socket),
+        },
+        "shims": {
+            "path": shims.display().to_string(),
+            "exists": path_present(&shims),
+            "count": count_directory_entries(&shims),
+        }
+    })
+}
+
+fn support_config_snapshot(base: &Path) -> serde_json::Value {
+    let path = base.join("config.toml");
+    let Ok(raw) = fs::read_to_string(&path) else {
+        return serde_json::json!({
+            "schema_version": 1,
+            "path": path.display().to_string(),
+            "present": false,
+        });
+    };
+
+    match raw.parse::<toml::Value>() {
+        Ok(value) => serde_json::json!({
+            "schema_version": 1,
+            "path": path.display().to_string(),
+            "present": true,
+            "config": redact_toml_for_support("", &value),
+        }),
+        Err(error) => serde_json::json!({
+            "schema_version": 1,
+            "path": path.display().to_string(),
+            "present": true,
+            "parse_error": error.to_string(),
+            "redacted_text": agentbox_daemon::audit::redact_sensitive_text(&raw),
+        }),
+    }
+}
+
+fn support_evidence_refs(base: &Path, limit: usize) -> serde_json::Value {
+    let audit_path = base.join("audit.db");
+    let session_store_path = support_session_store_path(base);
+    serde_json::json!({
+        "schema_version": 1,
+        "audit_db": support_audit_db_ref(&audit_path, limit),
+        "runtime_session_store": support_file_ref(&session_store_path),
+        "agentpod_state_dir": support_file_ref(&base.join("agentpods")),
+        "evidence_export_dir": support_file_ref(&base.join("evidence")),
+        "claim_boundary": "support bundle exposes evidence references, counts, and hashes; raw transcripts are not exported here",
+    })
+}
+
+fn support_logs_text(base: &Path) -> String {
+    let pid = read_pid_at(base)
+        .map(|pid| pid.to_string())
+        .unwrap_or_else(|| "none".to_string());
+    agentbox_daemon::audit::redact_sensitive_text(&format!(
+        "agentbox support diagnostics\nagentbox_dir={}\npid={}\nsocket={}\nlogs=no dedicated daemon log file is configured in this build\n",
+        base.display(),
+        pid,
+        base.join("agentbox.sock").display()
+    ))
+}
+
+fn support_session_store_path(base: &Path) -> PathBuf {
+    let config = base.join("config.toml");
+    fs::read_to_string(config)
+        .ok()
+        .and_then(|raw| raw.parse::<toml::Value>().ok())
+        .and_then(|value| {
+            value
+                .get("session_store_path")
+                .and_then(toml::Value::as_str)
+                .map(PathBuf::from)
+        })
+        .unwrap_or_else(|| base.join("runtime-sessions.json"))
+}
+
+fn support_audit_db_ref(path: &Path, limit: usize) -> serde_json::Value {
+    let mut payload = support_file_ref(path);
+    if !path_present(path) {
+        return payload;
+    }
+
+    let result = (|| -> rusqlite::Result<serde_json::Value> {
+        let conn = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        let event_count: i64 =
+            conn.query_row("SELECT COUNT(*) FROM audit_log", [], |row| row.get(0))?;
+        let mut stmt = conn.prepare(
+            "SELECT id, timestamp, bucket, decision, event_hash
+             FROM audit_log
+             ORDER BY timestamp DESC
+             LIMIT ?1",
+        )?;
+        let refs = stmt
+            .query_map([limit as i64], |row| {
+                Ok(serde_json::json!({
+                    "id": row.get::<_, String>(0)?,
+                    "timestamp": row.get::<_, String>(1)?,
+                    "bucket": row.get::<_, String>(2)?,
+                    "decision": row.get::<_, String>(3)?,
+                    "event_hash": row.get::<_, Option<String>>(4)?,
+                }))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(serde_json::json!({
+            "event_count": event_count,
+            "recent_event_refs": refs,
+        }))
+    })();
+
+    match result {
+        Ok(extra) => {
+            if let (Some(object), Some(extra_object)) = (payload.as_object_mut(), extra.as_object())
+            {
+                for (key, value) in extra_object {
+                    object.insert(key.clone(), value.clone());
+                }
+            }
+            payload
+        }
+        Err(error) => {
+            if let Some(object) = payload.as_object_mut() {
+                object.insert(
+                    "read_error".to_string(),
+                    serde_json::json!(error.to_string()),
+                );
+            }
+            payload
+        }
+    }
+}
+
+fn support_file_ref(path: &Path) -> serde_json::Value {
+    let metadata = fs::symlink_metadata(path).ok();
+    serde_json::json!({
+        "path": path.display().to_string(),
+        "exists": metadata.is_some(),
+        "bytes": metadata.as_ref().map(fs::Metadata::len),
+        "kind": metadata.as_ref().map(|value| if value.is_dir() { "directory" } else { "file" }),
+    })
+}
+
+fn redact_toml_for_support(key: &str, value: &toml::Value) -> serde_json::Value {
+    match value {
+        toml::Value::String(value) => {
+            if support_key_is_sensitive(key) {
+                serde_json::json!("<redacted>")
+            } else {
+                serde_json::json!(agentbox_daemon::audit::redact_sensitive_text(value))
+            }
+        }
+        toml::Value::Array(values) => serde_json::Value::Array(
+            values
+                .iter()
+                .map(|value| redact_toml_for_support(key, value))
+                .collect(),
+        ),
+        toml::Value::Table(table) => serde_json::Value::Object(
+            table
+                .iter()
+                .map(|(child_key, value)| {
+                    (child_key.clone(), redact_toml_for_support(child_key, value))
+                })
+                .collect(),
+        ),
+        other => serde_json::to_value(other).unwrap_or(serde_json::Value::Null),
+    }
+}
+
+fn support_key_is_sensitive(key: &str) -> bool {
+    let key = key.to_ascii_lowercase();
+    [
+        "token",
+        "secret",
+        "password",
+        "credential",
+        "authorization",
+        "api_key",
+        "topic",
+    ]
+    .iter()
+    .any(|needle| key.contains(needle))
+}
+
+fn count_directory_entries(path: &Path) -> usize {
+    fs::read_dir(path)
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .count()
+}
+
+fn write_support_json_file<T: Serialize>(
+    output_dir: &Path,
+    relative_path: &str,
+    description: &str,
+    value: &T,
+) -> Result<SupportBundleFile, String> {
+    let path = output_dir.join(relative_path);
+    let bytes = serde_json::to_vec_pretty(value)
+        .map_err(|error| format!("error: failed to serialize {relative_path}: {error}"))?;
+    fs::write(&path, &bytes)
+        .map_err(|error| format!("error: failed to write {}: {error}", path.display()))?;
+    support_bundle_file_record(output_dir, relative_path, description)
+}
+
+fn write_support_text_file(
+    output_dir: &Path,
+    relative_path: &str,
+    description: &str,
+    value: &str,
+) -> Result<SupportBundleFile, String> {
+    let path = output_dir.join(relative_path);
+    fs::write(&path, value.as_bytes())
+        .map_err(|error| format!("error: failed to write {}: {error}", path.display()))?;
+    support_bundle_file_record(output_dir, relative_path, description)
+}
+
+fn support_bundle_file_record(
+    output_dir: &Path,
+    relative_path: &str,
+    description: &str,
+) -> Result<SupportBundleFile, String> {
+    let path = output_dir.join(relative_path);
+    let bytes = fs::read(&path)
+        .map_err(|error| format!("error: failed to read {}: {error}", path.display()))?;
+    let mut hasher = Sha256::new();
+    hasher.update(&bytes);
+    Ok(SupportBundleFile {
+        path: relative_path.to_string(),
+        description: description.to_string(),
+        bytes: bytes.len() as u64,
+        sha256: format!("{:x}", hasher.finalize()),
+    })
 }
 
 fn uninstall_at(base: &Path, options: UninstallOptions) -> Result<UninstallReport, String> {
@@ -9973,6 +10358,11 @@ async fn main() {
         Commands::Providers { json } => cmd_providers(json),
         Commands::ProviderGaps { json, provider } => cmd_provider_gaps(json, provider),
         Commands::ProviderReadiness { json, provider } => cmd_provider_readiness(json, provider),
+        Commands::SupportBundle {
+            output,
+            json,
+            evidence_limit,
+        } => cmd_support_bundle(output, json, evidence_limit),
         Commands::BridgeHealth { json, provider } => cmd_bridge_health(json, provider),
         Commands::RemoteDescriptor {
             endpoint,
@@ -11252,6 +11642,67 @@ mod tests {
             .preserved
             .iter()
             .any(|artifact| artifact.name == "config"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn support_bundle_redacts_config_and_exports_evidence_refs() {
+        let root = std::env::temp_dir().join(format!(
+            "agentbox-cli-support-bundle-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let base = root.join(".agentbox");
+        let output = root.join("bundle");
+        fs::create_dir_all(base.join("shims")).unwrap();
+        fs::create_dir_all(base.join("agentpods/session/evidence")).unwrap();
+        fs::write(
+            base.join("config.toml"),
+            format!(
+                "socket_path = \"{}\"\ndb_path = \"{}\"\nsession_store_path = \"{}\"\nntfy_topic = \"agentbox-secret-topic\"\nallowed_domains = [\"api.example.com\"]\n",
+                base.join("agentbox.sock").display(),
+                base.join("audit.db").display(),
+                base.join("runtime-sessions.json").display()
+            ),
+        )
+        .unwrap();
+        fs::write(base.join("runtime-sessions.json"), "{}").unwrap();
+        fs::write(base.join("agentpods/session/evidence/receipt.json"), "{}").unwrap();
+        let conn = Connection::open(base.join("audit.db")).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE audit_log (
+                id TEXT PRIMARY KEY,
+                timestamp TEXT NOT NULL,
+                command TEXT NOT NULL,
+                bucket TEXT NOT NULL,
+                decision TEXT NOT NULL,
+                event_hash TEXT
+            );
+            INSERT INTO audit_log (id, timestamp, command, bucket, decision, event_hash)
+            VALUES ('evt_1', '2026-05-30T00:00:00Z', 'curl --token secret-value', 'approve', 'allowed', 'abc123');",
+        )
+        .unwrap();
+
+        let report = write_support_bundle(&output, &base, 5).unwrap();
+
+        assert_eq!(report.schema_version, 1);
+        assert!(output.join("manifest.json").exists());
+        assert!(output.join("doctor.json").exists());
+        assert!(output.join("providers.json").exists());
+        assert!(output.join("status.json").exists());
+        assert!(output.join("config-redacted.json").exists());
+        assert!(output.join("evidence-refs.json").exists());
+        assert!(output.join("logs.txt").exists());
+        let config = fs::read_to_string(output.join("config-redacted.json")).unwrap();
+        assert!(!config.contains("agentbox-secret-topic"));
+        assert!(config.contains("<redacted>"));
+        let evidence = fs::read_to_string(output.join("evidence-refs.json")).unwrap();
+        assert!(evidence.contains("\"event_count\": 1"));
+        assert!(evidence.contains("abc123"));
+        assert!(!evidence.contains("secret-value"));
         let _ = fs::remove_dir_all(root);
     }
 

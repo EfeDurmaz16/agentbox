@@ -121,6 +121,19 @@ agentbox start
 agentbox doctor
 ```
 
+## Support Bundle
+
+For support or bug reports, export a redacted diagnostic bundle:
+
+```sh
+agentbox support-bundle --output target/agentbox-support-bundle --json
+```
+
+The bundle includes doctor output, provider status, local daemon/shim status, a
+redacted config snapshot, evidence references, and diagnostic log notes. It is
+not a raw transcript export: secrets, tokens, credential paths, and raw command
+values are redacted or omitted.
+
 ## Upgrade, Rollback, and Uninstall
 
 `scripts/install-agentbox-local.sh` backs up existing local binaries before it
