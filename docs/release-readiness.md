@@ -72,6 +72,46 @@ For interactive setup debugging, run `agentbox setup-plan` or
 `agentbox setup-plan --json`. It derives the next operator action from the same
 doctor report without mutating host state.
 
+## Release Artifacts, Checksums, And Provenance
+
+The GitHub release artifact path is `.github/workflows/release.yml`. It runs on
+manual dispatch and `v*` tags, builds locked release binaries on Linux and
+macOS runners, packages one archive per runner, writes `SHA256SUMS`, verifies
+the checksum file, uploads the archive/checksum pair as workflow artifacts, and
+attaches GitHub artifact attestations for the checksum subjects.
+
+This is not platform code signing. The archive contains `SIGNING_STATUS.json`
+with `code_signing.signed: false` until a real signing, notarization, minisign,
+or cosign blob-signing path is configured outside the public repo. The current
+integrity contract is:
+
+- SHA-256 checksum for every uploaded release archive.
+- GitHub Actions provenance attestation for each checksum subject.
+- No claim of trusted publishing, notarization, privileged installer signing,
+  or platform code signing.
+
+Local artifact packaging and checksum verification:
+
+```sh
+cargo build --locked --release --workspace
+AGENTBOX_RELEASE_VERSION=local scripts/package-release-artifacts.sh
+(cd target/agentbox-release-artifacts && shasum -a 256 -c SHA256SUMS)
+```
+
+Downloaded release artifact verification:
+
+```sh
+shasum -a 256 -c SHA256SUMS
+gh attestation verify ./agentbox-<version>-<target>.tar.gz \
+  -R EfeDurmaz16/agentbox \
+  --signer-workflow EfeDurmaz16/agentbox/.github/workflows/release.yml
+```
+
+For tag releases, add `--source-ref refs/tags/<tag>` to bind the attestation to
+the expected release ref. If `gh attestation verify` fails or no attestation is
+available for the archive, treat the artifact as untrusted even when the
+checksum file matches.
+
 ## Install And CLI
 
 - [ ] `cargo build --release` succeeds.
@@ -83,6 +123,9 @@ doctor report without mutating host state.
       host.
 - [ ] `signing.json` says `signed: false` unless real artifact signing and
       verification are configured for the release.
+- [ ] Release archive `SHA256SUMS` verifies with `shasum -a 256 -c SHA256SUMS`.
+- [ ] GitHub artifact attestation verifies with `gh attestation verify` for the
+      expected repo, release workflow, and tag or source ref.
 - [ ] `agentbox install` creates shims in `~/.agentbox/shims`.
 - [ ] `agentbox doctor` reports daemon, socket, PATH, shims, audit, and provider
       readiness clearly.

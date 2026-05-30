@@ -6,6 +6,21 @@ installs local binaries plus command shims. It does not install packaged
 binaries, signed artifacts, native OS extensions, release services, network
 services, or secrets.
 
+For release archives downloaded from GitHub Actions or GitHub Releases, verify
+the artifact before installing from it:
+
+```sh
+shasum -a 256 -c SHA256SUMS
+gh attestation verify ./agentbox-<version>-<target>.tar.gz \
+  -R EfeDurmaz16/agentbox \
+  --signer-workflow EfeDurmaz16/agentbox/.github/workflows/release.yml
+```
+
+Those commands verify archive integrity and GitHub Actions provenance. They do
+not prove platform code signing or notarization; release archives must keep
+`SIGNING_STATUS.json` at `code_signing.signed: false` until a real signing path
+exists.
+
 ## Prerequisites
 
 - Rust stable toolchain with `cargo`.
