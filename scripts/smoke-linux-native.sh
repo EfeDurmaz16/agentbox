@@ -114,6 +114,12 @@ jq -e '
     and (.nftables.lifecycle.evidence_events | index("agentpod.linux.runner.nftables.installed") != null)
     and (.nftables.lifecycle.evidence_events | index("agentpod.linux.runner.nftables.removed") != null)
     and (.nftables.lifecycle.evidence_events | index("agentpod.linux.runner.nftables.denied_packet") != null)
+    and .lifecycle.fail_closed == true
+    and .lifecycle.timeout.kill_target == "cgroup-process-tree"
+    and (.lifecycle.cleanup_gates | map(.evidence_event) | index("agentpod.linux.lifecycle.cleanup.request_file") != null)
+    and (.lifecycle.cleanup_gates | map(.evidence_event) | index("agentpod.linux.lifecycle.cleanup.cgroup") != null)
+    and (.lifecycle.cleanup_gates | map(.evidence_event) | index("agentpod.linux.lifecycle.cleanup.nftables") != null)
+    and (.lifecycle.failure_events | map(.event_name) | index("agentpod.linux.lifecycle.setup_failed") != null)
     and any(.runner_phases[]; .name == "apply-nftables" and .evidence_event == "agentpod.linux.runner.nftables.installed")
     and (.security_claim | contains("runner-managed workspace mount"))
   ' "$plan_json" >/dev/null
@@ -366,8 +372,13 @@ parallel_root="$(mktemp -d)"
 parallel_left="$parallel_root/left"
 parallel_right="$parallel_root/right"
 request_dir="${TMPDIR:-/tmp}/agentbox-linux-runner"
+cgroup_root="${AGENTBOX_LINUX_CGROUP_ROOT:-/sys/fs/cgroup}"
 mkdir -p "$parallel_left" "$parallel_right" "$request_dir"
 request_count_before="$(find "$request_dir" -maxdepth 1 -type f -name '*.json' | wc -l | tr -d ' ')"
+count_agentbox_cgroups() {
+  find "$cgroup_root" -mindepth 1 -maxdepth 1 -type d -name 'agentbox-*' 2>/dev/null | wc -l | tr -d ' '
+}
+cgroup_count_before="$(count_agentbox_cgroups)"
 
 run_parallel_agentpod() {
   local label="$1"
@@ -412,6 +423,46 @@ request_count_after="$(find "$request_dir" -maxdepth 1 -type f -name '*.json' | 
 if [[ "$request_count_after" != "$request_count_before" ]]; then
   find "$request_dir" -maxdepth 1 -type f -name '*.json' -print >&2
   echo "expected Linux runner request files to be cleaned after parallel exec" >&2
+  exit 1
+fi
+
+cgroup_count_after="$(count_agentbox_cgroups)"
+if [[ "$cgroup_count_after" != "$cgroup_count_before" ]]; then
+  find "$cgroup_root" -mindepth 1 -maxdepth 1 -type d -name 'agentbox-*' -print >&2 2>/dev/null || true
+  echo "expected Linux AgentPod cgroup directories to be cleaned after parallel exec" >&2
+  exit 1
+fi
+
+timeout_dir="$parallel_root/timeout"
+mkdir -p "$timeout_dir"
+request_count_before_timeout="$(find "$request_dir" -maxdepth 1 -type f -name '*.json' | wc -l | tr -d ' ')"
+cgroup_count_before_timeout="$(count_agentbox_cgroups)"
+set +e
+timeout_output="$(
+  cd "$timeout_dir"
+  printf 'y\n' | AGENTBOX_LINUX_NATIVE=1 cargo run -q -p agentbox-cli -- run \
+    --provider agentpod-linux \
+    --workspace-mode direct \
+    --timeout-seconds 1 \
+    -- /bin/sh -c 'sleep 10' 2>&1
+)"
+timeout_status=$?
+set -e
+if [[ "$timeout_status" -eq 0 || "$timeout_output" != *"timeout after 1s"* ]]; then
+  printf '%s\n' "$timeout_output" >&2
+  echo "expected Linux native AgentPod timeout path to fail closed with timeout evidence" >&2
+  exit 1
+fi
+request_count_after_timeout="$(find "$request_dir" -maxdepth 1 -type f -name '*.json' | wc -l | tr -d ' ')"
+if [[ "$request_count_after_timeout" != "$request_count_before_timeout" ]]; then
+  find "$request_dir" -maxdepth 1 -type f -name '*.json' -print >&2
+  echo "expected Linux runner request files to be cleaned after timeout" >&2
+  exit 1
+fi
+cgroup_count_after_timeout="$(count_agentbox_cgroups)"
+if [[ "$cgroup_count_after_timeout" != "$cgroup_count_before_timeout" ]]; then
+  find "$cgroup_root" -mindepth 1 -maxdepth 1 -type d -name 'agentbox-*' -print >&2 2>/dev/null || true
+  echo "expected Linux AgentPod cgroup directories to be cleaned after timeout" >&2
   exit 1
 fi
 

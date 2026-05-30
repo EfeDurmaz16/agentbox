@@ -67,6 +67,23 @@ assert plan["nftables"]["packet_policy"]["cgroup_scoped"] is True
 assert "agentpod.linux.runner.nftables.installed" in plan["nftables"]["lifecycle"]["evidence_events"]
 assert "agentpod.linux.runner.nftables.removed" in plan["nftables"]["lifecycle"]["evidence_events"]
 assert "agentpod.linux.runner.nftables.denied_packet" in plan["nftables"]["lifecycle"]["evidence_events"]
+assert plan["lifecycle"]["fail_closed"] is True
+assert plan["lifecycle"]["timeout"]["kill_target"] == "cgroup-process-tree"
+assert any(
+    gate["artifact"] == "runner-request-file"
+    and gate["evidence_event"] == "agentpod.linux.lifecycle.cleanup.request_file"
+    for gate in plan["lifecycle"]["cleanup_gates"]
+)
+assert any(
+    gate["artifact"] == "cgroup-v2-directory"
+    and gate["evidence_event"] == "agentpod.linux.lifecycle.cleanup.cgroup"
+    for gate in plan["lifecycle"]["cleanup_gates"]
+)
+assert any(
+    event["event_name"] == "agentpod.linux.lifecycle.setup_failed"
+    and event["cleanup_required"] is True
+    for event in plan["lifecycle"]["failure_events"]
+)
 assert any(
     phase["name"] == "bind-workspace"
     and phase["status"] == "prototype"

@@ -358,6 +358,15 @@ pub struct LinuxCgroupV2Write {
     pub value: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LinuxCgroupV2KillReport {
+    pub schema_version: i64,
+    pub cgroup_name: String,
+    pub signal: String,
+    pub signaled_pids: Vec<i32>,
+    pub claim_boundary: String,
+}
+
 pub struct LinuxCgroupV2Limiter;
 
 impl LinuxCgroupV2Limiter {
@@ -411,6 +420,54 @@ impl LinuxCgroupV2Limiter {
         }
     }
 
+    #[cfg(target_os = "linux")]
+    pub fn kill_members(
+        root: &std::path::Path,
+        plan: &LinuxCgroupV2Plan,
+    ) -> Result<LinuxCgroupV2KillReport, Box<dyn std::error::Error + Send + Sync>> {
+        let cgroup_dir = root.join(&plan.cgroup_name);
+        let procs_path = cgroup_dir.join("cgroup.procs");
+        let contents = match std::fs::read_to_string(&procs_path) {
+            Ok(contents) => contents,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(err) => return Err(err.into()),
+        };
+        let mut signaled_pids = Vec::new();
+        for pid in linux_cgroup_v2_member_pids(&contents) {
+            let result = unsafe { libc::kill(pid, libc::SIGKILL) };
+            if result == 0 {
+                signaled_pids.push(pid);
+                continue;
+            }
+            let err = std::io::Error::last_os_error();
+            if err.raw_os_error() == Some(libc::ESRCH) {
+                continue;
+            }
+            return Err(err.into());
+        }
+        for _ in 0..50 {
+            let remaining = match std::fs::read_to_string(&procs_path) {
+                Ok(contents) => linux_cgroup_v2_member_pids(&contents),
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+                Err(err) => return Err(err.into()),
+            };
+            if remaining.is_empty() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        Ok(LinuxCgroupV2KillReport {
+            schema_version: 1,
+            cgroup_name: plan.cgroup_name.clone(),
+            signal: "SIGKILL".into(),
+            signaled_pids,
+            claim_boundary:
+                "timeout cleanup targets every process listed in the AgentPod session cgroup before cgroup removal"
+                    .into(),
+        })
+    }
+
     #[cfg(not(target_os = "linux"))]
     pub fn apply(
         _root: &std::path::Path,
@@ -427,6 +484,23 @@ impl LinuxCgroupV2Limiter {
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         Err("Linux cgroups v2 are only available on Linux".into())
     }
+
+    #[cfg(not(target_os = "linux"))]
+    pub fn kill_members(
+        _root: &std::path::Path,
+        _plan: &LinuxCgroupV2Plan,
+    ) -> Result<LinuxCgroupV2KillReport, Box<dyn std::error::Error + Send + Sync>> {
+        Err("Linux cgroups v2 are only available on Linux".into())
+    }
+}
+
+#[cfg(any(test, target_os = "linux"))]
+fn linux_cgroup_v2_member_pids(contents: &str) -> Vec<i32> {
+    contents
+        .lines()
+        .filter_map(|line| line.trim().parse::<i32>().ok())
+        .filter(|pid| *pid > 1)
+        .collect()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2795,6 +2869,7 @@ pub struct LinuxAgentPodExecutionPlan {
     pub command_argv: Vec<String>,
     pub composed_argv: Vec<String>,
     pub runner_phases: Vec<LinuxAgentPodRunnerPhase>,
+    pub lifecycle: LinuxAgentPodLifecyclePlan,
     pub user_namespace: LinuxUserNamespacePlan,
     pub mount_namespace: LinuxMountNamespacePlan,
     pub pid_namespace: LinuxPidNamespacePlan,
@@ -2831,6 +2906,62 @@ pub struct LinuxAgentPodRunnerPhaseEvidence {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LinuxAgentPodLifecyclePlan {
+    pub schema_version: i64,
+    pub session_id: String,
+    pub fail_closed: bool,
+    pub setup_failure_cleanup_order: Vec<String>,
+    pub timeout: LinuxAgentPodTimeoutPolicy,
+    pub cleanup_gates: Vec<LinuxAgentPodLifecycleCleanupGate>,
+    pub failure_events: Vec<LinuxAgentPodLifecycleFailureEvent>,
+    pub unsupported_host_behavior: String,
+    pub claim_boundary: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LinuxAgentPodTimeoutPolicy {
+    pub schema_version: i64,
+    pub kill_target: String,
+    pub signal: String,
+    pub evidence_event: String,
+    pub cleanup_order: Vec<String>,
+    pub claim_boundary: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LinuxAgentPodLifecycleCleanupGate {
+    pub schema_version: i64,
+    pub artifact: String,
+    pub cleanup_phase: String,
+    pub required: bool,
+    pub evidence_event: String,
+    pub success_check: String,
+    pub failure_behavior: String,
+    pub claim_boundary: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LinuxAgentPodLifecycleFailureEvent {
+    pub schema_version: i64,
+    pub event_name: String,
+    pub phases: Vec<String>,
+    pub cleanup_required: bool,
+    pub claim_boundary: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LinuxAgentPodLifecycleEvidence {
+    pub schema_version: i64,
+    pub provider: String,
+    pub session_id: String,
+    pub phase: String,
+    pub event_name: String,
+    pub success: bool,
+    pub observed: String,
+    pub claim: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LinuxAgentPodRunnerRequest {
     pub user_namespace: LinuxUserNamespacePlan,
     pub mount_namespace: LinuxMountNamespacePlan,
@@ -2849,6 +2980,146 @@ impl LinuxAgentPodRunnerRequest {
             landlock: plan.landlock.clone(),
             command_argv: command.argv.clone(),
             working_dir: command.working_dir.clone(),
+        }
+    }
+}
+
+impl LinuxAgentPodLifecyclePlan {
+    fn from_execution_parts(
+        session_id: &str,
+        cgroup: &LinuxCgroupV2Plan,
+        nftables: &LinuxNftablesPlan,
+    ) -> Self {
+        Self {
+            schema_version: 1,
+            session_id: session_id.into(),
+            fail_closed: true,
+            setup_failure_cleanup_order: vec![
+                "kill-child".into(),
+                "remove-nftables".into(),
+                "remove-cgroup".into(),
+                "remove-runner-request-file".into(),
+            ],
+            timeout: LinuxAgentPodTimeoutPolicy {
+                schema_version: 1,
+                kill_target: "cgroup-process-tree".into(),
+                signal: "SIGKILL".into(),
+                evidence_event: "agentpod.linux.lifecycle.timeout.kill_tree".into(),
+                cleanup_order: vec![
+                    "signal-cgroup-processes".into(),
+                    "kill-runner-child".into(),
+                    "remove-nftables".into(),
+                    "remove-cgroup".into(),
+                    "remove-runner-request-file".into(),
+                ],
+                claim_boundary:
+                    "timeouts signal every process listed in the AgentPod cgroup before artifact cleanup; this does not claim host-wide process containment outside that cgroup"
+                        .into(),
+            },
+            cleanup_gates: vec![
+                LinuxAgentPodLifecycleCleanupGate {
+                    schema_version: 1,
+                    artifact: "runner-request-file".into(),
+                    cleanup_phase: "cleanup-runner-request-file".into(),
+                    required: true,
+                    evidence_event: "agentpod.linux.lifecycle.cleanup.request_file".into(),
+                    success_check: "request path is removed when the request-file guard drops"
+                        .into(),
+                    failure_behavior:
+                        "fail closed by surfacing execution failure if request serialization fails before spawn"
+                            .into(),
+                    claim_boundary: format!(
+                        "runner request files for session {session_id} are scoped to the invocation and removed on drop"
+                    ),
+                },
+                LinuxAgentPodLifecycleCleanupGate {
+                    schema_version: 1,
+                    artifact: "cgroup-v2-directory".into(),
+                    cleanup_phase: "cleanup-cgroup".into(),
+                    required: true,
+                    evidence_event: "agentpod.linux.lifecycle.cleanup.cgroup".into(),
+                    success_check: format!("{} directory is absent after cleanup", cgroup.cgroup_name),
+                    failure_behavior:
+                        "return exec failed after attempting process kill and nftables cleanup"
+                            .into(),
+                    claim_boundary:
+                        "AgentPod session cgroup directories are removed after success, setup failure, and timeout paths"
+                            .into(),
+                },
+                LinuxAgentPodLifecycleCleanupGate {
+                    schema_version: 1,
+                    artifact: "nftables-table".into(),
+                    cleanup_phase: "cleanup-nftables".into(),
+                    required: true,
+                    evidence_event: "agentpod.linux.lifecycle.cleanup.nftables".into(),
+                    success_check: format!("inet table {} is absent after cleanup", nftables.table_name),
+                    failure_behavior:
+                        "return exec failed after attempting cgroup cleanup so stale firewall state is visible"
+                            .into(),
+                    claim_boundary:
+                        "Agentbox-owned nftables tables are deleted after command exit or failed setup when the nftables gate installed rules"
+                            .into(),
+                },
+            ],
+            failure_events: vec![
+                LinuxAgentPodLifecycleFailureEvent {
+                    schema_version: 1,
+                    event_name: "agentpod.linux.lifecycle.setup_failed".into(),
+                    phases: vec![
+                        "enter-user-mount-pid-namespaces".into(),
+                        "bind-workspace".into(),
+                        "apply-overlayfs".into(),
+                        "apply-cgroup".into(),
+                        "apply-landlock".into(),
+                        "apply-seccomp".into(),
+                        "apply-network-guard".into(),
+                        "apply-nftables".into(),
+                        "exec-command".into(),
+                    ],
+                    cleanup_required: true,
+                    claim_boundary:
+                        "setup failures must terminate the child when spawned and run request, nftables, and cgroup cleanup before returning"
+                            .into(),
+                },
+                LinuxAgentPodLifecycleFailureEvent {
+                    schema_version: 1,
+                    event_name: "agentpod.linux.lifecycle.cleanup_failed".into(),
+                    phases: vec![
+                        "cleanup-nftables".into(),
+                        "cleanup-cgroup".into(),
+                        "cleanup-runner-request-file".into(),
+                    ],
+                    cleanup_required: true,
+                    claim_boundary:
+                        "cleanup failures are surfaced as execution failures instead of being hidden as successful AgentPod runs"
+                            .into(),
+                },
+            ],
+            unsupported_host_behavior:
+                "unsupported Linux hosts must skip live gates with an explicit prerequisite reason rather than pretending cleanup proof ran"
+                    .into(),
+            claim_boundary:
+                "Linux AgentPod lifecycle is fail closed for the owned runner request, nftables table, and cgroup artifacts; mount namespace teardown still relies on runner process exit"
+                    .into(),
+        }
+    }
+
+    pub fn evidence(
+        &self,
+        phase: impl Into<String>,
+        event_name: impl Into<String>,
+        success: bool,
+        observed: impl Into<String>,
+    ) -> LinuxAgentPodLifecycleEvidence {
+        LinuxAgentPodLifecycleEvidence {
+            schema_version: 1,
+            provider: "agentpod-linux".into(),
+            session_id: self.session_id.clone(),
+            phase: phase.into(),
+            event_name: event_name.into(),
+            success,
+            observed: observed.into(),
+            claim: self.claim_boundary.clone(),
         }
     }
 }
@@ -2875,6 +3146,8 @@ impl LinuxAgentPodExecutionPlan {
         let landlock = LinuxLandlockRuleset::plan(spec)?;
         let nftables = LinuxNftablesPolicyDescriptor::plan(spec)?;
         let ebpf = LinuxEbpfObserverDescriptor::plan(spec)?;
+        let lifecycle =
+            LinuxAgentPodLifecyclePlan::from_execution_parts(&spec.id, &cgroup, &nftables);
 
         let composed_argv = linux_agentpod_unshare_prefix(&mount_namespace, &pid_namespace);
 
@@ -2893,6 +3166,7 @@ impl LinuxAgentPodExecutionPlan {
                 &network_enforcement,
                 &nftables,
             ),
+            lifecycle,
             user_namespace,
             mount_namespace,
             pid_namespace,
@@ -2929,6 +3203,46 @@ impl LinuxAgentPodExecutionPlan {
                 claim: phase.claim.clone(),
             })
             .collect()
+    }
+
+    pub fn lifecycle_phase_evidence(&self) -> Vec<LinuxAgentPodRunnerPhaseEvidence> {
+        let mut evidence = vec![
+            LinuxAgentPodRunnerPhaseEvidence {
+                schema_version: 1,
+                provider: self.provider.clone(),
+                session_id: self.session_id.clone(),
+                phase: "setup-failure".into(),
+                status: "fail-closed".into(),
+                event_name: "agentpod.linux.lifecycle.setup_failed".into(),
+                claim: self.lifecycle.claim_boundary.clone(),
+            },
+            LinuxAgentPodRunnerPhaseEvidence {
+                schema_version: 1,
+                provider: self.provider.clone(),
+                session_id: self.session_id.clone(),
+                phase: "timeout-kill".into(),
+                status: "fail-closed".into(),
+                event_name: self.lifecycle.timeout.evidence_event.clone(),
+                claim: self.lifecycle.timeout.claim_boundary.clone(),
+            },
+        ];
+        evidence.extend(self.lifecycle.cleanup_gates.iter().map(|gate| {
+            LinuxAgentPodRunnerPhaseEvidence {
+                schema_version: 1,
+                provider: self.provider.clone(),
+                session_id: self.session_id.clone(),
+                phase: gate.cleanup_phase.clone(),
+                status: if gate.required {
+                    "required-cleanup"
+                } else {
+                    "best-effort-cleanup"
+                }
+                .into(),
+                event_name: gate.evidence_event.clone(),
+                claim: gate.claim_boundary.clone(),
+            }
+        }));
+        evidence
     }
 }
 
@@ -3150,9 +3464,14 @@ impl LinuxAgentPodPrototypeExecutor {
         if let Err(err) = LinuxCgroupV2Limiter::apply(cgroup_root, &plan.cgroup, pid) {
             let _ = child.kill();
             let _ = child.wait();
+            let cleanup_result = LinuxCgroupV2Limiter::cleanup(cgroup_root, &plan.cgroup);
+            let cleanup_note = cleanup_result
+                .err()
+                .map(|cleanup_err| format!("; cgroup cleanup also failed: {cleanup_err}"))
+                .unwrap_or_default();
             return Err(RuntimeError::ExecFailed(format!(
-                "Linux AgentPod cgroup v2 attach failed at {}: {err}",
-                cgroup_root.display()
+                "Linux AgentPod cgroup v2 attach failed at {}: {err}{cleanup_note}",
+                cgroup_root.display(),
             )));
         }
         let mut nftables_guard = match LinuxNftablesLifecycleController::apply(&plan.nftables) {
@@ -3167,7 +3486,13 @@ impl LinuxAgentPodPrototypeExecutor {
                 )));
             }
         };
-        let output_result = wait_for_child_output(child, command.timeout_seconds);
+        let timeout_cgroup_root = cgroup_root.to_path_buf();
+        let timeout_cgroup = plan.cgroup.clone();
+        let output_result =
+            wait_for_child_output_with_timeout_cleanup(child, command.timeout_seconds, move || {
+                LinuxCgroupV2Limiter::kill_members(&timeout_cgroup_root, &timeout_cgroup)
+                    .map(|_| ())
+            });
         let nftables_cleanup_result = nftables_guard.cleanup();
         let cgroup_cleanup_result = LinuxCgroupV2Limiter::cleanup(cgroup_root, &plan.cgroup);
         nftables_cleanup_result.map_err(|err| {
@@ -3704,9 +4029,21 @@ fn default_linux_agentpod_pids_max_for_risk(risk: &AgentPodRiskLevel) -> u32 {
 
 #[cfg(target_os = "linux")]
 fn wait_for_child_output(
-    mut child: std::process::Child,
+    child: std::process::Child,
     timeout_seconds: Option<u64>,
 ) -> Result<std::process::Output, RuntimeError> {
+    wait_for_child_output_with_timeout_cleanup(child, timeout_seconds, || Ok(()))
+}
+
+#[cfg(target_os = "linux")]
+fn wait_for_child_output_with_timeout_cleanup<F>(
+    mut child: std::process::Child,
+    timeout_seconds: Option<u64>,
+    on_timeout: F,
+) -> Result<std::process::Output, RuntimeError>
+where
+    F: FnOnce() -> Result<(), Box<dyn std::error::Error + Send + Sync>>,
+{
     use std::io::Read;
 
     let mut stdout = child.stdout.take().ok_or_else(|| {
@@ -3734,10 +4071,16 @@ fn wait_for_child_output(
         }
         if let Some(deadline) = deadline {
             if std::time::Instant::now() >= deadline {
+                let timeout_cleanup_result = on_timeout();
                 let _ = child.kill();
                 let _ = child.wait();
                 let _ = stdout_reader.join();
                 let _ = stderr_reader.join();
+                if let Err(err) = timeout_cleanup_result {
+                    return Err(RuntimeError::ExecFailed(format!(
+                        "Linux AgentPod timeout cleanup failed: {err}"
+                    )));
+                }
                 return Err(RuntimeError::Timeout(timeout_seconds.unwrap_or_default()));
             }
         }
@@ -4511,6 +4854,36 @@ printf landlock-policy-ok
             LinuxCgroupV2Limiter::plan("01agentboxsession", &ResourcePolicy::default()).unwrap();
 
         LinuxCgroupV2Limiter::cleanup(&root, &plan).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_lifecycle_cgroup_cleanup_removes_partial_setup_directory() {
+        let root = std::env::temp_dir().join(format!(
+            "agentbox-cgroup-partial-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let plan =
+            LinuxCgroupV2Limiter::plan("01agentboxsession", &ResourcePolicy::default()).unwrap();
+        let cgroup_dir = root.join(&plan.cgroup_name);
+        std::fs::create_dir_all(&cgroup_dir).unwrap();
+        std::fs::write(cgroup_dir.join("memory.max"), "1024").unwrap();
+
+        LinuxCgroupV2Limiter::cleanup(&root, &plan).unwrap();
+
+        assert!(!cgroup_dir.exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn linux_lifecycle_cgroup_procs_parser_ignores_invalid_and_unsafe_pids() {
+        let pids = linux_cgroup_v2_member_pids("0\n1\n42\nabc\n999\n-7\n");
+
+        assert_eq!(pids, vec![42, 999]);
     }
 
     #[test]
@@ -6139,6 +6512,130 @@ printf landlock-policy-ok
         let err = LinuxAgentPodPrototypeExecutor::execute_plan(&plan, &command).unwrap_err();
 
         assert!(err.to_string().contains("only available on Linux"));
+    }
+
+    #[test]
+    fn linux_lifecycle_plan_declares_fail_closed_cleanup_gates() {
+        let spec = MinipodSpec::for_agent_task("hermes", "/tmp/agentbox-work");
+        let command = command(&["/bin/true"]);
+        let plan = LinuxAgentPodExecutionPlan::from_minipod_spec(&spec, &command).unwrap();
+
+        assert!(plan.lifecycle.fail_closed);
+        assert_eq!(plan.lifecycle.timeout.kill_target, "cgroup-process-tree");
+        assert_eq!(
+            plan.lifecycle.setup_failure_cleanup_order,
+            vec![
+                "kill-child",
+                "remove-nftables",
+                "remove-cgroup",
+                "remove-runner-request-file"
+            ]
+        );
+        assert!(plan.lifecycle.cleanup_gates.iter().any(|gate| {
+            gate.artifact == "runner-request-file"
+                && gate.evidence_event == "agentpod.linux.lifecycle.cleanup.request_file"
+                && gate.required
+        }));
+        assert!(plan.lifecycle.cleanup_gates.iter().any(|gate| {
+            gate.artifact == "cgroup-v2-directory"
+                && gate.evidence_event == "agentpod.linux.lifecycle.cleanup.cgroup"
+                && gate.required
+        }));
+        assert!(plan.lifecycle.cleanup_gates.iter().any(|gate| {
+            gate.artifact == "nftables-table"
+                && gate.evidence_event == "agentpod.linux.lifecycle.cleanup.nftables"
+                && gate.required
+        }));
+        assert!(plan.lifecycle.failure_events.iter().any(|event| {
+            event.event_name == "agentpod.linux.lifecycle.setup_failed"
+                && event.cleanup_required
+                && event.phases.contains(&"apply-landlock".to_string())
+                && event.phases.contains(&"apply-seccomp".to_string())
+                && event.phases.contains(&"apply-nftables".to_string())
+        }));
+    }
+
+    #[test]
+    fn linux_lifecycle_evidence_records_timeout_and_cleanup_failures() {
+        let spec = MinipodSpec::for_agent_task("hermes", "/tmp/agentbox-work");
+        let command = command(&["/bin/true"]);
+        let plan = LinuxAgentPodExecutionPlan::from_minipod_spec(&spec, &command).unwrap();
+
+        let timeout = plan.lifecycle.evidence(
+            "timeout-kill",
+            "agentpod.linux.lifecycle.timeout.kill_tree",
+            true,
+            "signaled 2 cgroup member processes",
+        );
+        let cleanup_failed = plan.lifecycle.evidence(
+            "cleanup-cgroup",
+            "agentpod.linux.lifecycle.cleanup_failed",
+            false,
+            "directory not empty",
+        );
+
+        assert_eq!(timeout.session_id, spec.id);
+        assert_eq!(timeout.phase, "timeout-kill");
+        assert!(timeout.success);
+        assert!(timeout.observed.contains("signaled 2"));
+        assert_eq!(
+            cleanup_failed.event_name,
+            "agentpod.linux.lifecycle.cleanup_failed"
+        );
+        assert!(!cleanup_failed.success);
+        assert!(cleanup_failed.claim.contains("fail closed"));
+    }
+
+    #[test]
+    fn linux_lifecycle_phase_evidence_is_auditable_with_runner_phases() {
+        let spec = MinipodSpec::for_agent_task("hermes", "/tmp/agentbox-work");
+        let command = command(&["/bin/true"]);
+        let plan = LinuxAgentPodExecutionPlan::from_minipod_spec(&spec, &command).unwrap();
+
+        let events = plan.lifecycle_phase_evidence();
+
+        assert!(events.iter().any(|event| {
+            event.event_name == "agentpod.linux.lifecycle.setup_failed"
+                && event.phase == "setup-failure"
+        }));
+        assert!(events.iter().any(|event| {
+            event.event_name == "agentpod.linux.lifecycle.timeout.kill_tree"
+                && event.phase == "timeout-kill"
+        }));
+        assert!(events.iter().any(|event| {
+            event.event_name == "agentpod.linux.lifecycle.cleanup.request_file"
+                && event.phase == "cleanup-runner-request-file"
+        }));
+        assert!(events
+            .iter()
+            .all(|event| event.event_name.starts_with("agentpod.linux.lifecycle.")));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_lifecycle_timeout_runs_cleanup_hook_before_returning_timeout() {
+        use std::sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc,
+        };
+
+        let hook_called = Arc::new(AtomicBool::new(false));
+        let hook_called_for_timeout = Arc::clone(&hook_called);
+        let child = std::process::Command::new("/bin/sh")
+            .args(["-c", "exec sleep 5"])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+
+        let err = wait_for_child_output_with_timeout_cleanup(child, Some(0), move || {
+            hook_called_for_timeout.store(true, Ordering::SeqCst);
+            Ok(())
+        })
+        .unwrap_err();
+
+        assert!(matches!(err, RuntimeError::Timeout(0)));
+        assert!(hook_called.load(Ordering::SeqCst));
     }
 
     #[cfg(target_os = "linux")]

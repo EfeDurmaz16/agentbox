@@ -103,8 +103,11 @@ paths. It then applies Landlock/seccomp and execs the requested argv. The Linux
 native plan exposes ordered `runner_phases` so the namespace, workspace bind,
 overlayfs, Landlock, seccomp, and exec stages can be reviewed separately;
 each phase carries a stable `agentpod.linux.runner.*` evidence event name so
-plans and post-run evidence use the same lifecycle vocabulary. Workspace bind,
-overlayfs, Landlock, and seccomp are prototype phases. The Linux eBPF descriptor
+plans and post-run evidence use the same lifecycle vocabulary. The plan also
+exposes fail-closed lifecycle gates for setup failure, timeout cgroup
+process-tree kill, runner request-file cleanup, session cgroup cleanup, and
+Agentbox-owned nftables table cleanup. Workspace bind, overlayfs, Landlock, and
+seccomp are prototype phases. The Linux eBPF descriptor
 also exposes observability receipt templates for process exec, process exit,
 and network connect events; each template identifies provider, session, cgroup
 path, PID/TGID fallback fields, and event identity fields while staying

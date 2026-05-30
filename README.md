@@ -320,9 +320,9 @@ tests exist.
   exists.
 
 **What AgentPod still needs before stronger isolation claims are credible:**
-- native provider execution proof beyond descriptors and gated prototypes
 - protected host path denial tests on each provider that claims filesystem
   isolation
+- complete mount/rootfs/proc/device failure injection across native providers
 - live domain resolver/ipset proof before claiming domain allowlist enforcement
 - honest platform-specific bypass documentation
 

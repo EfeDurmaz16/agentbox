@@ -590,6 +590,16 @@ impl RuntimeManager {
                 Some(self.provider.name().to_string()),
             )?;
         }
+        for event in plan.lifecycle_phase_evidence() {
+            self.audit_runtime_event(
+                &format!("{} {}", event.event_name, event.phase),
+                session,
+                "native-lifecycle",
+                &format!("{}:{}", event.phase, event.status),
+                None,
+                Some(self.provider.name().to_string()),
+            )?;
+        }
         Ok(())
     }
 
