@@ -18,6 +18,193 @@ Workers can export the current workspace as the same verified bundle shape from
 `/sessions/{worker_session_id}/workspace/export`, allowing a later CLI flow to
 review or pull changed files without trusting raw paths.
 
+## Trust Model
+
+Remote AgentPod is allowed, but it is not a generic remote shell. It is a
+governed AgentPod execution target whose authority comes from the local
+Agentbox controller. The controller remains responsible for policy,
+operator approvals, workspace selection, credential grants, local evidence
+sealing, and the decision to trust a specific worker for a specific task.
+
+The current status is **experimental gated**. The repository has a contract
+worker, HTTPS transport adapter, handshake verification, lifecycle receipts,
+workspace bundle verification, credential grant constraints, evidence upload,
+workspace export, pending approval grant handling, and a loopback smoke test.
+It does not have a production remote worker fleet, hosted provider support, or
+a third-party attestation service. Documentation and CLI output must keep those
+statuses separate.
+
+### Trust Boundaries
+
+The remote boundary has three distinct principals:
+
+- **Local controller:** the Agentbox daemon, policy config, approval channel,
+  local session store, and local evidence bundle. This is the root of task
+  authority.
+- **Remote worker:** the attached machine, disposable VM, or hosted execution
+  cell that receives the AgentPod manifest, workspace bundle, explicit
+  credential grants, and exec requests. It is trusted only after identity and
+  capability checks pass.
+- **Operator:** the human or higher-level control plane that chooses the worker,
+  grants approvals, revokes sessions, and decides whether returned evidence is
+  acceptable.
+
+The worker must never infer ambient authority from the endpoint alone. A remote
+session is authorized only by a controller request that binds worker identity,
+session id, AgentPod manifest, workspace material, credential grants, approval
+state, and required evidence return. If any required proof is missing, stale,
+mismatched, unsigned, or outside the declared capability scope, Agentbox should
+deny by default.
+
+Workspace and secret boundaries are explicit:
+
+- Workspace transfer uses a hash-indexed bundle with path, byte-count, and
+  SHA-256 verification before materialization.
+- Workspace export returns the same verified bundle shape for local review or
+  apply; raw remote paths are not evidence by themselves.
+- Secret grants must be named, scoped to a session and recipient worker
+  identity, bounded by expiry, redacted in status/evidence, and rejected when
+  the grant kind is unsupported.
+- Socket, provider-token, host environment inheritance, and broad ambient
+  credential forwarding are not part of the v0 remote trust boundary.
+
+### Threat Model
+
+Remote AgentPod adds threats that do not exist in the local-only provider path:
+
+- a malicious or misconfigured worker claims capabilities it does not enforce
+- a network attacker replays or swaps worker handshake responses
+- a stale endpoint receives a workspace or secret grant after operator intent
+  changed
+- a worker runs outside the declared workspace or leaks workspace files through
+  logs, network, or returned artifacts
+- evidence is incomplete, reordered, fabricated, or not durably persisted
+- a worker ignores stop, destroy, approval denial, or revocation requests
+- credentials remain materialized after the task, after expiry, or after worker
+  restart
+
+The v0 posture is conservative: the controller should treat remote execution as
+untrusted until the worker proves identity, reports capabilities, accepts the
+lifecycle contract, returns receipts, and produces evidence that can be checked
+against local session state. Capability reporting alone is not a sandbox proof.
+
+### Identity And Attestation Requirements
+
+A remote worker must present a stable worker identity and prove possession of
+the corresponding signing key during handshake. The current cryptographic path
+uses Ed25519 challenge signatures; future verifier modes may include mTLS,
+workload identity, or operator SSH, but they must preserve the same binding:
+
+- endpoint and worker identity
+- worker public key or platform identity
+- challenge id, nonce digest, and expiry
+- requested evidence endpoint
+- declared capability descriptor
+- lifecycle acknowledgement
+
+Capability descriptors must distinguish:
+
+- `attested`: verified by a platform, controller policy, or independent proof
+- `self-reported`: claimed by the worker and useful for routing, but not an
+  enforcement guarantee
+- `unknown`: absent or not understood by the controller
+
+Remote AgentPod should not execute high-risk work that depends on a capability
+marked `unknown`. A self-reported capability may be acceptable only when the
+operator explicitly approves that weaker trust level for the task.
+
+### Request And Receipt Flow
+
+The expected v0 flow is:
+
+1. The operator configures a remote endpoint and expected auth mode.
+2. Agentbox emits or sends a challenge that binds endpoint, nonce digest,
+   expiry, worker identity, public key, capabilities, evidence endpoint, and
+   lifecycle requirements.
+3. The worker returns a signed challenge acknowledgement and lifecycle
+   acknowledgement.
+4. The controller creates a session with an AgentPod manifest, workspace mode,
+   optional verified workspace bundle, explicit credential grants, approval
+   state, and evidence requirements.
+5. The worker returns allocation/session receipts and records lifecycle events.
+6. Exec requests are direct argv requests scoped to the session workspace and
+   policy state, not arbitrary shell access.
+7. The worker returns command receipts, stdout/stderr metadata, exit status,
+   lifecycle events, pending approval state when blocked, and evidence-sealed
+   state.
+8. The controller exports and seals local evidence, uploads evidence metadata
+   or bundle payloads when configured, and verifies returned hashes and counts.
+9. Destroy requires worker acknowledgement, including `KillSwitchAck` when the
+   descriptor requires a kill switch.
+
+Each receipt must bind the local Agentbox session id, worker session id, worker
+identity, relevant request id, lifecycle event sequence, timestamps, and hashes
+for workspace or evidence payloads. A receipt that cannot be tied back to the
+local session is not sufficient proof.
+
+### Evidence Return
+
+Remote evidence is acceptable only when the local controller can compare it
+against the session it created. Minimum evidence for a remote run is:
+
+- handshake acknowledgement and worker identity proof
+- capability descriptor status and claim boundary
+- `WorkerAllocated` and `SessionCreated` lifecycle events
+- command start and finish events with argv, policy result, exit status, and
+  redacted transcript metadata
+- approval grant or denial events for approval-required commands
+- workspace bundle hashes for uploaded or returned workspace material
+- credential grant exposure and revocation metadata, without secret values
+- evidence bundle metadata with event count and root hash
+- `EvidenceSealed`, `KillSwitchAck` when required, and `WorkerDestroyed`
+
+If evidence upload, evidence sealing, or lifecycle query fails after remote
+execution, the session should be marked incomplete or failed rather than
+silently successful. The operator may still inspect partial artifacts, but the
+trust model does not treat partial evidence as a complete governed run.
+
+### Revocation And Kill Switch
+
+Remote AgentPod must support two levels of stop:
+
+- **Session kill switch:** stop/destroy the active worker session, terminate any
+  running command, unlink one-time credential material, and emit destroy
+  receipts.
+- **Worker revocation:** prevent a worker identity, key, or endpoint from
+  starting new sessions after compromise, rotation, decommissioning, or operator
+  distrust.
+
+The current contract includes destroy-time kill acknowledgement and credential
+cleanup behavior in the contract worker. A durable revocation registry and
+fleet-wide distribution path are future work. Until that exists, operators must
+treat worker revocation as a controller configuration and deployment concern,
+not as a globally enforced network service.
+
+### Non-Goals For v0
+
+Remote AgentPod v0 does not claim:
+
+- hosted provider availability
+- remote worker sandboxing beyond what a specific worker can prove
+- confidential computing or hardware-backed attestation
+- protection against a malicious remote administrator or compromised worker OS
+- transparent forwarding of host credentials, sockets, keychains, browser
+  profiles, wallets, or provider tokens
+- automatic merge of remote workspace changes into the local workspace
+- live bidirectional event streaming or rich remote approval UI
+- replay-safe automatic rerun of side-effecting commands after worker restart
+- packet-level network enforcement unless a worker capability is implemented
+  and verified for that session
+
+### Verification
+
+Issue #200 is a documentation/trust-model gate. Verify this doc with:
+
+```sh
+rg -n "Trust Model|Threat Model|Identity And Attestation|Request And Receipt|Evidence Return|Revocation And Kill Switch|Non-Goals For v0|deny by default" docs/remote-agentpod.md
+git diff --check
+```
+
 The product surface starts with a secret-free transport descriptor:
 
 ```sh

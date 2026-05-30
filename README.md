@@ -371,6 +371,8 @@ For the public security boundary, see
 [docs/threat-model.md](docs/threat-model.md),
 [docs/platform-isolation.md](docs/platform-isolation.md), and
 [docs/limitations.md](docs/limitations.md).
+For remote worker trust boundaries, see
+[docs/remote-agentpod.md](docs/remote-agentpod.md).
 
 ## CLI Commands
 
