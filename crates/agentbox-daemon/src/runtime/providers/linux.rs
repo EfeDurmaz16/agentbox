@@ -919,6 +919,7 @@ fn imported_seccomp_rule_action(
 pub struct LinuxLandlockPlan {
     pub schema_version: i64,
     pub ruleset_name: String,
+    pub abi: LinuxLandlockAbiPlan,
     pub rules: Vec<LinuxLandlockRule>,
     pub path_policy: LinuxLandlockPathPolicyPlan,
     pub handled_access_mask: u64,
@@ -939,13 +940,41 @@ pub struct LinuxLandlockRule {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LinuxLandlockAccess {
+    Execute,
+    WriteFile,
     ReadFile,
     ReadDir,
-    WriteFile,
-    MakeDir,
-    RemoveFile,
     RemoveDir,
-    Execute,
+    RemoveFile,
+    MakeChar,
+    MakeDir,
+    MakeReg,
+    MakeSock,
+    MakeFifo,
+    MakeBlock,
+    MakeSym,
+    Refer,
+    Truncate,
+    IoctlDev,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LinuxLandlockAbiPlan {
+    pub schema_version: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub host_abi_version: Option<i64>,
+    pub effective_abi_version: i64,
+    pub supported_access: Vec<LinuxLandlockAccess>,
+    pub unsupported_access: Vec<LinuxLandlockAccess>,
+    pub supported_access_mask: u64,
+    pub claim_boundary: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LinuxLandlockAccessClassSupport {
+    Enforced,
+    UnsupportedByHostAbi,
+    UnsupportedByPrototypeLoader,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -961,6 +990,7 @@ pub struct LinuxLandlockAccessClassPlan {
     pub class: String,
     pub planned: bool,
     pub enforced_by_prototype_loader: bool,
+    pub support: LinuxLandlockAccessClassSupport,
     pub access: Vec<LinuxLandlockAccess>,
     pub reason: String,
 }
@@ -971,10 +1001,18 @@ const LANDLOCK_ACCESS_FS_READ_FILE: u64 = 1 << 2;
 const LANDLOCK_ACCESS_FS_READ_DIR: u64 = 1 << 3;
 const LANDLOCK_ACCESS_FS_REMOVE_DIR: u64 = 1 << 4;
 const LANDLOCK_ACCESS_FS_REMOVE_FILE: u64 = 1 << 5;
+const LANDLOCK_ACCESS_FS_MAKE_CHAR: u64 = 1 << 6;
 const LANDLOCK_ACCESS_FS_MAKE_DIR: u64 = 1 << 7;
 const LANDLOCK_ACCESS_FS_MAKE_REG: u64 = 1 << 8;
+const LANDLOCK_ACCESS_FS_MAKE_SOCK: u64 = 1 << 9;
+const LANDLOCK_ACCESS_FS_MAKE_FIFO: u64 = 1 << 10;
+const LANDLOCK_ACCESS_FS_MAKE_BLOCK: u64 = 1 << 11;
+const LANDLOCK_ACCESS_FS_MAKE_SYM: u64 = 1 << 12;
+const LANDLOCK_ACCESS_FS_REFER: u64 = 1 << 13;
+const LANDLOCK_ACCESS_FS_TRUNCATE: u64 = 1 << 14;
+const LANDLOCK_ACCESS_FS_IOCTL_DEV: u64 = 1 << 15;
 
-const LANDLOCK_ABI_V1_FS_ACCESS_MASK: u64 = LANDLOCK_ACCESS_FS_EXECUTE
+const LANDLOCK_AGENTPOD_ABI_V1_FS_ACCESS_MASK: u64 = LANDLOCK_ACCESS_FS_EXECUTE
     | LANDLOCK_ACCESS_FS_WRITE_FILE
     | LANDLOCK_ACCESS_FS_READ_FILE
     | LANDLOCK_ACCESS_FS_READ_DIR
@@ -982,7 +1020,62 @@ const LANDLOCK_ABI_V1_FS_ACCESS_MASK: u64 = LANDLOCK_ACCESS_FS_EXECUTE
     | LANDLOCK_ACCESS_FS_REMOVE_FILE
     | LANDLOCK_ACCESS_FS_MAKE_DIR
     | LANDLOCK_ACCESS_FS_MAKE_REG;
-const LANDLOCK_AGENTPOD_HANDLED_FS_ACCESS_MASK: u64 = LANDLOCK_ABI_V1_FS_ACCESS_MASK;
+const LANDLOCK_AGENTPOD_ABI_V2_FS_ACCESS_MASK: u64 =
+    LANDLOCK_AGENTPOD_ABI_V1_FS_ACCESS_MASK | LANDLOCK_ACCESS_FS_REFER;
+const LANDLOCK_AGENTPOD_ABI_V3_FS_ACCESS_MASK: u64 =
+    LANDLOCK_AGENTPOD_ABI_V2_FS_ACCESS_MASK | LANDLOCK_ACCESS_FS_TRUNCATE;
+
+fn landlock_effective_abi_version(host_abi_version: Option<i64>) -> i64 {
+    match host_abi_version {
+        Some(version) if version >= 3 => 3,
+        Some(2) => 2,
+        Some(version) if version >= 1 => 1,
+        _ => 1,
+    }
+}
+
+fn landlock_supported_access_mask_for_abi(effective_abi_version: i64) -> u64 {
+    match effective_abi_version {
+        version if version >= 3 => LANDLOCK_AGENTPOD_ABI_V3_FS_ACCESS_MASK,
+        2 => LANDLOCK_AGENTPOD_ABI_V2_FS_ACCESS_MASK,
+        _ => LANDLOCK_AGENTPOD_ABI_V1_FS_ACCESS_MASK,
+    }
+}
+
+fn landlock_supported_access_for_abi(effective_abi_version: i64) -> Vec<LinuxLandlockAccess> {
+    let mut access = vec![
+        LinuxLandlockAccess::Execute,
+        LinuxLandlockAccess::WriteFile,
+        LinuxLandlockAccess::ReadFile,
+        LinuxLandlockAccess::ReadDir,
+        LinuxLandlockAccess::RemoveDir,
+        LinuxLandlockAccess::RemoveFile,
+        LinuxLandlockAccess::MakeDir,
+        LinuxLandlockAccess::MakeReg,
+    ];
+    if effective_abi_version >= 2 {
+        access.push(LinuxLandlockAccess::Refer);
+    }
+    if effective_abi_version >= 3 {
+        access.push(LinuxLandlockAccess::Truncate);
+    }
+    access
+}
+
+fn extend_landlock_mutating_access_for_abi(
+    access: &mut Vec<LinuxLandlockAccess>,
+    abi: &LinuxLandlockAbiPlan,
+) {
+    if abi.supported_access.contains(&LinuxLandlockAccess::Refer) {
+        access.push(LinuxLandlockAccess::Refer);
+    }
+    if abi
+        .supported_access
+        .contains(&LinuxLandlockAccess::Truncate)
+    {
+        access.push(LinuxLandlockAccess::Truncate);
+    }
+}
 
 impl LinuxLandlockAccess {
     fn access_mask(&self) -> u64 {
@@ -993,13 +1086,81 @@ impl LinuxLandlockAccess {
             Self::ReadDir => LANDLOCK_ACCESS_FS_READ_DIR,
             Self::RemoveDir => LANDLOCK_ACCESS_FS_REMOVE_DIR,
             Self::RemoveFile => LANDLOCK_ACCESS_FS_REMOVE_FILE,
+            Self::MakeChar => LANDLOCK_ACCESS_FS_MAKE_CHAR,
             Self::MakeDir => LANDLOCK_ACCESS_FS_MAKE_DIR,
+            Self::MakeReg => LANDLOCK_ACCESS_FS_MAKE_REG,
+            Self::MakeSock => LANDLOCK_ACCESS_FS_MAKE_SOCK,
+            Self::MakeFifo => LANDLOCK_ACCESS_FS_MAKE_FIFO,
+            Self::MakeBlock => LANDLOCK_ACCESS_FS_MAKE_BLOCK,
+            Self::MakeSym => LANDLOCK_ACCESS_FS_MAKE_SYM,
+            Self::Refer => LANDLOCK_ACCESS_FS_REFER,
+            Self::Truncate => LANDLOCK_ACCESS_FS_TRUNCATE,
+            Self::IoctlDev => LANDLOCK_ACCESS_FS_IOCTL_DEV,
+        }
+    }
+}
+
+impl LinuxLandlockAbiPlan {
+    fn for_host_abi(host_abi_version: Option<i64>) -> Self {
+        let effective_abi_version = landlock_effective_abi_version(host_abi_version);
+        let supported_access_mask = landlock_supported_access_mask_for_abi(effective_abi_version);
+        let supported_access = landlock_supported_access_for_abi(effective_abi_version);
+        let unsupported_access = vec![
+            LinuxLandlockAccess::MakeChar,
+            LinuxLandlockAccess::MakeSock,
+            LinuxLandlockAccess::MakeFifo,
+            LinuxLandlockAccess::MakeBlock,
+            LinuxLandlockAccess::MakeSym,
+            LinuxLandlockAccess::IoctlDev,
+        ];
+        let claim_boundary = match host_abi_version {
+            Some(abi) => format!(
+                "host Landlock ABI {abi} detected; Agentbox enforces the supported path-beneath subset up to ABI {effective_abi_version} and leaves unsupported file-type creation/ioctl rights explicit"
+            ),
+            None => "host Landlock ABI is not detectable on this platform; portable plan uses ABI v1 baseline rights and live Linux apply re-checks the host ABI".into(),
+        };
+
+        Self {
+            schema_version: 1,
+            host_abi_version,
+            effective_abi_version,
+            supported_access,
+            unsupported_access,
+            supported_access_mask,
+            claim_boundary,
         }
     }
 }
 
 impl LinuxLandlockPathPolicyPlan {
     pub fn runner_loader_scope() -> Self {
+        Self::runner_loader_scope_for_abi(&LinuxLandlockAbiPlan::for_host_abi(None))
+    }
+
+    fn runner_loader_scope_for_abi(abi: &LinuxLandlockAbiPlan) -> Self {
+        let refer_supported = abi.supported_access.contains(&LinuxLandlockAccess::Refer);
+        let truncate_supported = abi
+            .supported_access
+            .contains(&LinuxLandlockAccess::Truncate);
+        let refer_support = if refer_supported {
+            LinuxLandlockAccessClassSupport::Enforced
+        } else {
+            LinuxLandlockAccessClassSupport::UnsupportedByHostAbi
+        };
+        let truncate_support = if truncate_supported {
+            LinuxLandlockAccessClassSupport::Enforced
+        } else {
+            LinuxLandlockAccessClassSupport::UnsupportedByHostAbi
+        };
+        let mut current_scope =
+            "read/write/create/remove/execute path-beneath enforcement".to_string();
+        if refer_supported {
+            current_scope.push_str(" plus ABI v2 refer/rename mediation");
+        }
+        if truncate_supported {
+            current_scope.push_str(" plus ABI v3 truncate mediation");
+        }
+
         Self {
             schema_version: 1,
             access_classes: vec![
@@ -1007,6 +1168,7 @@ impl LinuxLandlockPathPolicyPlan {
                     class: "read".into(),
                     planned: true,
                     enforced_by_prototype_loader: true,
+                    support: LinuxLandlockAccessClassSupport::Enforced,
                     access: vec![LinuxLandlockAccess::ReadFile, LinuxLandlockAccess::ReadDir],
                     reason: "runner handles read-file/read-dir path-beneath access with explicit workspace, mount, and runtime support paths".into(),
                 },
@@ -1014,6 +1176,7 @@ impl LinuxLandlockPathPolicyPlan {
                     class: "execute".into(),
                     planned: true,
                     enforced_by_prototype_loader: true,
+                    support: LinuxLandlockAccessClassSupport::Enforced,
                     access: vec![LinuxLandlockAccess::Execute],
                     reason: "runner handles execute path-beneath access while allowing the command runtime paths needed after launcher sequencing".into(),
                 },
@@ -1021,6 +1184,7 @@ impl LinuxLandlockPathPolicyPlan {
                     class: "write".into(),
                     planned: true,
                     enforced_by_prototype_loader: true,
+                    support: LinuxLandlockAccessClassSupport::Enforced,
                     access: vec![LinuxLandlockAccess::WriteFile],
                     reason: "runner handles write-file path-beneath access".into(),
                 },
@@ -1028,6 +1192,7 @@ impl LinuxLandlockPathPolicyPlan {
                     class: "create".into(),
                     planned: true,
                     enforced_by_prototype_loader: true,
+                    support: LinuxLandlockAccessClassSupport::Enforced,
                     access: vec![LinuxLandlockAccess::MakeDir],
                     reason: "runner handles create access covered by ABI v1 make-dir and make-reg bits".into(),
                 },
@@ -1035,16 +1200,43 @@ impl LinuxLandlockPathPolicyPlan {
                     class: "remove".into(),
                     planned: true,
                     enforced_by_prototype_loader: true,
+                    support: LinuxLandlockAccessClassSupport::Enforced,
                     access: vec![
                         LinuxLandlockAccess::RemoveFile,
                         LinuxLandlockAccess::RemoveDir,
                     ],
                     reason: "runner handles remove-file and remove-dir path-beneath access".into(),
                 },
+                LinuxLandlockAccessClassPlan {
+                    class: "refer".into(),
+                    planned: true,
+                    enforced_by_prototype_loader: refer_supported,
+                    support: refer_support,
+                    access: vec![LinuxLandlockAccess::Refer],
+                    reason: if refer_supported {
+                        "runner grants ABI v2 refer right on writable workspace and read-write mounts so same-policy rename/link operations are mediated without silently falling back to ABI v1 behavior"
+                    } else {
+                        "host ABI does not expose Landlock refer right; cross-directory rename/link remains outside this prototype loader except for ABI v1 kernel defaults"
+                    }
+                    .into(),
+                },
+                LinuxLandlockAccessClassPlan {
+                    class: "truncate".into(),
+                    planned: true,
+                    enforced_by_prototype_loader: truncate_supported,
+                    support: truncate_support,
+                    access: vec![LinuxLandlockAccess::Truncate],
+                    reason: if truncate_supported {
+                        "runner grants ABI v3 truncate right on writable workspace and read-write mounts so O_TRUNC, truncate(2), and ftruncate(2) are mediated by Landlock"
+                    } else {
+                        "host ABI does not expose Landlock truncate right; truncation cannot be denied by Landlock before ABI v3"
+                    }
+                    .into(),
+                },
             ],
-            current_loader_scope: "read/write/create/remove/execute path-beneath enforcement".into(),
+            current_loader_scope: current_scope,
             claim_boundary:
-                "Landlock ABI v1 filesystem path-beneath enforcement only; runtime support paths are explicitly allowed and this is not a complete sandbox"
+                "Landlock path-beneath enforcement is ABI-aware but still a supported subset; runtime support paths are explicitly allowed, this is not complete filesystem mediation, and this is not a complete sandbox"
                     .into(),
         }
     }
@@ -1058,24 +1250,36 @@ pub struct LinuxLandlockRuleset;
 
 impl LinuxLandlockRuleset {
     pub fn plan(spec: &MinipodSpec) -> Result<LinuxLandlockPlan, RuntimeError> {
+        Self::plan_for_host_abi(spec, linux_landlock_detected_host_abi_version())
+    }
+
+    fn plan_for_host_abi(
+        spec: &MinipodSpec,
+        host_abi_version: Option<i64>,
+    ) -> Result<LinuxLandlockPlan, RuntimeError> {
         if spec.filesystem.workspace_host_path.as_os_str().is_empty() {
             return Err(RuntimeError::ManifestRejected(
                 "landlock workspace path cannot be empty".into(),
             ));
         }
 
+        let abi = LinuxLandlockAbiPlan::for_host_abi(host_abi_version);
+        let mut workspace_access = vec![
+            LinuxLandlockAccess::ReadFile,
+            LinuxLandlockAccess::ReadDir,
+            LinuxLandlockAccess::WriteFile,
+            LinuxLandlockAccess::MakeDir,
+            LinuxLandlockAccess::RemoveFile,
+            LinuxLandlockAccess::RemoveDir,
+            LinuxLandlockAccess::Execute,
+        ];
+        extend_landlock_mutating_access_for_abi(&mut workspace_access, &abi);
+
         let mut rules = vec![linux_landlock_rule(
             spec.filesystem.workspace_host_path.display().to_string(),
-            vec![
-                LinuxLandlockAccess::ReadFile,
-                LinuxLandlockAccess::ReadDir,
-                LinuxLandlockAccess::WriteFile,
-                LinuxLandlockAccess::MakeDir,
-                LinuxLandlockAccess::RemoveFile,
-                LinuxLandlockAccess::RemoveDir,
-                LinuxLandlockAccess::Execute,
-            ],
+            workspace_access,
             "task workspace is the writable execution boundary",
+            abi.supported_access_mask,
             false,
         )];
 
@@ -1092,21 +1296,26 @@ impl LinuxLandlockRuleset {
                     LinuxLandlockAccess::RemoveFile,
                     LinuxLandlockAccess::RemoveDir,
                 ]);
+                extend_landlock_mutating_access_for_abi(&mut access, &abi);
             }
             rules.push(linux_landlock_rule(
                 mount.host_path.display().to_string(),
                 access,
                 format!("explicit {:?} mount", mount.kind),
+                abi.supported_access_mask,
                 false,
             ));
         }
-        rules.extend(linux_landlock_runtime_support_rules());
+        rules.extend(linux_landlock_runtime_support_rules(
+            abi.supported_access_mask,
+        ));
 
         Ok(LinuxLandlockPlan {
             schema_version: 1,
             ruleset_name: format!("agentbox-{}", spec.id),
-            path_policy: LinuxLandlockPathPolicyPlan::runner_loader_scope(),
-            handled_access_mask: landlock_handled_access_mask(&rules),
+            path_policy: LinuxLandlockPathPolicyPlan::runner_loader_scope_for_abi(&abi),
+            handled_access_mask: landlock_handled_access_mask(&rules, abi.supported_access_mask),
+            abi,
             rules,
             default_deny: true,
             requires_loader: true,
@@ -1135,34 +1344,34 @@ impl LinuxLandlockRuleset {
     }
 }
 
-fn landlock_access_mask(access: &[LinuxLandlockAccess]) -> u64 {
+fn landlock_access_mask(access: &[LinuxLandlockAccess], supported_mask: u64) -> u64 {
     access
         .iter()
         .fold(0, |mask, access| mask | access.access_mask())
-        & LANDLOCK_ABI_V1_FS_ACCESS_MASK
+        & supported_mask
 }
 
-fn landlock_handled_access_mask(rules: &[LinuxLandlockRule]) -> u64 {
-    rules.iter().fold(0, |mask, rule| mask | rule.access_mask)
-        & LANDLOCK_AGENTPOD_HANDLED_FS_ACCESS_MASK
+fn landlock_handled_access_mask(rules: &[LinuxLandlockRule], supported_mask: u64) -> u64 {
+    rules.iter().fold(0, |mask, rule| mask | rule.access_mask) & supported_mask
 }
 
 fn linux_landlock_rule(
     path: impl Into<String>,
     access: Vec<LinuxLandlockAccess>,
     reason: impl Into<String>,
+    supported_mask: u64,
     optional: bool,
 ) -> LinuxLandlockRule {
     LinuxLandlockRule {
         path: path.into(),
-        access_mask: landlock_access_mask(&access),
+        access_mask: landlock_access_mask(&access, supported_mask),
         access,
         reason: reason.into(),
         optional,
     }
 }
 
-fn linux_landlock_runtime_support_rules() -> Vec<LinuxLandlockRule> {
+fn linux_landlock_runtime_support_rules(supported_mask: u64) -> Vec<LinuxLandlockRule> {
     let read_execute = vec![
         LinuxLandlockAccess::ReadFile,
         LinuxLandlockAccess::ReadDir,
@@ -1186,6 +1395,7 @@ fn linux_landlock_runtime_support_rules() -> Vec<LinuxLandlockRule> {
             path,
             read_execute.clone(),
             "optional command runtime read/execute support path",
+            supported_mask,
             true,
         ));
     }
@@ -1193,12 +1403,14 @@ fn linux_landlock_runtime_support_rules() -> Vec<LinuxLandlockRule> {
         "/proc",
         read_only,
         "optional procfs read support for runner and diagnostics",
+        supported_mask,
         true,
     ));
     rules.push(linux_landlock_rule(
         "/etc/ld.so.cache",
         file_read_only,
         "optional dynamic loader cache read support",
+        supported_mask,
         true,
     ));
     rules
@@ -1334,6 +1546,16 @@ fn linux_landlock_abi_version() -> Result<i64, Box<dyn std::error::Error + Send 
     } else {
         Err(std::io::Error::last_os_error().into())
     }
+}
+
+#[cfg(target_os = "linux")]
+fn linux_landlock_detected_host_abi_version() -> Option<i64> {
+    linux_landlock_abi_version().ok()
+}
+
+#[cfg(not(target_os = "linux"))]
+fn linux_landlock_detected_host_abi_version() -> Option<i64> {
+    None
 }
 
 #[cfg(target_os = "linux")]
@@ -3133,6 +3355,9 @@ mod tests {
         std::fs::create_dir_all(&outside).unwrap();
         std::fs::write(workspace.join("allowed-read"), "read-ok").unwrap();
         std::fs::write(outside.join("denied-read"), "read-no").unwrap();
+        std::fs::write(workspace.join("rename-src"), "rename-ok").unwrap();
+        std::fs::create_dir_all(workspace.join("rename-dst")).unwrap();
+        std::fs::write(workspace.join("truncate-allowed"), "truncate-before").unwrap();
         std::fs::write(
             workspace.join("allowed-exec"),
             "#!/bin/sh\nprintf allowed-exec\n",
@@ -3172,11 +3397,22 @@ if printf no > "$OUTSIDE/write-denied"; then
   echo "write denial failed"
   exit 15
 fi
+if [ "$LANDLOCK_ABI" -ge 2 ]; then
+  mv "$WORKSPACE/rename-src" "$WORKSPACE/rename-dst/moved" || exit 16
+  if mv "$OUTSIDE/denied-read" "$WORKSPACE/denied-move"; then
+    echo "rename denial failed"
+    exit 17
+  fi
+fi
+if [ "$LANDLOCK_ABI" -ge 3 ]; then
+  printf truncated > "$WORKSPACE/truncate-allowed" || exit 18
+fi
 printf landlock-policy-ok
 "#,
             )
             .env("WORKSPACE", &workspace)
             .env("OUTSIDE", &outside)
+            .env("LANDLOCK_ABI", plan.abi.effective_abi_version.to_string())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
         configure_linux_child_security(&mut command, None, Some(&plan)).unwrap();
@@ -3200,6 +3436,19 @@ printf landlock-policy-ok
             std::fs::read_to_string(workspace.join("write-allowed")).unwrap(),
             "ok"
         );
+        if plan.abi.effective_abi_version >= 2 {
+            assert_eq!(
+                std::fs::read_to_string(workspace.join("rename-dst/moved")).unwrap(),
+                "rename-ok"
+            );
+            assert!(!workspace.join("denied-move").exists());
+        }
+        if plan.abi.effective_abi_version >= 3 {
+            assert_eq!(
+                std::fs::read_to_string(workspace.join("truncate-allowed")).unwrap(),
+                "truncated"
+            );
+        }
         assert!(!outside.join("write-denied").exists());
 
         let _ = std::fs::remove_dir_all(root);
@@ -3900,14 +4149,165 @@ printf landlock-policy-ok
             .unwrap();
         assert!(runtime_rule.optional);
         assert!(runtime_rule.access.contains(&LinuxLandlockAccess::Execute));
-        assert_eq!(
-            plan.handled_access_mask,
-            LANDLOCK_AGENTPOD_HANDLED_FS_ACCESS_MASK
-        );
+        assert_eq!(plan.handled_access_mask, plan.abi.supported_access_mask);
         assert_eq!(
             plan.handled_access_mask & LANDLOCK_ACCESS_FS_EXECUTE,
             LANDLOCK_ACCESS_FS_EXECUTE
         );
+    }
+
+    #[test]
+    fn landlock_plan_reflects_host_abi_for_rename_and_truncate_rights() {
+        let spec = MinipodSpec::for_agent_task("hermes", "/tmp/agentbox-work");
+
+        let abi_v1_plan = LinuxLandlockRuleset::plan_for_host_abi(&spec, Some(1)).unwrap();
+        assert_eq!(abi_v1_plan.abi.effective_abi_version, 1);
+        assert!(!abi_v1_plan
+            .abi
+            .supported_access
+            .contains(&LinuxLandlockAccess::Refer));
+        assert!(!abi_v1_plan
+            .abi
+            .supported_access
+            .contains(&LinuxLandlockAccess::Truncate));
+        let v1_workspace = abi_v1_plan
+            .rules
+            .iter()
+            .find(|rule| rule.path == "/tmp/agentbox-work")
+            .unwrap();
+        assert!(!v1_workspace.access.contains(&LinuxLandlockAccess::Refer));
+        assert!(!v1_workspace.access.contains(&LinuxLandlockAccess::Truncate));
+
+        let abi_v2_plan = LinuxLandlockRuleset::plan_for_host_abi(&spec, Some(2)).unwrap();
+        assert_eq!(abi_v2_plan.abi.effective_abi_version, 2);
+        assert!(abi_v2_plan
+            .abi
+            .supported_access
+            .contains(&LinuxLandlockAccess::Refer));
+        assert!(!abi_v2_plan
+            .abi
+            .supported_access
+            .contains(&LinuxLandlockAccess::Truncate));
+        let v2_workspace = abi_v2_plan
+            .rules
+            .iter()
+            .find(|rule| rule.path == "/tmp/agentbox-work")
+            .unwrap();
+        assert!(v2_workspace.access.contains(&LinuxLandlockAccess::Refer));
+        assert_eq!(
+            v2_workspace.access_mask & LANDLOCK_ACCESS_FS_REFER,
+            LANDLOCK_ACCESS_FS_REFER
+        );
+        assert!(!v2_workspace.access.contains(&LinuxLandlockAccess::Truncate));
+
+        let abi_v3_plan = LinuxLandlockRuleset::plan_for_host_abi(&spec, Some(3)).unwrap();
+        assert_eq!(abi_v3_plan.abi.effective_abi_version, 3);
+        assert!(abi_v3_plan
+            .abi
+            .supported_access
+            .contains(&LinuxLandlockAccess::Refer));
+        assert!(abi_v3_plan
+            .abi
+            .supported_access
+            .contains(&LinuxLandlockAccess::Truncate));
+        let v3_workspace = abi_v3_plan
+            .rules
+            .iter()
+            .find(|rule| rule.path == "/tmp/agentbox-work")
+            .unwrap();
+        assert!(v3_workspace.access.contains(&LinuxLandlockAccess::Refer));
+        assert!(v3_workspace.access.contains(&LinuxLandlockAccess::Truncate));
+        assert_eq!(
+            v3_workspace.access_mask & LANDLOCK_ACCESS_FS_TRUNCATE,
+            LANDLOCK_ACCESS_FS_TRUNCATE
+        );
+
+        let refer = abi_v3_plan
+            .path_policy
+            .access_classes
+            .iter()
+            .find(|class| class.class == "refer")
+            .unwrap();
+        assert!(refer.planned);
+        assert!(refer.enforced_by_prototype_loader);
+        let truncate = abi_v3_plan
+            .path_policy
+            .access_classes
+            .iter()
+            .find(|class| class.class == "truncate")
+            .unwrap();
+        assert!(truncate.planned);
+        assert!(truncate.enforced_by_prototype_loader);
+    }
+
+    #[test]
+    fn landlock_runtime_support_paths_do_not_receive_write_refer_or_truncate_rights() {
+        let spec = MinipodSpec::for_agent_task("hermes", "/tmp/agentbox-work");
+
+        let plan = LinuxLandlockRuleset::plan_for_host_abi(&spec, Some(3)).unwrap();
+
+        for rule in plan.rules.iter().filter(|rule| rule.optional) {
+            assert!(
+                !rule.access.contains(&LinuxLandlockAccess::WriteFile),
+                "{} unexpectedly grants write",
+                rule.path
+            );
+            assert!(
+                !rule.access.contains(&LinuxLandlockAccess::MakeDir),
+                "{} unexpectedly grants create",
+                rule.path
+            );
+            assert!(
+                !rule.access.contains(&LinuxLandlockAccess::RemoveFile),
+                "{} unexpectedly grants remove",
+                rule.path
+            );
+            assert!(
+                !rule.access.contains(&LinuxLandlockAccess::Refer),
+                "{} unexpectedly grants refer",
+                rule.path
+            );
+            assert!(
+                !rule.access.contains(&LinuxLandlockAccess::Truncate),
+                "{} unexpectedly grants truncate",
+                rule.path
+            );
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn landlock_prepare_skips_missing_optional_runtime_paths() {
+        if let Err(err) = linux_landlock_abi_version() {
+            eprintln!("skipping Landlock optional path proof: {err}");
+            return;
+        }
+
+        let root = std::env::temp_dir().join(format!(
+            "agentbox-landlock-optional-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let workspace = root.join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+
+        let spec = MinipodSpec::for_agent_task("hermes", &workspace);
+        let mut plan = LinuxLandlockRuleset::plan_for_host_abi(&spec, Some(3)).unwrap();
+        plan.rules.push(linux_landlock_rule(
+            root.join("missing-runtime-path").display().to_string(),
+            vec![LinuxLandlockAccess::ReadFile, LinuxLandlockAccess::ReadDir],
+            "optional missing runtime path fixture",
+            plan.abi.supported_access_mask,
+            true,
+        ));
+
+        let prepared = prepare_linux_landlock_ruleset(&plan).unwrap();
+
+        assert!(prepared.is_some());
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

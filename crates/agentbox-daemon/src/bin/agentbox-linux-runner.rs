@@ -382,6 +382,15 @@ mod tests {
             landlock: agentbox_daemon::runtime::providers::linux::LinuxLandlockPlan {
                 schema_version: 1,
                 ruleset_name: "test".into(),
+                abi: agentbox_daemon::runtime::providers::linux::LinuxLandlockAbiPlan {
+                    schema_version: 1,
+                    host_abi_version: None,
+                    effective_abi_version: 1,
+                    supported_access: vec![LinuxLandlockAccess::WriteFile],
+                    unsupported_access: Vec::new(),
+                    supported_access_mask: 1,
+                    claim_boundary: "test".into(),
+                },
                 rules: vec![LinuxLandlockRule {
                     path: "/tmp/agentbox-work".into(),
                     access: vec![LinuxLandlockAccess::WriteFile],

@@ -298,8 +298,9 @@ enforcement. Linux AgentPod work has started with user, mount, PID namespace,
 cgroups v2, no-new-privs, seccomp profile, and Landlock filesystem primitives,
 plus a gated prototype executor with a narrow BPF seccomp loader for supported
 generated or imported OCI/libseccomp subset syscall deny rules, a coarse
-connect-deny network guard for deny-all Linux network modes, and a
-read/write/execute Landlock path-beneath loader. macOS
+connect-deny network guard for deny-all Linux network modes, and an ABI-aware
+Landlock path-beneath loader for the supported read/write/create/remove/execute
+plus host-supported `REFER` and `TRUNCATE` subset. macOS
 AgentPod now has a native plan compiler for the Apple Virtualization, Endpoint
 Security, Network Extension, entitlement, host bridge, and evidence surfaces,
 but provider execution remains unavailable until live runner and enforcement

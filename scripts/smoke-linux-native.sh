@@ -37,7 +37,8 @@ command_string="${AGENTBOX_LINUX_NATIVE_COMMAND:-/bin/true}"
 timeout_seconds="${AGENTBOX_LINUX_NATIVE_TIMEOUT_SECONDS:-30}"
 runner_binary="${AGENTBOX_LINUX_RUNNER:-$(pwd)/target/debug/agentbox-linux-runner}"
 seccomp_profile="$(mktemp)"
-trap 'rm -f "$seccomp_profile"' EXIT
+plan_json="$(mktemp)"
+trap 'rm -f "$seccomp_profile" "$plan_json"' EXIT
 
 case "$(uname -m)" in
   x86_64 | amd64)
@@ -83,17 +84,35 @@ echo "runner=$AGENTBOX_LINUX_RUNNER"
 cargo run -q -p agentbox-cli -- native-plan \
   --provider agentpod-linux \
   --workspace "$workspace" \
-  -- $command_string |
-  jq -e '
+  -- $command_string >"$plan_json"
+
+jq -e '
     .provider == "agentpod-linux"
     and .live_env_var == "AGENTBOX_LINUX_NATIVE"
-    and .landlock.handled_access_mask == 447
+    and .landlock.handled_access_mask == .landlock.abi.supported_access_mask
+    and (.landlock.abi.effective_abi_version >= 1)
+    and (.landlock.abi.supported_access | index("ReadFile") != null)
+    and (.landlock.abi.supported_access | index("WriteFile") != null)
+    and (.landlock.abi.supported_access | index("Execute") != null)
+    and (.landlock.abi.unsupported_access | index("IoctlDev") != null)
+    and (if .landlock.abi.effective_abi_version >= 2 then
+      (.landlock.abi.supported_access | index("Refer") != null)
+    else
+      (.landlock.abi.supported_access | index("Refer") == null)
+    end)
+    and (if .landlock.abi.effective_abi_version >= 3 then
+      (.landlock.abi.supported_access | index("Truncate") != null)
+    else
+      (.landlock.abi.supported_access | index("Truncate") == null)
+    end)
     and .mount_namespace.workspace_bind_mount_wired == true
     and (.mount_namespace.workspace_mount_claim | contains("agentbox-linux-runner"))
     and any(.runner_phases[]; .name == "bind-workspace" and .status == "prototype")
     and any(.runner_phases[]; .name == "apply-landlock" and .status == "prototype")
     and (.security_claim | contains("runner-managed workspace mount"))
-  ' >/dev/null
+  ' "$plan_json" >/dev/null
+
+landlock_effective_abi="$(jq -r '.landlock.abi.effective_abi_version' "$plan_json")"
 
 (
   cd "$workspace"
@@ -130,7 +149,7 @@ fi
 
 proof_outside="$(mktemp -d)"
 parallel_root=""
-trap 'rm -rf "$proof_outside" "$parallel_root"; rm -f "$seccomp_profile"' EXIT
+trap 'rm -rf "$proof_outside" "$parallel_root"; rm -f "$seccomp_profile" "$plan_json"' EXIT
 proof_policy_dir="$workspace/agentbox-landlock-policy"
 mkdir -p "$proof_policy_dir"
 proof_read_allowed="$proof_policy_dir/allowed-read"
@@ -139,8 +158,14 @@ proof_exec_allowed="$proof_policy_dir/allowed-exec"
 proof_exec_denied="$proof_outside/denied-exec"
 proof_write_allowed="$proof_policy_dir/allowed-write"
 proof_write_denied="$proof_outside/denied-write"
+proof_rename_src="$proof_policy_dir/rename-src"
+proof_rename_dir="$proof_policy_dir/rename-dst"
+proof_truncate_allowed="$proof_policy_dir/truncate-allowed"
 printf 'read-ok' >"$proof_read_allowed"
 printf 'read-no' >"$proof_read_denied"
+printf 'rename-ok' >"$proof_rename_src"
+mkdir -p "$proof_rename_dir"
+printf 'truncate-before' >"$proof_truncate_allowed"
 cat >"$proof_exec_allowed" <<'EOF'
 #!/bin/sh
 printf allowed-exec
@@ -176,15 +201,29 @@ proof_output="$(
         echo "write denial failed"
         exit 15
       fi
+      abi="$8"
+      rename_src="$9"
+      rename_dir="${10}"
+      truncate_allowed="${11}"
+      if [ "$abi" -ge 2 ]; then
+        mv "$rename_src" "$rename_dir/moved" || exit 16
+        if mv "$2" "$7/denied-move"; then
+          echo "rename denial failed"
+          exit 17
+        fi
+      fi
+      if [ "$abi" -ge 3 ]; then
+        printf truncated > "$truncate_allowed" || exit 18
+      fi
       printf "landlock-policy-ok\n"
-    ' sh "$proof_read_allowed" "$proof_read_denied" "$proof_exec_allowed" "$proof_exec_denied" "$proof_write_allowed" "$proof_write_denied" "$proof_policy_dir" 2>&1
+    ' sh "$proof_read_allowed" "$proof_read_denied" "$proof_exec_allowed" "$proof_exec_denied" "$proof_write_allowed" "$proof_write_denied" "$proof_policy_dir" "$landlock_effective_abi" "$proof_rename_src" "$proof_rename_dir" "$proof_truncate_allowed" 2>&1
 )"
 proof_status=$?
 set -e
 
 if [[ "$proof_status" -ne 0 ]]; then
   printf '%s\n' "$proof_output" >&2
-  echo "expected Linux Landlock read/write/execute proof command to succeed after observing denials" >&2
+  echo "expected Linux Landlock ABI-aware proof command to succeed after observing denials" >&2
   exit 1
 fi
 if [[ "$proof_output" != *"read-ok"* || "$proof_output" != *"landlock-policy-ok"* ]]; then
@@ -205,6 +244,23 @@ fi
 if [[ -e "$proof_write_denied" ]]; then
   printf '%s\n' "$proof_output" >&2
   echo "expected Linux Landlock proof command to deny outside-workspace write" >&2
+  exit 1
+fi
+if [[ "$landlock_effective_abi" -ge 2 ]]; then
+  if [[ "$(cat "$proof_rename_dir/moved")" != "rename-ok" ]]; then
+    printf '%s\n' "$proof_output" >&2
+    echo "expected Linux Landlock proof command to allow ABI v2 same-workspace rename" >&2
+    exit 1
+  fi
+  if [[ -e "$proof_policy_dir/denied-move" ]]; then
+    printf '%s\n' "$proof_output" >&2
+    echo "expected Linux Landlock proof command to deny outside-to-workspace rename" >&2
+    exit 1
+  fi
+fi
+if [[ "$landlock_effective_abi" -ge 3 && "$(cat "$proof_truncate_allowed")" != "truncated" ]]; then
+  printf '%s\n' "$proof_output" >&2
+  echo "expected Linux Landlock proof command to allow ABI v3 workspace truncate" >&2
   exit 1
 fi
 
@@ -256,7 +312,7 @@ fi
 
 overlay_workspace="$(mktemp -d)"
 overlay_base="$(mktemp -d)"
-trap 'rm -rf "$proof_outside" "$parallel_root" "$overlay_workspace" "$overlay_base"; rm -f "$seccomp_profile"' EXIT
+trap 'rm -rf "$proof_outside" "$parallel_root" "$overlay_workspace" "$overlay_base"; rm -f "$seccomp_profile" "$plan_json"' EXIT
 printf 'base\n' >"$overlay_workspace/base.txt"
 
 set +e

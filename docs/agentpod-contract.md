@@ -82,13 +82,18 @@ cgroup v2 resource writes, seccomp profile metadata, and Landlock ruleset
 metadata into one object. The gated executor also sets `PR_SET_NO_NEW_PRIVS`
 before exec and can install a prototype BPF seccomp filter for supported
 syscall deny rules, a gated coarse connect-deny network guard for deny-all
-network modes, and a prototype read/write/execute Landlock path-beneath
-filesystem ruleset. The network guard proves process-level `connect(2)` denial
+network modes, and an ABI-aware Landlock path-beneath filesystem ruleset for
+the supported read/write/create/remove/execute subset plus host-supported
+`REFER` rename/link and `TRUNCATE` mediation. The network guard proves
+process-level `connect(2)` denial
 only; domain allowlists and packet firewall semantics still require a later
 nftables/eBPF bridge. The Landlock loader carries explicit workspace, mount,
 guest alias, and runtime support paths so launcher binaries, dynamic loaders,
 host libraries, and diagnostics can run without pretending to be a complete
-filesystem sandbox. The
+filesystem sandbox. Unsupported Landlock filesystem rights remain explicit
+non-claims: character/socket/FIFO/block/symlink creation, device `ioctl`
+mediation, Landlock network/scoped features, and newer rights not surfaced in
+the native plan are not claimed as enforced. The
 executor invokes `agentbox-linux-runner` inside `unshare`; the runner bind-mounts
 the host workspace at the guest workspace path for direct workspace mode, or
 mounts an overlayfs review workspace when the manifest carries upper/work

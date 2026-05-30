@@ -36,7 +36,30 @@ assert plan["provider"] == "agentpod-linux"
 assert plan["live_env_var"] == "AGENTBOX_LINUX_NATIVE"
 assert plan["live_execution_enabled"] is False
 assert plan["mount_namespace"]["workspace_bind_mount_wired"] is True
-assert plan["landlock"]["handled_access_mask"] == 447
+landlock = plan["landlock"]
+abi = landlock["abi"]
+supported = set(abi["supported_access"])
+unsupported = set(abi["unsupported_access"])
+classes = {item["class"]: item for item in landlock["path_policy"]["access_classes"]}
+assert abi["effective_abi_version"] >= 1
+assert landlock["handled_access_mask"] == abi["supported_access_mask"]
+assert {"ReadFile", "ReadDir", "WriteFile", "MakeDir", "MakeReg", "RemoveFile", "RemoveDir", "Execute"} <= supported
+assert {"MakeChar", "MakeSock", "MakeFifo", "MakeBlock", "MakeSym", "IoctlDev"} <= unsupported
+assert classes["read"]["support"] == "Enforced"
+assert classes["write"]["support"] == "Enforced"
+assert classes["execute"]["support"] == "Enforced"
+if abi["effective_abi_version"] >= 2:
+    assert "Refer" in supported
+    assert classes["refer"]["support"] == "Enforced"
+else:
+    assert "Refer" not in supported
+    assert classes["refer"]["support"] == "UnsupportedByHostAbi"
+if abi["effective_abi_version"] >= 3:
+    assert "Truncate" in supported
+    assert classes["truncate"]["support"] == "Enforced"
+else:
+    assert "Truncate" not in supported
+    assert classes["truncate"]["support"] == "UnsupportedByHostAbi"
 assert plan["network_enforcement"]["env_var"] == "AGENTBOX_LINUX_NETWORK_GUARD"
 assert plan["nftables"]["live_gate"]["env_var"] == "AGENTBOX_LINUX_NFTABLES"
 assert any(
