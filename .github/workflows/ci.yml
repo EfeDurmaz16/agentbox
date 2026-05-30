@@ -53,6 +53,7 @@ jobs:
           cargo run --locked -p agentbox-cli -- minipod-spec hermes --workspace .
           bash scripts/smoke-cli-contracts.sh
           bash scripts/smoke-remote-worker.sh
+          AGENTBOX_PODMAN_LIFECYCLE_CONTRACT_ONLY=1 bash scripts/smoke-podman-lifecycle.sh
 
       - name: Live-test skip script syntax
         run: |
@@ -65,4 +66,5 @@ jobs:
           bash -n scripts/smoke-remote-worker.sh
           bash -n scripts/smoke-macos-minipod.sh
           bash -n scripts/smoke-podman-bridge.sh
+          bash -n scripts/smoke-podman-lifecycle.sh
           bash -n scripts/release-readiness.sh
