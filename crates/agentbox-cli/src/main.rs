@@ -997,6 +997,62 @@ enum AgentPodCommands {
         #[arg(long = "deny-localhost")]
         deny_localhost: bool,
     },
+    /// Explain how Agentbox would run a command without executing it
+    Explain {
+        /// Runtime provider: auto, direct-host, podman, agentpod-macos, agentpod-linux, agentpod-windows, remote-agentpod
+        #[arg(long = "provider", default_value = "auto")]
+        provider: String,
+
+        /// AgentPod task risk: low, medium, high, very-high
+        #[arg(long = "risk", default_value = "medium")]
+        risk: String,
+
+        /// Workspace write mode: direct, overlay-review, ephemeral, commit-gated
+        #[arg(long = "workspace-mode")]
+        workspace_mode: Option<String>,
+
+        /// Agent policy profile (general, coding, research, deploy, or custom)
+        #[arg(long = "agent-profile", default_value = "general")]
+        agent_profile: String,
+
+        /// Emit machine-readable JSON for the explanation
+        #[arg(long)]
+        json: bool,
+
+        /// Command to explain; use `--` before command flags
+        command: Vec<String>,
+    },
+    /// Show AgentPod operator status or inspect a single session
+    Status {
+        /// Session id to inspect; omit to list persisted sessions
+        session_id: Option<String>,
+
+        /// Emit JSON
+        #[arg(long)]
+        json: bool,
+
+        /// Refresh the session list until interrupted
+        #[arg(long)]
+        watch: bool,
+
+        /// Watch refresh interval in seconds
+        #[arg(long = "interval-seconds", default_value_t = 2)]
+        interval_seconds: u64,
+
+        /// Filter by provider
+        #[arg(long)]
+        provider: Option<String>,
+
+        /// Filter by status substring, e.g. running, stopped, failed
+        #[arg(long)]
+        status: Option<String>,
+    },
+    /// Run Agentbox environment diagnostics
+    Doctor {
+        /// Emit JSON
+        #[arg(long)]
+        json: bool,
+    },
     /// List persisted AgentPod sessions
     List {
         /// Emit JSON
@@ -8822,6 +8878,59 @@ async fn main() {
                 provider,
                 status,
             } => cmd_pods(json, watch, interval_seconds, provider, status).await,
+            AgentPodCommands::Status {
+                session_id,
+                json,
+                watch,
+                interval_seconds,
+                provider,
+                status,
+            } => {
+                if session_id.is_some() {
+                    cmd_minipod_inspect(session_id, json)
+                } else {
+                    cmd_pods(json, watch, interval_seconds, provider, status).await
+                }
+            }
+            AgentPodCommands::Doctor { json } => cmd_doctor(json),
+            AgentPodCommands::Explain {
+                provider,
+                risk,
+                workspace_mode,
+                agent_profile,
+                json,
+                command,
+            } => {
+                cmd_run(RunOptions {
+                    command,
+                    runtime: None,
+                    agent_profile,
+                    risk,
+                    provider,
+                    plan: true,
+                    json,
+                    services: Vec::new(),
+                    mount_cwd: true,
+                    workspace_mode,
+                    workspace_overlay_dir: None,
+                    memory: 1024,
+                    max_processes: None,
+                    timeout_seconds: None,
+                    deny_syscalls: Vec::new(),
+                    read_only_mounts: Vec::new(),
+                    credential_files: Vec::new(),
+                    credential_env: Vec::new(),
+                    credential_sockets: Vec::new(),
+                    credential_tokens: Vec::new(),
+                    credential_ttl_seconds: None,
+                    policy_bundles: Vec::new(),
+                    allow_domains: Vec::new(),
+                    network_mode: None,
+                    deny_domains: Vec::new(),
+                    deny_localhost: false,
+                })
+                .await
+            }
             AgentPodCommands::Inspect { session_id, json } => cmd_minipod_inspect(session_id, json),
             AgentPodCommands::Evidence {
                 limit,
@@ -10723,6 +10832,126 @@ mod tests {
             assert!(plan);
             assert!(json);
             assert_eq!(risk, "low");
+            assert_eq!(command, vec!["echo", "contract"]);
+        });
+    }
+
+    #[test]
+    fn agentpod_status_alias_parses_list_and_inspect_modes() {
+        run_cli_parse_test(|| {
+            let list_cli = Cli::try_parse_from([
+                "agentbox",
+                "agentpod",
+                "status",
+                "--json",
+                "--provider",
+                "direct-host",
+                "--status",
+                "running",
+                "--interval-seconds",
+                "5",
+            ])
+            .unwrap();
+
+            let Commands::Agentpod {
+                command:
+                    AgentPodCommands::Status {
+                        session_id: None,
+                        json,
+                        provider,
+                        status,
+                        interval_seconds,
+                        ..
+                    },
+            } = list_cli.command
+            else {
+                panic!("expected agentpod status list command");
+            };
+
+            assert!(json);
+            assert_eq!(provider.as_deref(), Some("direct-host"));
+            assert_eq!(status.as_deref(), Some("running"));
+            assert_eq!(interval_seconds, 5);
+
+            let inspect_cli =
+                Cli::try_parse_from(["agentbox", "agentpod", "status", "session-123", "--json"])
+                    .unwrap();
+
+            let Commands::Agentpod {
+                command:
+                    AgentPodCommands::Status {
+                        session_id: Some(session_id),
+                        json,
+                        ..
+                    },
+            } = inspect_cli.command
+            else {
+                panic!("expected agentpod status inspect command");
+            };
+
+            assert_eq!(session_id, "session-123");
+            assert!(json);
+        });
+    }
+
+    #[test]
+    fn agentpod_doctor_alias_parses_json_flag() {
+        run_cli_parse_test(|| {
+            let cli = Cli::try_parse_from(["agentbox", "agentpod", "doctor", "--json"]).unwrap();
+
+            let Commands::Agentpod {
+                command: AgentPodCommands::Doctor { json },
+            } = cli.command
+            else {
+                panic!("expected agentpod doctor command");
+            };
+
+            assert!(json);
+        });
+    }
+
+    #[test]
+    fn agentpod_explain_alias_parses_as_run_plan() {
+        run_cli_parse_test(|| {
+            let cli = Cli::try_parse_from([
+                "agentbox",
+                "agentpod",
+                "explain",
+                "--json",
+                "--provider",
+                "agentpod-linux",
+                "--risk",
+                "high",
+                "--workspace-mode",
+                "overlay-review",
+                "--agent-profile",
+                "coding",
+                "--",
+                "echo",
+                "contract",
+            ])
+            .unwrap();
+
+            let Commands::Agentpod {
+                command:
+                    AgentPodCommands::Explain {
+                        json,
+                        provider,
+                        risk,
+                        workspace_mode,
+                        agent_profile,
+                        command,
+                    },
+            } = cli.command
+            else {
+                panic!("expected agentpod explain command");
+            };
+
+            assert!(json);
+            assert_eq!(provider, "agentpod-linux");
+            assert_eq!(risk, "high");
+            assert_eq!(workspace_mode.as_deref(), Some("overlay-review"));
+            assert_eq!(agent_profile, "coding");
             assert_eq!(command, vec!["echo", "contract"]);
         });
     }

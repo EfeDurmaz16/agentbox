@@ -204,9 +204,15 @@ log "checking AgentPod grouped CLI aliases"
 grep -F "First-class AgentPod lifecycle commands" "$TMPDIR/agentpod-help.txt" >/dev/null
 grep -F "run" "$TMPDIR/agentpod-help.txt" >/dev/null
 grep -F "list" "$TMPDIR/agentpod-help.txt" >/dev/null
+grep -F "status" "$TMPDIR/agentpod-help.txt" >/dev/null
+grep -F "explain" "$TMPDIR/agentpod-help.txt" >/dev/null
+grep -F "doctor" "$TMPDIR/agentpod-help.txt" >/dev/null
 grep -F "review" "$TMPDIR/agentpod-help.txt" >/dev/null
 "${CLI[@]}" agentpod list --json >"$TMPDIR/agentpod-list.json"
 validate_json "$TMPDIR/agentpod-list.json" \
+  "data == [] or all(item.get('id') and item.get('provider') for item in data)"
+"${CLI[@]}" agentpod status --json >"$TMPDIR/agentpod-status.json"
+validate_json "$TMPDIR/agentpod-status.json" \
   "data == [] or all(item.get('id') and item.get('provider') for item in data)"
 "${CLI[@]}" agentpod inspect --help >"$TMPDIR/agentpod-inspect-help.txt"
 grep -F "Inspect persisted minipod session metadata" "$TMPDIR/agentpod-inspect-help.txt" >/dev/null
@@ -215,6 +221,18 @@ grep -F "Export tamper-evident audit events as JSONL" "$TMPDIR/agentpod-evidence
 "${CLI[@]}" agentpod run --plan --json -- echo agentbox-contract >"$TMPDIR/agentpod-run-plan.json"
 validate_json "$TMPDIR/agentpod-run-plan.json" \
   "data.get('schema_version') == 1 and data.get('manifest', {}).get('kind') == 'AgentPod' and data.get('command') == ['echo', 'agentbox-contract']"
+"${CLI[@]}" agentpod explain --json --provider agentpod-linux --risk high --workspace-mode overlay-review --agent-profile coding -- echo agentbox-contract >"$TMPDIR/agentpod-explain.json"
+validate_json "$TMPDIR/agentpod-explain.json" \
+  "data.get('schema_version') == 1 and data.get('manifest', {}).get('kind') == 'AgentPod' and data.get('command') == ['echo', 'agentbox-contract'] and data.get('manifest', {}).get('policy_profile', {}).get('id') == 'coding' and data.get('manifest', {}).get('workspace_mode') == 'OverlayReview' and any('plan output does not start a backend' in warning for warning in data.get('warnings', []))"
+set +e
+"${CLI[@]}" agentpod doctor --json >"$TMPDIR/agentpod-doctor.json"
+agentpod_doctor_status=$?
+set -e
+validate_json "$TMPDIR/agentpod-doctor.json" \
+  "data.get('schema_version') == 1 and data.get('checks') is not None and data.get('ok', 0) + data.get('failed', 0) == len(data.get('checks', []))"
+if [ "$agentpod_doctor_status" -ne 0 ]; then
+  validate_json "$TMPDIR/agentpod-doctor.json" "data.get('required_failed', 0) > 0"
+fi
 "${CLI[@]}" agentpod plan \
   --workspace "$TMPDIR" \
   -- /bin/true >"$TMPDIR/agentpod-native-plan.json"
