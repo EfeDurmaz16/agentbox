@@ -318,6 +318,8 @@ See [docs/product-direction.md](docs/product-direction.md) and
 250+ atomic-commit product sprint. The older
 [docs/roadmap-100-issues.md](docs/roadmap-100-issues.md) is kept as historical
 planning context.
+See [docs/provider-truth.md](docs/provider-truth.md) for the support terms used
+by provider metadata, release notes, and docs.
 See [docs/agentpod-contract.md](docs/agentpod-contract.md) for the final
 AgentPod product contract: adaptive providers, workspace modes, credential
 grants, network policy, host bridge, approval, and evidence.

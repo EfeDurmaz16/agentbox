@@ -4,6 +4,10 @@ This checklist defines what must be true before tagging an Agentbox release.
 It is intentionally stricter than "the repo builds" because Agentbox is a local
 runtime boundary for autonomous agents.
 
+For the public v0 paid-product and OSS-proud release bar, including provider
+truth, installer, QA, docs, support, and evidence verification criteria, see
+[AgentPod v0 release criteria](v0-release-criteria.md).
+
 ## Release Contract
 
 Before a release, state the support level for each surface:
@@ -13,9 +17,12 @@ Before a release, state the support level for each surface:
 - prototype primitive
 - descriptor only
 - planned
+- unavailable
 
-Do not promote a runtime provider because its metadata exists. Provider support
-requires runnable lifecycle behavior and live proof.
+These terms are defined in the
+[provider truth contract](provider-truth.md). Do not promote a runtime provider
+because its metadata exists. Provider support requires runnable lifecycle
+behavior and live proof.
 
 ## Required Gates
 

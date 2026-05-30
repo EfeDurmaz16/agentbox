@@ -14,12 +14,10 @@ agent task
 
 ## Support Levels
 
-| Level | Meaning |
-|-------|---------|
-| Shipped | Implemented, tested, and available in the current repo. |
-| Experimental | Runnable, but missing full live proof or production hardening. |
-| Descriptor only | Named in provider metadata, but execution intentionally returns unavailable. |
-| Planned | Design direction only. |
+Provider support levels are defined in the
+[provider truth contract](provider-truth.md). Use those terms for every
+provider claim: `shipped`, `experimental`, `prototype primitive`,
+`descriptor only`, `planned`, and `unavailable`.
 
 ## Direct Host
 

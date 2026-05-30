@@ -1,9 +1,11 @@
 # Agentbox Status Matrix
 
 This file separates what is shipped in this repository from what is still
-experimental or planned. Agentbox is moving from command interception into the
-AgentPod contract: adaptive governed execution cells for autonomous agents.
-Not every provider boundary is implemented yet.
+experimental, prototype, descriptor-only, unavailable, or planned. Agentbox is
+moving from command interception into the AgentPod contract: adaptive governed
+execution cells for autonomous agents. Not every provider boundary is
+implemented yet. The canonical status terms live in the
+[provider truth contract](provider-truth.md).
 
 ## Product Surface
 
@@ -99,6 +101,8 @@ the product direction and should become the real enforcement layer.
 
 See [glossary](glossary.md) for the canonical meanings of AgentPod, minipod,
 boundary, policy, authority, evidence, provider, and host bridge.
+See [provider truth](provider-truth.md) for the canonical provider support
+terms used by docs, release notes, and CLI metadata.
 See [AgentPod contract](agentpod-contract.md) for the final product shape:
 adaptive providers, workspace modes, credential grants, network policy, host
 bridge, approval, and evidence.
