@@ -394,6 +394,9 @@ enum Commands {
         /// Show only the AgentPod native receipt summary from a session or bundle
         #[arg(long = "agentpod-receipt")]
         agentpod_receipt: bool,
+
+        #[command(subcommand)]
+        command: Option<EvidenceCommands>,
     },
     /// Generate a governed minipod manifest for an agent task
     MinipodSpec {
@@ -1113,6 +1116,9 @@ enum AgentPodCommands {
         /// Show only the AgentPod native receipt summary from a session or bundle
         #[arg(long = "agentpod-receipt")]
         agentpod_receipt: bool,
+
+        #[command(subcommand)]
+        command: Option<EvidenceCommands>,
     },
     /// Generate a native provider execution plan without running it
     Plan {
@@ -1185,6 +1191,16 @@ enum AgentPodReviewCommands {
         /// Commit message for the lower workspace
         #[arg(short = 'm', long = "message")]
         message: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum EvidenceCommands {
+    /// Verify an existing evidence bundle directory
+    Verify {
+        /// Existing evidence bundle directory produced by `agentbox evidence --bundle`
+        #[arg(long = "bundle")]
+        bundle_dir: PathBuf,
     },
 }
 
@@ -4891,7 +4907,26 @@ fn cmd_evidence(
     network: bool,
     bundle_dir: Option<PathBuf>,
     agentpod_receipt: bool,
+    command: Option<EvidenceCommands>,
 ) {
+    if let Some(EvidenceCommands::Verify {
+        bundle_dir: verify_bundle_dir,
+    }) = command
+    {
+        if verify
+            || session.is_some()
+            || credentials
+            || network
+            || bundle_dir.is_some()
+            || agentpod_receipt
+        {
+            eprintln!("error: evidence verify cannot be combined with legacy evidence mode flags");
+            std::process::exit(1);
+        }
+        cmd_verify_evidence_bundle_dir(&verify_bundle_dir);
+        return;
+    }
+
     if bundle_dir.is_some() && (credentials || network) {
         eprintln!("error: --bundle cannot be combined with --credentials or --network");
         std::process::exit(1);
@@ -8940,6 +8975,7 @@ async fn main() {
                 network,
                 bundle_dir,
                 agentpod_receipt,
+                command,
             } => cmd_evidence(
                 limit,
                 verify,
@@ -8948,6 +8984,7 @@ async fn main() {
                 network,
                 bundle_dir,
                 agentpod_receipt,
+                command,
             ),
             AgentPodCommands::Plan {
                 provider,
@@ -9113,6 +9150,7 @@ async fn main() {
             network,
             bundle_dir,
             agentpod_receipt,
+            command,
         } => cmd_evidence(
             limit,
             verify,
@@ -9121,6 +9159,7 @@ async fn main() {
             network,
             bundle_dir,
             agentpod_receipt,
+            command,
         ),
         Commands::MinipodSpec {
             agent,
@@ -10907,6 +10946,99 @@ mod tests {
             };
 
             assert!(json);
+        });
+    }
+
+    #[test]
+    fn evidence_verify_subcommand_parses_bundle_dir() {
+        run_cli_parse_test(|| {
+            let cli = Cli::try_parse_from([
+                "agentbox",
+                "evidence",
+                "verify",
+                "--bundle",
+                "/tmp/agentbox-evidence",
+            ])
+            .unwrap();
+
+            let Commands::Evidence {
+                command:
+                    Some(EvidenceCommands::Verify {
+                        bundle_dir: parsed_bundle_dir,
+                    }),
+                verify,
+                bundle_dir,
+                ..
+            } = cli.command
+            else {
+                panic!("expected evidence verify command");
+            };
+
+            assert!(!verify);
+            assert!(bundle_dir.is_none());
+            assert_eq!(parsed_bundle_dir, PathBuf::from("/tmp/agentbox-evidence"));
+        });
+    }
+
+    #[test]
+    fn evidence_legacy_verify_flag_still_parses_bundle_dir() {
+        run_cli_parse_test(|| {
+            let cli = Cli::try_parse_from([
+                "agentbox",
+                "evidence",
+                "--verify",
+                "--bundle",
+                "/tmp/agentbox-evidence",
+            ])
+            .unwrap();
+
+            let Commands::Evidence {
+                command: None,
+                verify,
+                bundle_dir,
+                ..
+            } = cli.command
+            else {
+                panic!("expected legacy evidence verify command");
+            };
+
+            assert!(verify);
+            assert_eq!(bundle_dir, Some(PathBuf::from("/tmp/agentbox-evidence")));
+        });
+    }
+
+    #[test]
+    fn agentpod_evidence_verify_subcommand_parses_bundle_dir() {
+        run_cli_parse_test(|| {
+            let cli = Cli::try_parse_from([
+                "agentbox",
+                "agentpod",
+                "evidence",
+                "verify",
+                "--bundle",
+                "/tmp/agentbox-evidence",
+            ])
+            .unwrap();
+
+            let Commands::Agentpod {
+                command:
+                    AgentPodCommands::Evidence {
+                        command:
+                            Some(EvidenceCommands::Verify {
+                                bundle_dir: parsed_bundle_dir,
+                            }),
+                        verify,
+                        bundle_dir,
+                        ..
+                    },
+            } = cli.command
+            else {
+                panic!("expected agentpod evidence verify command");
+            };
+
+            assert!(!verify);
+            assert!(bundle_dir.is_none());
+            assert_eq!(parsed_bundle_dir, PathBuf::from("/tmp/agentbox-evidence"));
         });
     }
 

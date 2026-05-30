@@ -83,6 +83,8 @@ grep -F "Export only session credential grants/events as JSONL" \
   "$TMPDIR/evidence-help.txt" >/dev/null
 grep -F "Show only the AgentPod native receipt summary" \
   "$TMPDIR/evidence-help.txt" >/dev/null
+grep -F "Verify an existing evidence bundle directory" \
+  "$TMPDIR/evidence-help.txt" >/dev/null
 
 log "checking doctor JSON truth"
 set +e
@@ -424,6 +426,7 @@ index = {
 }
 (bundle / "index.json").write_text(json.dumps(index, indent=2), encoding="utf-8")
 PY
+"${CLI[@]}" evidence verify --bundle "$BUNDLE_DIR"
 "${CLI[@]}" evidence --verify --bundle "$BUNDLE_DIR"
 "${CLI[@]}" remote-evidence \
   --session smoke-session \
