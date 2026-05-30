@@ -1335,6 +1335,7 @@ impl LinuxAgentPodExecutionPlan {
             runner_phases: linux_agentpod_runner_phases(
                 &user_namespace,
                 &mount_namespace,
+                &cgroup,
                 &seccomp,
                 &landlock,
                 &nftables,
@@ -1397,6 +1398,7 @@ fn linux_agentpod_unshare_prefix(
 fn linux_agentpod_runner_phases(
     user_namespace: &LinuxUserNamespacePlan,
     mount_namespace: &LinuxMountNamespacePlan,
+    cgroup: &LinuxCgroupV2Plan,
     seccomp: &LinuxSeccompPlan,
     landlock: &LinuxLandlockPlan,
     nftables: &LinuxNftablesPlan,
@@ -1461,6 +1463,21 @@ fn linux_agentpod_runner_phases(
             } else {
                 "no workspace overlay requested".into()
             },
+        },
+        LinuxAgentPodRunnerPhase {
+            name: "apply-cgroup".into(),
+            status: "prototype".into(),
+            evidence_event: "agentpod.linux.runner.cgroup.applied".into(),
+            claim: format!(
+                "attach runner process tree to cgroups v2 child {} with memory.max={}, cpu.weight={}, pids.max={}; this proves resource-limit wiring only and is not a complete sandbox",
+                cgroup.cgroup_name,
+                cgroup.memory_max,
+                cgroup.cpu_weight,
+                cgroup
+                    .pids_max
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "unset".into())
+            ),
         },
         LinuxAgentPodRunnerPhase {
             name: "apply-landlock".into(),
@@ -3239,12 +3256,22 @@ mod tests {
                 ("enter-mount-pid-namespaces", "gated-prototype"),
                 ("bind-workspace", "prototype"),
                 ("apply-overlayfs", "inactive"),
+                ("apply-cgroup", "prototype"),
                 ("apply-landlock", "prototype"),
                 ("apply-seccomp", "inactive"),
                 ("apply-nftables", "inactive"),
                 ("exec-command", "prototype"),
             ]
         );
+        let cgroup_phase = plan
+            .runner_phases
+            .iter()
+            .find(|phase| phase.name == "apply-cgroup")
+            .expect("cgroup runner phase should be present");
+        assert!(cgroup_phase.claim.contains("memory.max"));
+        assert!(cgroup_phase.claim.contains("cpu.weight"));
+        assert!(cgroup_phase.claim.contains("pids.max"));
+        assert!(cgroup_phase.claim.contains("not a complete sandbox"));
         assert_eq!(plan.live_env_var, "AGENTBOX_LINUX_NATIVE");
         assert!(!plan.cgroup_root.is_empty());
         assert!(plan.requires_linux);
@@ -3291,6 +3318,7 @@ mod tests {
                 "enter-mount-pid-namespaces",
                 "bind-workspace",
                 "apply-overlayfs",
+                "apply-cgroup",
                 "apply-landlock",
                 "apply-seccomp",
                 "apply-nftables",

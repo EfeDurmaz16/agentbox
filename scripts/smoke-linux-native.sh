@@ -104,6 +104,52 @@ if [[ -e "$proof_denied" ]]; then
   exit 1
 fi
 
+set +e
+cgroup_output="$(
+  cd "$workspace"
+  printf 'y\n' | AGENTBOX_LINUX_NATIVE=1 cargo run -q -p agentbox-cli -- run \
+    --provider agentpod-linux \
+    --workspace-mode direct \
+    --max-processes 16 \
+    --timeout-seconds "$timeout_seconds" \
+    -- /bin/sh -c '
+      printf "self_cgroup:%s\n" "$(cat /proc/self/cgroup)"
+      spawned=0
+      while [ "$spawned" -lt 64 ]; do
+        sleep 30 &
+        child=$!
+        if ! kill -0 "$child" 2>/dev/null; then
+          break
+        fi
+        spawned=$((spawned + 1))
+      done
+      printf "spawned:%s\n" "$spawned"
+      jobs -p | while read -r pid; do
+        kill "$pid" 2>/dev/null || true
+      done
+      [ "$spawned" -lt 64 ]
+    ' 2>&1
+)"
+cgroup_status=$?
+set -e
+
+if [[ "$cgroup_status" -ne 0 ]]; then
+  printf '%s\n' "$cgroup_output" >&2
+  echo "expected Linux cgroups v2 pids.max smoke to prove process limit enforcement" >&2
+  exit 1
+fi
+if ! grep -q 'self_cgroup:.*agentbox-' <<<"$cgroup_output"; then
+  printf '%s\n' "$cgroup_output" >&2
+  echo "expected Linux cgroups v2 smoke to run inside an agentbox cgroup" >&2
+  exit 1
+fi
+spawned_count="$(sed -n 's/^spawned://p' <<<"$cgroup_output" | tail -n 1)"
+if [[ -z "$spawned_count" || "$spawned_count" -ge 64 ]]; then
+  printf '%s\n' "$cgroup_output" >&2
+  echo "expected Linux cgroups v2 pids.max to prevent spawning all probe processes" >&2
+  exit 1
+fi
+
 overlay_workspace="$(mktemp -d)"
 overlay_base="$(mktemp -d)"
 trap 'rm -rf "$proof_outside" "$parallel_root" "$overlay_workspace" "$overlay_base"' EXIT
