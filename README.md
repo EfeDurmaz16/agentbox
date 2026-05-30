@@ -329,6 +329,8 @@ See [docs/mac-mini-replacement-wedge.md](docs/mac-mini-replacement-wedge.md)
 for the local-software-boundary wedge and its limits.
 See [docs/release-readiness.md](docs/release-readiness.md) for the release
 gate before tagging public builds.
+See [docs/v0-release-criteria.md](docs/v0-release-criteria.md) for the public
+AgentPod v0 paid-product and OSS-proud release criteria.
 See [docs/v0.2-demo-checklist.md](docs/v0.2-demo-checklist.md) for the honest
 public demo path.
 See [docs/installer-packaging.md](docs/installer-packaging.md) for the
