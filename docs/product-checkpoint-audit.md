@@ -55,7 +55,7 @@ sandbox or release-grade isolation claim.
 | `agentpod-macos` | Endpoint Security, Network Extension, VM evidence observer plan, deterministic VM cell storage layout, VM runner request contract | provider execution stays unavailable; `AGENTBOX_MACOS_NATIVE=1` only enables native-plan/runner-request experiments, with no host bridge evidence, no signed system extension, and no live ES/NE denial proof |
 | `agentpod-windows` | Job Objects, gated Job Object create/close smoke, AppContainer, WFP, ETW, Windows Sandbox, Hyper-V, Windows native receipt descriptor | no process assignment proof, no resource limit enforcement proof, no WFP denial proof, no Sandbox/Hyper-V lifecycle |
 | FIDES / AGIT / OAPS integrations | evidence and authority descriptors | no external authority adapter or live publisher configured |
-| Linux network/eBPF/nftables | coarse connect-deny seccomp bridge for deny-all modes, eBPF observability receipts, egress policy descriptors, plus gated nftables table lifecycle smoke | no probe loading, no live eBPF event capture, no domain allowlist enforcement, no packet firewall denial proof |
+| Linux network/eBPF/nftables | coarse connect-deny seccomp bridge for deny-all modes, eBPF observability receipts, egress policy descriptors, plus gated session-cgroup-scoped nftables output-hook IP/CIDR packet denial and cleanup smoke | no probe loading, no live eBPF event capture, no domain allowlist enforcement, no resolver/ipset-backed domain refresh, no complete packet firewall coverage |
 
 Linux hardening gaps are issue-mapped in
 [Linux hardening gaps](linux-hardening-gaps.md); until those issues pass live
@@ -96,6 +96,7 @@ Use platform/live gates only when the host supports them:
 ```sh
 bash scripts/smoke-linux-agentpod-conformance.sh
 AGENTBOX_LINUX_NATIVE=1 bash scripts/smoke-linux-native.sh
+AGENTBOX_LINUX_NFTABLES=1 bash scripts/smoke-linux-nftables.sh
 AGENTBOX_LIVE_PODMAN=1 bash scripts/smoke-podman-bridge.sh
 AGENTBOX_WINDOWS_JOB_OBJECT=1 bash scripts/smoke-windows-job-object.sh
 ```
@@ -107,9 +108,9 @@ gaps:
 
 1. macOS: boot a minimal Apple Virtualization VM cell, mount a workspace, and
    prove create/exec/destroy lifecycle with evidence.
-2. Linux: move from coarse connect-deny network guard toward domain/packet
-   enforcement, and turn the nftables lifecycle skeleton into a session-scoped
-   live denial gate.
+2. Linux: add resolver/ipset-backed domain enforcement, pre-exec network
+   synchronization, and live eBPF event capture without broadening the current
+   session-cgroup-scoped IP/CIDR packet claim.
 3. Windows: extend the Job Object create/close smoke into process assignment,
    kill-on-close cleanup, and resource limit enforcement proof before claiming execution.
 4. Remote: add richer worker-side approval UX and full event streaming without

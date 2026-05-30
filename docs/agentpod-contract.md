@@ -81,13 +81,15 @@ combines rootless user namespace, mount namespace metadata, PID namespace,
 cgroup v2 resource writes, seccomp profile metadata, and Landlock ruleset
 metadata into one object. The gated executor also sets `PR_SET_NO_NEW_PRIVS`
 before exec and can install a prototype BPF seccomp filter for supported
-syscall deny rules, a gated coarse connect-deny network guard for deny-all
-network modes, and an ABI-aware Landlock path-beneath filesystem ruleset for
-the supported read/write/create/remove/execute subset plus host-supported
-`REFER` rename/link and `TRUNCATE` mediation. The network guard proves
-process-level `connect(2)` denial
-only; domain allowlists and packet firewall semantics still require a later
-nftables/eBPF bridge. The Landlock loader carries explicit workspace, mount,
+syscall deny rules, a legacy gated coarse connect-deny network guard for
+deny-all network modes, session-cgroup-scoped nftables output-hook packet rules
+for IP/CIDR policy behind `AGENTBOX_LINUX_NFTABLES=1`, and an ABI-aware
+Landlock path-beneath filesystem ruleset for the supported
+read/write/create/remove/execute subset plus host-supported `REFER`
+rename/link and `TRUNCATE` mediation. The nftables path records install,
+cleanup, and denied-packet evidence for packet rules, while domain allowlists
+remain resolver/ipset-gated until resolver snapshots and TTL refresh semantics
+are live. The Landlock loader carries explicit workspace, mount,
 guest alias, and runtime support paths so launcher binaries, dynamic loaders,
 host libraries, and diagnostics can run without pretending to be a complete
 filesystem sandbox. Unsupported Landlock filesystem rights remain explicit

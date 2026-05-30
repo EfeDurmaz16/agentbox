@@ -355,13 +355,13 @@ impl RuntimeProvider for AgentPodProvider {
                             "gated prototype ABI-aware Landlock path-beneath ruleset loader before exec for supported read/write/create/remove/execute plus host-supported refer/truncate rights, with explicit runtime support paths"
                         }
                         AgentPodPrimitive::Seccomp => {
-                            "gated prototype BPF seccomp loader for supported generated/imported syscall deny rules plus coarse connect-deny network guard; not a complete libseccomp profile loader or packet/domain firewall"
+                            "gated prototype BPF seccomp loader for supported generated/imported syscall deny rules plus legacy coarse connect-deny network guard; not a complete libseccomp profile loader"
                         }
                         AgentPodPrimitive::EBpf => {
                             "eBPF observability descriptor only; probe loading is not wired"
                         }
                         AgentPodPrimitive::Nftables => {
-                            "gated nftables table lifecycle skeleton behind AGENTBOX_LINUX_NFTABLES=1; packet/domain enforcement is not wired"
+                            "gated session-cgroup-scoped nftables output-hook packet rules behind AGENTBOX_LINUX_NFTABLES=1 for IP/CIDR policy, with domain policy resolver/ipset semantics explicit but not live-enforced"
                         }
                         _ => "not part of the Linux AgentPod provider",
                     };
@@ -857,6 +857,9 @@ mod tests {
             .unwrap();
         assert!(nftables
             .enforcement_scope
-            .contains("packet/domain enforcement is not wired"));
+            .contains("session-cgroup-scoped nftables"));
+        assert!(nftables
+            .enforcement_scope
+            .contains("domain policy resolver/ipset semantics"));
     }
 }

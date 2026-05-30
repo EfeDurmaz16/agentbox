@@ -24,7 +24,7 @@ evidence layers.
 | Direct host shims | Command classification and audit evidence | Only commands that pass through shims are governed. Direct sockets from binaries, browsers, SDKs, or interpreters are not fully mediated. |
 | Podman compatibility | Coarse provider network mode plus daemon policy/evidence | Domain allow/deny is not proven as packet-level enforcement. macOS Podman also runs behind a VM boundary. |
 | macOS AgentPod | Gated VM boot prototype plus descriptors | Network Extension is planned, but no shipped entitlement-backed provider exists. The Apple Virtualization boot prototype does not mediate egress. |
-| Linux AgentPod | Prototype primitives | eBPF/nftables are planned for observability or enforcement. A gated nftables table lifecycle smoke exists, but it does not attach egress hooks or prove packet/domain denial. |
+| Linux AgentPod | Prototype primitives | Session-cgroup-scoped nftables output-hook packet rules can deny IP/CIDR destinations behind `AGENTBOX_LINUX_NFTABLES=1`. Domain policy is explicit but still resolver/ipset-gated. eBPF remains observed-only. |
 | Windows AgentPod | Prototype primitives | WFP/ETW are planned for network governance/evidence, but provider execution remains unavailable. |
 
 ## Direct Host
@@ -82,10 +82,14 @@ Linux has multiple possible surfaces:
 - eBPF for observability and possibly enforcement after live denial tests
 
 The current Linux AgentPod code models kernel primitives and benchmark plans.
-It also has a gated nftables table create/list/delete smoke behind
-`AGENTBOX_LINUX_NFTABLES=1`. That smoke proves local nftables lifecycle access
-only; it does not attach output hooks, compile domain/IP rules, or prove egress
-denial. eBPF design is evidence-first unless a live hook proves blocking.
+It also has a gated nftables path behind `AGENTBOX_LINUX_NFTABLES=1`: the
+native plan builds an Agentbox-owned inet table, an output hook, and rules
+matched to the AgentPod session cgroup with `socket cgroupv2`. The live smoke
+creates a delegated cgroup, installs a loopback TCP packet-deny rule, observes
+the denied connect, removes the table, and verifies cleanup. Domain selectors
+remain resolver/ipset-gated until A/AAAA snapshots, TTL refresh, CNAME behavior,
+wildcards, split-horizon DNS, and DNS-over-HTTPS bypasses are handled in live
+evidence. eBPF design is evidence-first unless a live hook proves blocking.
 
 The minimum live proof should include:
 

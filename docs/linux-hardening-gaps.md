@@ -15,7 +15,7 @@ implementation.
 | --- | --- | --- | --- |
 | Complete syscall policy | Generated seccomp deny rules, imported OCI/libseccomp subset profiles, and a coarse connect-deny bridge for deny-all network modes. The importer validates schema, action semantics, architectures, and syscall names before compiling supported unconditional deny rules into the prototype BPF loader. | #261 | Do not claim complete libseccomp profile compatibility, default-deny profile support, conditional argument rules, notify/listener support, arbitrary profile enforcement, or syscall coverage beyond the supported prototype loader set. |
 | Complete filesystem policy | ABI-aware Landlock path-beneath rules, workspace bindings, read-only mount descriptors, guest aliases, optional runtime support paths, and supported ABI v2 `REFER` / ABI v3 `TRUNCATE` rights when the host exposes them. | #262 | Do not claim complete Landlock ABI coverage, complete filesystem mediation, file-type creation rights beyond the modeled directory/regular-file subset, device `ioctl` mediation, network/scoped Landlock features, or full protection against every path escape class. |
-| Packet/domain network policy | Network mode descriptors, coarse deny-all connect denial through seccomp, and a gated nftables table lifecycle smoke. | #263 | Do not claim domain allowlist enforcement, packet firewall denial, DNS semantic completeness, or session-scoped firewall cleanup. |
+| Packet/domain network policy | Network mode descriptors, legacy coarse deny-all connect denial through seccomp, session-cgroup-scoped nftables output-hook packet rules for IP/CIDR policy, lifecycle cleanup descriptors, and a gated nftables packet-denial smoke. | #263 | Packet firewall denial may be claimed only for the gated IP/CIDR nftables subset when the live smoke passes on that host. Do not claim live domain allowlist enforcement, DNS semantic completeness, resolver TTL refresh, wildcard support, DNS-over-HTTPS mediation, or complete network isolation. |
 | Kernel event evidence | eBPF observability receipt schemas in the native plan, including provider, session, cgroup path, event identity, pid/tgid fallback fields, and observed-only semantics. | #264 | Do not claim live eBPF probe loading, live event capture, enforcement, or observed events as denial proof. |
 | Mount/rootfs/proc/device boundary | Workspace bind and overlay-review planning plus runner prerequisites. Hardened rootfs, `/proc`, tmp, device, and host path invisibility are not proven. | #265 | Do not claim hardened rootfs isolation, complete `/proc` isolation, a safe device namespace, or complete host path invisibility. |
 | Fail-closed lifecycle cleanup | Prototype create/exec/destroy phases and conformance checks for plan truth. Some parallel cleanup behavior is tested, but partial setup and killed process cleanup are not fully proven. | #266 | Do not claim reliable cleanup after every failed mount, cgroup, network, policy, timeout, kill, or partial setup path. |
@@ -33,6 +33,8 @@ Use these phrases for the current Linux surface:
 - `supported OCI/libseccomp import subset`
 - `ABI-aware Landlock supported subset`
 - `host-supported Landlock REFER/TRUNCATE`
+- `session-cgroup-scoped nftables packet subset`
+- `domain resolver/ipset semantics are explicit but not live-enforced`
 
 Avoid these phrases until the mapped issues are complete and verified by live
 tests:
@@ -43,7 +45,7 @@ tests:
 - `complete libseccomp support`
 - `complete Landlock coverage`
 - `domain allowlist enforcement`
-- `packet firewall enforcement`
+- `complete packet firewall enforcement`
 
 ## Verification Surface
 

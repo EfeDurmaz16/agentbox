@@ -109,6 +109,12 @@ jq -e '
     and (.mount_namespace.workspace_mount_claim | contains("agentbox-linux-runner"))
     and any(.runner_phases[]; .name == "bind-workspace" and .status == "prototype")
     and any(.runner_phases[]; .name == "apply-landlock" and .status == "prototype")
+    and (.nftables.session_scope.cgroup_match | contains("socket cgroupv2"))
+    and .nftables.packet_policy.cgroup_scoped == true
+    and (.nftables.lifecycle.evidence_events | index("agentpod.linux.runner.nftables.installed") != null)
+    and (.nftables.lifecycle.evidence_events | index("agentpod.linux.runner.nftables.removed") != null)
+    and (.nftables.lifecycle.evidence_events | index("agentpod.linux.runner.nftables.denied_packet") != null)
+    and any(.runner_phases[]; .name == "apply-nftables" and .evidence_event == "agentpod.linux.runner.nftables.installed")
     and (.security_claim | contains("runner-managed workspace mount"))
   ' "$plan_json" >/dev/null
 

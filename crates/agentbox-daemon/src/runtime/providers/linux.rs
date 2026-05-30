@@ -1579,12 +1579,18 @@ pub struct LinuxNftablesPlan {
     pub chain_name: String,
     #[serde(default)]
     pub live_gate: LinuxNftablesLiveGatePlan,
+    pub session_scope: LinuxNftablesSessionScope,
+    pub packet_policy: LinuxNftablesPacketPolicyPlan,
+    pub domain_policy: LinuxNftablesDomainPolicyPlan,
+    pub lifecycle: LinuxNftablesLifecyclePlan,
     pub mode: NetworkMode,
     pub default_policy: LinuxNftablesDefaultPolicy,
     pub allow_localhost: bool,
     pub allowed_domains: Vec<String>,
     pub denied_domains: Vec<String>,
     pub planned_rules: Vec<LinuxNftablesRulePlan>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub denied_packet_fixture: Option<LinuxNftablesDeniedPacketFixturePlan>,
     pub domain_rules_require_resolver: bool,
     pub requires_nftables: bool,
     pub requires_linux: bool,
@@ -1600,6 +1606,102 @@ pub struct LinuxNftablesLiveGatePlan {
     pub table_name: String,
     pub transaction: Vec<String>,
     pub lifecycle_claim: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LinuxNftablesSessionScope {
+    pub schema_version: i64,
+    pub cgroup_path: String,
+    pub cgroup_match_level: u32,
+    pub cgroup_match: String,
+    pub hook: String,
+    pub priority: String,
+    pub claim_boundary: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LinuxNftablesPacketPolicyPlan {
+    pub schema_version: i64,
+    pub cgroup_scoped: bool,
+    pub live_enforced: bool,
+    pub denied_ip_literals: Vec<String>,
+    pub denied_cidrs: Vec<String>,
+    pub unsupported_selectors: Vec<String>,
+    pub default_verdict: String,
+    pub claim_boundary: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LinuxNftablesDomainPolicyPlan {
+    pub schema_version: i64,
+    pub status: LinuxNftablesDomainPolicyStatus,
+    pub live_enforced: bool,
+    pub allowed_domains: Vec<String>,
+    pub denied_domains: Vec<String>,
+    pub precedence: String,
+    pub resolver_semantics: Vec<String>,
+    pub unsupported_cases: Vec<String>,
+    pub claim_boundary: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LinuxNftablesDomainPolicyStatus {
+    NoDomainSelectors,
+    ResolverRequired,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LinuxNftablesLifecyclePlan {
+    pub schema_version: i64,
+    pub session_id: String,
+    pub table_family: String,
+    pub table_name: String,
+    pub chain_name: String,
+    pub install: Vec<String>,
+    pub list: Vec<String>,
+    pub cleanup: Vec<String>,
+    pub evidence_events: Vec<String>,
+    pub fail_closed_cleanup: bool,
+    pub claim_boundary: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LinuxNftablesLifecycleEvidence {
+    pub schema_version: i64,
+    pub provider: String,
+    pub session_id: String,
+    pub phase: String,
+    pub event_name: String,
+    pub table_name: String,
+    pub chain_name: String,
+    pub success: bool,
+    pub observed: String,
+    pub claim: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LinuxNftablesDeniedPacketFixturePlan {
+    pub schema_version: i64,
+    pub destination_template: String,
+    pub protocol: String,
+    pub expected_error: String,
+    pub evidence_event: String,
+    pub claim_boundary: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LinuxNftablesDeniedPacketFixtureEvidence {
+    pub schema_version: i64,
+    pub provider: String,
+    pub session_id: String,
+    pub phase: String,
+    pub event_name: String,
+    pub destination: String,
+    pub protocol: String,
+    pub expected_error: String,
+    pub observed_error: String,
+    pub observed_denial: bool,
+    pub claim: String,
 }
 
 impl Default for LinuxNftablesLiveGatePlan {
@@ -1630,6 +1732,13 @@ pub enum LinuxNftablesRuleAction {
     Observe,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LinuxNftablesSelectorKind {
+    IpLiteral,
+    Cidr,
+    Domain,
+}
+
 pub struct LinuxNftablesPolicyDescriptor;
 
 impl LinuxNftablesLiveGatePlan {
@@ -1646,8 +1755,264 @@ impl LinuxNftablesLiveGatePlan {
                 format!("nft delete table inet {table_name}"),
             ],
             lifecycle_claim:
-                "gated nftables table create/list/delete skeleton only; no egress hook or packet/domain enforcement is wired"
+                "default nftables live gate placeholder; concrete AgentPod plans replace this with session-cgroup-scoped lifecycle commands"
                     .into(),
+        }
+    }
+
+    fn for_lifecycle(lifecycle: &LinuxNftablesLifecyclePlan) -> Self {
+        let mut transaction = lifecycle.install.clone();
+        transaction.extend(lifecycle.list.clone());
+        transaction.extend(lifecycle.cleanup.clone());
+        Self {
+            schema_version: 1,
+            env_var: "AGENTBOX_LINUX_NFTABLES".into(),
+            enabled: linux_nftables_live_gate_enabled(),
+            table_family: lifecycle.table_family.clone(),
+            table_name: lifecycle.table_name.clone(),
+            transaction,
+            lifecycle_claim: lifecycle.claim_boundary.clone(),
+        }
+    }
+}
+
+impl LinuxNftablesSessionScope {
+    fn for_session(session_id: &str) -> Self {
+        let cgroup_path =
+            LinuxCgroupV2Plan::from_resources(session_id, &ResourcePolicy::default()).cgroup_name;
+        let cgroup_match_level = nftables_cgroup_match_level(&cgroup_path);
+        let cgroup_match = format!("socket cgroupv2 level {cgroup_match_level} \"{cgroup_path}\"");
+        Self {
+            schema_version: 1,
+            cgroup_path,
+            cgroup_match_level,
+            cgroup_match,
+            hook: "output".into(),
+            priority: "filter".into(),
+            claim_boundary:
+                "nftables rules are scoped to the AgentPod session cgroup via socket cgroupv2 matching; hosts without this nftables/cgroup feature must skip the live gate"
+                    .into(),
+        }
+    }
+}
+
+impl LinuxNftablesPacketPolicyPlan {
+    fn from_selectors(
+        mode: &NetworkMode,
+        default_policy: &LinuxNftablesDefaultPolicy,
+        denied_selectors: &[String],
+        allowed_selectors: &[String],
+        domain_policy: &LinuxNftablesDomainPolicyPlan,
+    ) -> Self {
+        let mut denied_ip_literals = Vec::new();
+        let mut denied_cidrs = Vec::new();
+        let mut unsupported_selectors = Vec::new();
+        for selector in denied_selectors.iter().chain(allowed_selectors.iter()) {
+            match classify_nftables_selector(selector) {
+                LinuxNftablesSelectorKind::IpLiteral => {
+                    if denied_selectors.contains(selector) {
+                        denied_ip_literals.push(selector.clone());
+                    }
+                }
+                LinuxNftablesSelectorKind::Cidr => {
+                    if denied_selectors.contains(selector) {
+                        denied_cidrs.push(selector.clone());
+                    }
+                }
+                LinuxNftablesSelectorKind::Domain => {
+                    if !unsupported_selectors.contains(selector) {
+                        unsupported_selectors.push(selector.clone());
+                    }
+                }
+            }
+        }
+        let final_default_reject_supported = matches!(
+            default_policy,
+            LinuxNftablesDefaultPolicy::Drop | LinuxNftablesDefaultPolicy::RequireApproval
+        ) && matches!(
+            domain_policy.status,
+            LinuxNftablesDomainPolicyStatus::NoDomainSelectors
+        );
+        let live_enforced = !denied_ip_literals.is_empty()
+            || !denied_cidrs.is_empty()
+            || final_default_reject_supported;
+        let default_verdict = match mode {
+            NetworkMode::None | NetworkMode::DenyByDefault | NetworkMode::AllowListed => "reject",
+            NetworkMode::ApprovalOnFirstContact => "reject-until-approved",
+            NetworkMode::OpenWithGuardrails | NetworkMode::Host => "accept-with-guardrails",
+        }
+        .into();
+
+        Self {
+            schema_version: 1,
+            cgroup_scoped: true,
+            live_enforced,
+            denied_ip_literals,
+            denied_cidrs,
+            unsupported_selectors,
+            default_verdict,
+            claim_boundary:
+                "live nftables enforcement covers session-cgroup-scoped packet rules for IP literals/CIDRs and optional default reject policies; domain names require resolver/ipset compilation before live enforcement"
+                    .into(),
+        }
+    }
+}
+
+impl LinuxNftablesDomainPolicyPlan {
+    fn from_domains(allowed_domains: Vec<String>, denied_domains: Vec<String>) -> Self {
+        let status = if allowed_domains.is_empty() && denied_domains.is_empty() {
+            LinuxNftablesDomainPolicyStatus::NoDomainSelectors
+        } else {
+            LinuxNftablesDomainPolicyStatus::ResolverRequired
+        };
+        Self {
+            schema_version: 1,
+            live_enforced: false,
+            allowed_domains,
+            denied_domains,
+            status,
+            precedence: "deny rules compile before allow rules; deny wins".into(),
+            resolver_semantics: vec![
+                "exact domain selectors must be resolved into A/AAAA records before nftables ip/ip6 sets are loaded".into(),
+                "resolver output must preserve TTL and refresh or remove stale addresses before claiming continuing enforcement".into(),
+                "IP literals and CIDRs bypass resolver semantics and compile into packet selectors directly".into(),
+            ],
+            unsupported_cases: vec![
+                "wildcard domains are not live-enforced by this prototype resolver contract".into(),
+                "DNS-over-HTTPS, custom in-agent resolvers, and post-launch DNS changes are not mediated by nftables alone".into(),
+                "CNAME chains, split-horizon DNS, and TTL expiry are descriptor-only until resolver snapshots are attached to evidence".into(),
+            ],
+            claim_boundary:
+                "domain policy is explicit and evidence-ready, but live domain enforcement requires resolver/ipset compilation; packet IP/CIDR rules are the only live nftables subset"
+                    .into(),
+        }
+    }
+}
+
+impl LinuxNftablesLifecyclePlan {
+    fn for_policy(
+        session_id: &str,
+        table_name: &str,
+        chain_name: &str,
+        session_scope: &LinuxNftablesSessionScope,
+        packet_policy: &LinuxNftablesPacketPolicyPlan,
+        default_policy: &LinuxNftablesDefaultPolicy,
+    ) -> Self {
+        let mut install = vec![
+            format!("nft add table inet {table_name}"),
+            format!(
+                "nft add chain inet {table_name} {chain_name} {{ type filter hook output priority filter; policy accept; }}"
+            ),
+        ];
+        for destination in &packet_policy.denied_ip_literals {
+            install.push(nftables_packet_reject_command(
+                table_name,
+                chain_name,
+                session_scope,
+                destination,
+            ));
+        }
+        for destination in &packet_policy.denied_cidrs {
+            install.push(nftables_packet_reject_command(
+                table_name,
+                chain_name,
+                session_scope,
+                destination,
+            ));
+        }
+        if nftables_should_apply_default_reject(default_policy, packet_policy) {
+            install.push(format!(
+                "nft add rule inet {table_name} {chain_name} {} reject with icmpx type admin-prohibited",
+                session_scope.cgroup_match
+            ));
+        }
+
+        Self {
+            schema_version: 1,
+            session_id: session_id.into(),
+            table_family: "inet".into(),
+            table_name: table_name.into(),
+            chain_name: chain_name.into(),
+            install,
+            list: vec![format!("nft list table inet {table_name}")],
+            cleanup: vec![format!("nft delete table inet {table_name}")],
+            evidence_events: vec![
+                "agentpod.linux.runner.nftables.installed".into(),
+                "agentpod.linux.runner.nftables.removed".into(),
+                "agentpod.linux.runner.nftables.denied_packet".into(),
+            ],
+            fail_closed_cleanup: true,
+            claim_boundary:
+                "session nftables lifecycle creates one Agentbox-owned inet table, installs output-hook rules scoped to the session cgroup, records install/remove/denial events, and removes the table on cleanup"
+                    .into(),
+        }
+    }
+
+    pub fn evidence(
+        &self,
+        phase: impl Into<String>,
+        success: bool,
+        observed: impl Into<String>,
+    ) -> LinuxNftablesLifecycleEvidence {
+        let phase = phase.into();
+        let event_name = match phase.as_str() {
+            "installed" => "agentpod.linux.runner.nftables.installed",
+            "removed" => "agentpod.linux.runner.nftables.removed",
+            "cleanup_failed" => "agentpod.linux.runner.nftables.cleanup_failed",
+            _ => "agentpod.linux.runner.nftables.lifecycle",
+        }
+        .into();
+        LinuxNftablesLifecycleEvidence {
+            schema_version: 1,
+            provider: "agentpod-linux".into(),
+            session_id: self.session_id.clone(),
+            phase,
+            event_name,
+            table_name: self.table_name.clone(),
+            chain_name: self.chain_name.clone(),
+            success,
+            observed: observed.into(),
+            claim: self.claim_boundary.clone(),
+        }
+    }
+}
+
+impl LinuxNftablesDeniedPacketFixturePlan {
+    fn for_packet_policy(packet_policy: &LinuxNftablesPacketPolicyPlan) -> Option<Self> {
+        packet_policy.live_enforced.then(|| Self {
+            schema_version: 1,
+            destination_template: "127.0.0.1:<ephemeral-listener-port>".into(),
+            protocol: "tcp".into(),
+            expected_error: "ECONNREFUSED-or-timeout".into(),
+            evidence_event: "agentpod.linux.runner.nftables.denied_packet".into(),
+            claim_boundary:
+                "fixture proves packet-level nftables denial for a session-scoped cgroup rule; this is distinct from seccomp connect(2) denial and does not prove live domain resolver enforcement"
+                    .into(),
+        })
+    }
+
+    pub fn evidence(
+        &self,
+        session_id: &str,
+        destination: &str,
+        observed_error: &str,
+    ) -> LinuxNftablesDeniedPacketFixtureEvidence {
+        LinuxNftablesDeniedPacketFixtureEvidence {
+            schema_version: 1,
+            provider: "agentpod-linux".into(),
+            session_id: session_id.into(),
+            phase: "apply-nftables".into(),
+            event_name: self.evidence_event.clone(),
+            destination: destination.into(),
+            protocol: self.protocol.clone(),
+            expected_error: self.expected_error.clone(),
+            observed_error: observed_error.into(),
+            observed_denial: observed_error.contains("ECONNREFUSED")
+                || observed_error.contains("ETIMEDOUT")
+                || observed_error.contains("No route")
+                || observed_error.contains("Connection refused")
+                || observed_error.contains("timed out"),
+            claim: self.claim_boundary.clone(),
         }
     }
 }
@@ -1675,17 +2040,19 @@ impl LinuxNftablesPolicyDescriptor {
             });
         }
         for domain in &spec.network.denied_domains {
+            let (selector, reason) = nftables_policy_selector_and_reason(domain, true);
             planned_rules.push(LinuxNftablesRulePlan {
                 action: LinuxNftablesRuleAction::Drop,
-                selector: format!("domain:{domain}"),
-                reason: "manifest domain denylist; requires resolver/ipset compilation".into(),
+                selector,
+                reason,
             });
         }
         for domain in &spec.network.allowed_domains {
+            let (selector, reason) = nftables_policy_selector_and_reason(domain, false);
             planned_rules.push(LinuxNftablesRulePlan {
                 action: LinuxNftablesRuleAction::Accept,
-                selector: format!("domain:{domain}"),
-                reason: "manifest domain allowlist; requires resolver/ipset compilation".into(),
+                selector,
+                reason,
             });
         }
 
@@ -1700,29 +2067,348 @@ impl LinuxNftablesPolicyDescriptor {
         };
 
         let table_name = format!("agentbox_{}", sanitize_nft_name(&spec.id));
+        let chain_name = "agentpod_egress".to_string();
+        let session_scope = LinuxNftablesSessionScope::for_session(&spec.id);
+        let domain_policy = LinuxNftablesDomainPolicyPlan::from_domains(
+            spec.network
+                .allowed_domains
+                .iter()
+                .filter(|selector| {
+                    classify_nftables_selector(selector) == LinuxNftablesSelectorKind::Domain
+                })
+                .cloned()
+                .collect(),
+            spec.network
+                .denied_domains
+                .iter()
+                .filter(|selector| {
+                    classify_nftables_selector(selector) == LinuxNftablesSelectorKind::Domain
+                })
+                .cloned()
+                .collect(),
+        );
+        let packet_policy = LinuxNftablesPacketPolicyPlan::from_selectors(
+            &spec.network.mode,
+            &default_policy,
+            &spec.network.denied_domains,
+            &spec.network.allowed_domains,
+            &domain_policy,
+        );
+        let lifecycle = LinuxNftablesLifecyclePlan::for_policy(
+            &spec.id,
+            &table_name,
+            &chain_name,
+            &session_scope,
+            &packet_policy,
+            &default_policy,
+        );
+        let live_gate = LinuxNftablesLiveGatePlan::for_lifecycle(&lifecycle);
+        let denied_packet_fixture =
+            LinuxNftablesDeniedPacketFixturePlan::for_packet_policy(&packet_policy);
+        let enforcement_claim = if packet_policy.live_enforced {
+            "session-scoped nftables packet rules are planned for IP literal/CIDR destinations using socket cgroupv2 output-hook matching; domain policy remains resolver/ipset-gated until a resolver snapshot is attached"
+        } else {
+            "nftables domain policy descriptor only for this manifest; live packet enforcement requires IP literal/CIDR rules or a resolver/ipset snapshot"
+        };
 
         Ok(LinuxNftablesPlan {
             schema_version: 1,
             table_name: table_name.clone(),
-            chain_name: "agentpod_egress".into(),
-            live_gate: LinuxNftablesLiveGatePlan::for_table(&table_name),
+            chain_name,
+            live_gate,
+            session_scope,
+            packet_policy,
+            domain_policy,
+            lifecycle,
             mode: spec.network.mode.clone(),
             default_policy,
             allow_localhost: spec.network.allow_localhost,
             allowed_domains: spec.network.allowed_domains.clone(),
             denied_domains: spec.network.denied_domains.clone(),
             planned_rules,
+            denied_packet_fixture,
             domain_rules_require_resolver: true,
             requires_nftables: true,
             requires_linux: true,
-            enforcement_claim:
-                "nftables policy descriptor only; no packet/domain denial proof is wired".into(),
+            enforcement_claim: enforcement_claim.into(),
         })
     }
 }
 
 fn linux_nftables_live_gate_enabled() -> bool {
     matches!(std::env::var("AGENTBOX_LINUX_NFTABLES").as_deref(), Ok("1"))
+}
+
+fn nftables_policy_selector_and_reason(selector: &str, denied: bool) -> (String, String) {
+    match classify_nftables_selector(selector) {
+        LinuxNftablesSelectorKind::IpLiteral | LinuxNftablesSelectorKind::Cidr => (
+            nftables_packet_selector(selector),
+            if denied {
+                "manifest packet denylist; enforced by session-scoped nftables when the live gate is enabled"
+            } else {
+                "manifest packet allowlist; used before any session default reject when the live gate is enabled"
+            }
+            .into(),
+        ),
+        LinuxNftablesSelectorKind::Domain => (
+            format!("domain:{selector}"),
+            if denied {
+                "manifest domain denylist; requires resolver/ipset compilation"
+            } else {
+                "manifest domain allowlist; requires resolver/ipset compilation"
+            }
+            .into(),
+        ),
+    }
+}
+
+fn classify_nftables_selector(selector: &str) -> LinuxNftablesSelectorKind {
+    if selector.parse::<std::net::IpAddr>().is_ok() {
+        return LinuxNftablesSelectorKind::IpLiteral;
+    }
+    if let Some((addr, prefix)) = selector.split_once('/') {
+        if let Ok(ip) = addr.parse::<std::net::IpAddr>() {
+            if let Ok(prefix) = prefix.parse::<u8>() {
+                let max_prefix = if ip.is_ipv4() { 32 } else { 128 };
+                if prefix <= max_prefix {
+                    return LinuxNftablesSelectorKind::Cidr;
+                }
+            }
+        }
+    }
+    LinuxNftablesSelectorKind::Domain
+}
+
+fn nftables_packet_selector(selector: &str) -> String {
+    if let Some((addr, _prefix)) = selector.split_once('/') {
+        if let Ok(ip) = addr.parse::<std::net::IpAddr>() {
+            return if ip.is_ipv4() {
+                format!("ip daddr {selector}")
+            } else {
+                format!("ip6 daddr {selector}")
+            };
+        }
+    }
+    match selector.parse::<std::net::IpAddr>() {
+        Ok(ip) if ip.is_ipv4() => format!("ip daddr {selector}"),
+        Ok(_) => format!("ip6 daddr {selector}"),
+        Err(_) => format!("domain:{selector}"),
+    }
+}
+
+fn nftables_packet_reject_command(
+    table_name: &str,
+    chain_name: &str,
+    session_scope: &LinuxNftablesSessionScope,
+    destination: &str,
+) -> String {
+    format!(
+        "nft add rule inet {table_name} {chain_name} {} {} reject with icmpx type admin-prohibited",
+        session_scope.cgroup_match,
+        nftables_packet_selector(destination)
+    )
+}
+
+fn nftables_should_apply_default_reject(
+    default_policy: &LinuxNftablesDefaultPolicy,
+    packet_policy: &LinuxNftablesPacketPolicyPlan,
+) -> bool {
+    matches!(
+        default_policy,
+        LinuxNftablesDefaultPolicy::Drop | LinuxNftablesDefaultPolicy::RequireApproval
+    ) && packet_policy.unsupported_selectors.is_empty()
+}
+
+fn nftables_cgroup_match_level(cgroup_path: &str) -> u32 {
+    cgroup_path
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .count()
+        .max(1) as u32
+}
+
+pub struct LinuxNftablesLifecycleController;
+
+#[cfg(target_os = "linux")]
+struct LinuxNftablesAppliedRules {
+    table_name: String,
+    installed: bool,
+}
+
+#[cfg(target_os = "linux")]
+impl LinuxNftablesAppliedRules {
+    fn inactive() -> Self {
+        Self {
+            table_name: String::new(),
+            installed: false,
+        }
+    }
+
+    fn installed(table_name: impl Into<String>) -> Self {
+        Self {
+            table_name: table_name.into(),
+            installed: true,
+        }
+    }
+
+    fn cleanup(&mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        if !self.installed {
+            return Ok(());
+        }
+        run_nft_command(&[
+            "delete".into(),
+            "table".into(),
+            "inet".into(),
+            self.table_name.clone(),
+        ])?;
+        self.installed = false;
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for LinuxNftablesAppliedRules {
+    fn drop(&mut self) {
+        let _ = self.cleanup();
+    }
+}
+
+impl LinuxNftablesLifecycleController {
+    #[cfg(target_os = "linux")]
+    fn apply(
+        plan: &LinuxNftablesPlan,
+    ) -> Result<LinuxNftablesAppliedRules, Box<dyn std::error::Error + Send + Sync>> {
+        if !plan.live_gate.enabled {
+            return Ok(LinuxNftablesAppliedRules::inactive());
+        }
+        if !plan.packet_policy.live_enforced {
+            return Err(format!(
+                "AGENTBOX_LINUX_NFTABLES=1 requested live nftables enforcement for {}, but the manifest only has domain selectors requiring resolver/ipset compilation",
+                plan.table_name
+            )
+            .into());
+        }
+
+        let _ = run_nft_command(&[
+            "delete".into(),
+            "table".into(),
+            "inet".into(),
+            plan.table_name.clone(),
+        ]);
+        for args in nftables_install_argvs(plan) {
+            if let Err(err) = run_nft_command(&args) {
+                let _ = run_nft_command(&[
+                    "delete".into(),
+                    "table".into(),
+                    "inet".into(),
+                    plan.table_name.clone(),
+                ]);
+                return Err(err);
+            }
+        }
+        Ok(LinuxNftablesAppliedRules::installed(
+            plan.table_name.clone(),
+        ))
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn nftables_install_argvs(plan: &LinuxNftablesPlan) -> Vec<Vec<String>> {
+    let mut commands = vec![
+        vec![
+            "add".into(),
+            "table".into(),
+            "inet".into(),
+            plan.table_name.clone(),
+        ],
+        vec![
+            "add".into(),
+            "chain".into(),
+            "inet".into(),
+            plan.table_name.clone(),
+            plan.chain_name.clone(),
+            "{ type filter hook output priority filter; policy accept; }".into(),
+        ],
+    ];
+    for destination in &plan.packet_policy.denied_ip_literals {
+        commands.push(nftables_packet_reject_argv(plan, destination));
+    }
+    for destination in &plan.packet_policy.denied_cidrs {
+        commands.push(nftables_packet_reject_argv(plan, destination));
+    }
+    if nftables_should_apply_default_reject(&plan.default_policy, &plan.packet_policy) {
+        commands.push(nftables_default_reject_argv(plan));
+    }
+    commands
+}
+
+#[cfg(target_os = "linux")]
+fn nftables_packet_reject_argv(plan: &LinuxNftablesPlan, destination: &str) -> Vec<String> {
+    let mut args = vec![
+        "add".into(),
+        "rule".into(),
+        "inet".into(),
+        plan.table_name.clone(),
+        plan.chain_name.clone(),
+        "socket".into(),
+        "cgroupv2".into(),
+        "level".into(),
+        plan.session_scope.cgroup_match_level.to_string(),
+        plan.session_scope.cgroup_path.clone(),
+    ];
+    args.extend(
+        nftables_packet_selector(destination)
+            .split(' ')
+            .map(str::to_string),
+    );
+    args.extend([
+        "reject".into(),
+        "with".into(),
+        "icmpx".into(),
+        "type".into(),
+        "admin-prohibited".into(),
+    ]);
+    args
+}
+
+#[cfg(target_os = "linux")]
+fn nftables_default_reject_argv(plan: &LinuxNftablesPlan) -> Vec<String> {
+    vec![
+        "add".into(),
+        "rule".into(),
+        "inet".into(),
+        plan.table_name.clone(),
+        plan.chain_name.clone(),
+        "socket".into(),
+        "cgroupv2".into(),
+        "level".into(),
+        plan.session_scope.cgroup_match_level.to_string(),
+        plan.session_scope.cgroup_path.clone(),
+        "reject".into(),
+        "with".into(),
+        "icmpx".into(),
+        "type".into(),
+        "admin-prohibited".into(),
+    ]
+}
+
+#[cfg(target_os = "linux")]
+fn run_nft_command(args: &[String]) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let output = std::process::Command::new("nft")
+        .args(args)
+        .output()
+        .map_err(|err| format!("failed to spawn nft {}: {err}", args.join(" ")))?;
+    if output.status.success() {
+        return Ok(());
+    }
+    Err(format!(
+        "nft {} failed with status {:?}: {}{}",
+        args.join(" "),
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    )
+    .into())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2386,12 +3072,16 @@ fn linux_agentpod_runner_phases(
         LinuxAgentPodRunnerPhase {
             name: "apply-nftables".into(),
             status: if nftables.live_gate.enabled {
-                "gated-skeleton"
+                if nftables.packet_policy.live_enforced {
+                    "prototype"
+                } else {
+                    "blocked"
+                }
             } else {
                 "inactive"
             }
             .into(),
-            evidence_event: "agentpod.linux.runner.nftables.skeleton.applied".into(),
+            evidence_event: "agentpod.linux.runner.nftables.installed".into(),
             claim: nftables.live_gate.lifecycle_claim.clone(),
         },
         LinuxAgentPodRunnerPhase {
@@ -2465,8 +3155,28 @@ impl LinuxAgentPodPrototypeExecutor {
                 cgroup_root.display()
             )));
         }
+        let mut nftables_guard = match LinuxNftablesLifecycleController::apply(&plan.nftables) {
+            Ok(guard) => guard,
+            Err(err) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = LinuxCgroupV2Limiter::cleanup(cgroup_root, &plan.cgroup);
+                return Err(RuntimeError::ExecFailed(format!(
+                    "Linux AgentPod nftables apply failed for {}: {err}",
+                    plan.nftables.table_name
+                )));
+            }
+        };
         let output_result = wait_for_child_output(child, command.timeout_seconds);
-        LinuxCgroupV2Limiter::cleanup(cgroup_root, &plan.cgroup).map_err(|err| {
+        let nftables_cleanup_result = nftables_guard.cleanup();
+        let cgroup_cleanup_result = LinuxCgroupV2Limiter::cleanup(cgroup_root, &plan.cgroup);
+        nftables_cleanup_result.map_err(|err| {
+            RuntimeError::ExecFailed(format!(
+                "Linux AgentPod nftables cleanup failed for {}: {err}",
+                plan.nftables.table_name
+            ))
+        })?;
+        cgroup_cleanup_result.map_err(|err| {
             RuntimeError::ExecFailed(format!(
                 "Linux AgentPod cgroup v2 cleanup failed at {}: {err}",
                 cgroup_root.display()
@@ -4494,7 +5204,7 @@ printf landlock-policy-ok
     }
 
     #[test]
-    fn nftables_plan_describes_domain_and_loopback_policy_without_claiming_enforcement() {
+    fn nftables_plan_describes_packet_and_domain_policy_boundaries() {
         let mut spec = MinipodSpec::for_agent_task("hermes", "/tmp/agentbox-work");
         spec.id = "agentpod.test/session-1".into();
         spec.network.mode = NetworkMode::AllowListed;
@@ -4518,8 +5228,15 @@ printf landlock-policy-ok
         assert!(plan
             .live_gate
             .lifecycle_claim
-            .contains("no egress hook or packet/domain enforcement"));
-        assert!(plan.enforcement_claim.contains("descriptor only"));
+            .contains("output-hook rules scoped to the session cgroup"));
+        assert!(plan
+            .enforcement_claim
+            .contains("domain policy descriptor only"));
+        assert!(!plan.domain_policy.live_enforced);
+        assert_eq!(
+            plan.domain_policy.status,
+            LinuxNftablesDomainPolicyStatus::ResolverRequired
+        );
         assert!(plan.planned_rules.iter().any(|rule| {
             rule.action == LinuxNftablesRuleAction::Drop && rule.selector.contains("127.0.0.0/8")
         }));
@@ -4547,6 +5264,11 @@ printf landlock-policy-ok
             plan.live_gate.transaction,
             vec![
                 "nft add table inet agentbox_agentpod_test_session_1".to_string(),
+                "nft add chain inet agentbox_agentpod_test_session_1 agentpod_egress { type filter hook output priority filter; policy accept; }".to_string(),
+                "nft add rule inet agentbox_agentpod_test_session_1 agentpod_egress socket cgroupv2 level 2 \"agentbox-agentpod.test/session-1\" ip daddr 169.254.169.254 reject with icmpx type admin-prohibited".to_string(),
+                "nft add rule inet agentbox_agentpod_test_session_1 agentpod_egress socket cgroupv2 level 2 \"agentbox-agentpod.test/session-1\" ip daddr 169.254.170.2 reject with icmpx type admin-prohibited".to_string(),
+                "nft add rule inet agentbox_agentpod_test_session_1 agentpod_egress socket cgroupv2 level 2 \"agentbox-agentpod.test/session-1\" ip daddr 100.100.100.200 reject with icmpx type admin-prohibited".to_string(),
+                "nft add rule inet agentbox_agentpod_test_session_1 agentpod_egress socket cgroupv2 level 2 \"agentbox-agentpod.test/session-1\" ip6 daddr fd00:ec2::254 reject with icmpx type admin-prohibited".to_string(),
                 "nft list table inet agentbox_agentpod_test_session_1".to_string(),
                 "nft delete table inet agentbox_agentpod_test_session_1".to_string(),
             ]
@@ -4559,7 +5281,150 @@ printf landlock-policy-ok
         assert!(plan
             .live_gate
             .lifecycle_claim
-            .contains("table create/list/delete skeleton only"));
+            .contains("session nftables lifecycle"));
+    }
+
+    #[test]
+    fn nftables_plan_builds_session_scoped_packet_lifecycle_with_cgroup_match() {
+        let mut spec = MinipodSpec::for_agent_task("hermes", "/tmp/agentbox-work");
+        spec.id = "session-network-1".into();
+        spec.network.mode = NetworkMode::OpenWithGuardrails;
+        spec.network.allow_localhost = false;
+        spec.network.denied_domains = vec![
+            "169.254.169.254".into(),
+            "fd00:ec2::254".into(),
+            "metadata.google.internal".into(),
+        ];
+
+        let plan = LinuxNftablesPolicyDescriptor::plan(&spec).unwrap();
+
+        assert_eq!(plan.session_scope.cgroup_path, "agentbox-session-network-1");
+        assert_eq!(plan.session_scope.cgroup_match_level, 1);
+        assert_eq!(
+            plan.session_scope.cgroup_match,
+            "socket cgroupv2 level 1 \"agentbox-session-network-1\""
+        );
+        assert!(plan.session_scope.claim_boundary.contains("session cgroup"));
+        assert!(plan.packet_policy.cgroup_scoped);
+        assert!(plan.packet_policy.live_enforced);
+        assert_eq!(
+            plan.packet_policy.denied_ip_literals,
+            vec!["169.254.169.254", "fd00:ec2::254"]
+        );
+        assert!(plan
+            .packet_policy
+            .unsupported_selectors
+            .contains(&"metadata.google.internal".to_string()));
+        assert!(plan.lifecycle.install.iter().any(|command| {
+            command.contains("add chain inet agentbox_session_network_1 agentpod_egress")
+                && command.contains("hook output")
+                && command.contains("policy accept")
+        }));
+        assert!(plan.lifecycle.install.iter().any(|command| {
+            command.contains("socket cgroupv2 level 1")
+                && command.contains("ip daddr 169.254.169.254")
+                && command.contains("reject")
+        }));
+        assert!(plan.lifecycle.install.iter().any(|command| {
+            command.contains("socket cgroupv2 level 1")
+                && command.contains("ip6 daddr fd00:ec2::254")
+                && command.contains("reject")
+        }));
+        assert_eq!(
+            plan.lifecycle.cleanup,
+            vec!["nft delete table inet agentbox_session_network_1"]
+        );
+        assert_eq!(
+            plan.lifecycle.evidence_events,
+            vec![
+                "agentpod.linux.runner.nftables.installed",
+                "agentpod.linux.runner.nftables.removed",
+                "agentpod.linux.runner.nftables.denied_packet",
+            ]
+        );
+        assert!(plan.denied_packet_fixture.is_some());
+        assert!(plan
+            .enforcement_claim
+            .contains("session-scoped nftables packet rules"));
+    }
+
+    #[test]
+    fn nftables_domain_policy_documents_resolver_semantics_and_unsupported_cases() {
+        let mut spec = MinipodSpec::for_agent_task("deploy", "/tmp/agentbox-work");
+        spec.network.mode = NetworkMode::AllowListed;
+        spec.network.allowed_domains = vec!["api.github.com".into(), "*.example.com".into()];
+        spec.network.denied_domains = vec!["metadata.google.internal".into()];
+
+        let plan = LinuxNftablesPolicyDescriptor::plan(&spec).unwrap();
+
+        assert!(!plan.domain_policy.live_enforced);
+        assert_eq!(
+            plan.domain_policy.status,
+            LinuxNftablesDomainPolicyStatus::ResolverRequired
+        );
+        assert_eq!(
+            plan.domain_policy.precedence,
+            "deny rules compile before allow rules; deny wins"
+        );
+        assert!(plan
+            .domain_policy
+            .resolver_semantics
+            .iter()
+            .any(|item| item.contains("A/AAAA")));
+        assert!(plan
+            .domain_policy
+            .resolver_semantics
+            .iter()
+            .any(|item| item.contains("TTL")));
+        assert!(plan
+            .domain_policy
+            .unsupported_cases
+            .iter()
+            .any(|item| item.contains("wildcard")));
+        assert!(plan
+            .domain_policy
+            .unsupported_cases
+            .iter()
+            .any(|item| item.contains("DNS-over-HTTPS")));
+        assert!(plan.planned_rules.iter().any(|rule| {
+            rule.action == LinuxNftablesRuleAction::Drop
+                && rule.selector == "domain:metadata.google.internal"
+        }));
+        assert!(plan.planned_rules.iter().any(|rule| {
+            rule.action == LinuxNftablesRuleAction::Accept
+                && rule.selector == "domain:api.github.com"
+        }));
+    }
+
+    #[test]
+    fn nftables_lifecycle_evidence_records_install_cleanup_and_denial_results() {
+        let mut spec = MinipodSpec::for_agent_task("hermes", "/tmp/agentbox-work");
+        spec.id = "session-network-2".into();
+        spec.network.mode = NetworkMode::DenyByDefault;
+        spec.network.allow_localhost = false;
+        spec.network.denied_domains = vec!["169.254.169.254".into()];
+
+        let plan = LinuxNftablesPolicyDescriptor::plan(&spec).unwrap();
+        let fixture = plan.denied_packet_fixture.as_ref().unwrap();
+        let installed = plan.lifecycle.evidence("installed", true, "table ready");
+        let removed = plan.lifecycle.evidence("removed", true, "table removed");
+        let denied = fixture.evidence("session-network-2", "127.0.0.1:4242", "ECONNREFUSED");
+
+        assert_eq!(installed.session_id, "session-network-2");
+        assert_eq!(
+            installed.event_name,
+            "agentpod.linux.runner.nftables.installed"
+        );
+        assert!(installed.success);
+        assert_eq!(removed.event_name, "agentpod.linux.runner.nftables.removed");
+        assert!(removed.success);
+        assert_eq!(
+            denied.event_name,
+            "agentpod.linux.runner.nftables.denied_packet"
+        );
+        assert_eq!(denied.destination, "127.0.0.1:4242");
+        assert!(denied.observed_denial);
+        assert!(denied.claim.contains("packet-level"));
     }
 
     #[test]
@@ -4580,21 +5445,20 @@ printf landlock-policy-ok
                 && rule.selector.contains("127.0.0.0/8")
                 && rule.reason.contains("allows loopback")
         }));
-        for metadata_endpoint in [
-            "169.254.169.254",
-            "metadata.google.internal",
-            "fd00:ec2::254",
-        ] {
+        for metadata_endpoint in ["169.254.169.254", "fd00:ec2::254"] {
             assert!(plan.planned_rules.iter().any(|rule| {
                 rule.action == LinuxNftablesRuleAction::Drop
-                    && rule.selector == format!("domain:{metadata_endpoint}")
-                    && rule.reason.contains("requires resolver")
+                    && rule.selector == nftables_packet_selector(metadata_endpoint)
+                    && rule.reason.contains("packet denylist")
             }));
         }
-        assert!(plan.enforcement_claim.contains("descriptor only"));
-        assert!(plan
-            .enforcement_claim
-            .contains("no packet/domain denial proof"));
+        assert!(plan.planned_rules.iter().any(|rule| {
+            rule.action == LinuxNftablesRuleAction::Drop
+                && rule.selector == "domain:metadata.google.internal"
+                && rule.reason.contains("requires resolver")
+        }));
+        assert!(plan.packet_policy.live_enforced);
+        assert!(!plan.domain_policy.live_enforced);
     }
 
     #[test]
@@ -4612,7 +5476,7 @@ printf landlock-policy-ok
             .iter()
             .filter(|rule| rule.selector.starts_with("domain:"))
             .collect();
-        assert_eq!(domain_rules.len(), 3);
+        assert_eq!(domain_rules.len(), 2);
         assert!(domain_rules
             .iter()
             .all(|rule| rule.reason.contains("requires resolver/ipset compilation")));
@@ -4620,9 +5484,10 @@ printf landlock-policy-ok
             rule.action == LinuxNftablesRuleAction::Accept
                 && rule.selector == "domain:api.github.com"
         }));
-        assert!(domain_rules.iter().any(|rule| {
+        assert!(plan.planned_rules.iter().any(|rule| {
             rule.action == LinuxNftablesRuleAction::Drop
-                && rule.selector == "domain:169.254.169.254"
+                && rule.selector == "ip daddr 169.254.169.254"
+                && rule.reason.contains("packet denylist")
         }));
     }
 
@@ -4646,9 +5511,11 @@ printf landlock-policy-ok
         }));
         assert!(plan.requires_nftables);
         assert!(plan.requires_linux);
+        assert!(plan.packet_policy.live_enforced);
+        assert!(!plan.domain_policy.live_enforced);
         assert!(plan
             .enforcement_claim
-            .contains("no packet/domain denial proof"));
+            .contains("session-scoped nftables packet rules"));
     }
 
     #[test]
@@ -4826,8 +5693,8 @@ printf landlock-policy-ok
         );
         assert!(plan.runner_phases.iter().any(|phase| {
             phase.name == "apply-nftables"
-                && phase.evidence_event == "agentpod.linux.runner.nftables.skeleton.applied"
-                && phase.claim.contains("no egress hook")
+                && phase.evidence_event == "agentpod.linux.runner.nftables.installed"
+                && phase.claim.contains("session nftables lifecycle")
         }));
         assert_eq!(
             plan.ebpf.enforcement,

@@ -62,6 +62,11 @@ else:
     assert classes["truncate"]["support"] == "UnsupportedByHostAbi"
 assert plan["network_enforcement"]["env_var"] == "AGENTBOX_LINUX_NETWORK_GUARD"
 assert plan["nftables"]["live_gate"]["env_var"] == "AGENTBOX_LINUX_NFTABLES"
+assert "socket cgroupv2" in plan["nftables"]["session_scope"]["cgroup_match"]
+assert plan["nftables"]["packet_policy"]["cgroup_scoped"] is True
+assert "agentpod.linux.runner.nftables.installed" in plan["nftables"]["lifecycle"]["evidence_events"]
+assert "agentpod.linux.runner.nftables.removed" in plan["nftables"]["lifecycle"]["evidence_events"]
+assert "agentpod.linux.runner.nftables.denied_packet" in plan["nftables"]["lifecycle"]["evidence_events"]
 assert any(
     phase["name"] == "bind-workspace"
     and phase["status"] == "prototype"
@@ -71,6 +76,11 @@ assert any(
 assert any(
     phase["name"] == "apply-landlock"
     and phase["status"] == "prototype"
+    for phase in plan["runner_phases"]
+)
+assert any(
+    phase["name"] == "apply-nftables"
+    and phase["evidence_event"] == "agentpod.linux.runner.nftables.installed"
     for phase in plan["runner_phases"]
 )
 assert any(

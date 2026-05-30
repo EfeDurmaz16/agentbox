@@ -297,10 +297,12 @@ Podman compatibility is not presented as domain or packet-level policy
 enforcement. Linux AgentPod work has started with user, mount, PID namespace,
 cgroups v2, no-new-privs, seccomp profile, and Landlock filesystem primitives,
 plus a gated prototype executor with a narrow BPF seccomp loader for supported
-generated or imported OCI/libseccomp subset syscall deny rules, a coarse
-connect-deny network guard for deny-all Linux network modes, and an ABI-aware
-Landlock path-beneath loader for the supported read/write/create/remove/execute
-plus host-supported `REFER` and `TRUNCATE` subset. macOS
+generated or imported OCI/libseccomp subset syscall deny rules, a legacy coarse
+connect-deny network guard for deny-all Linux network modes, session-cgroup
+scoped nftables output-hook packet rules for IP/CIDR policy behind
+`AGENTBOX_LINUX_NFTABLES=1`, and an ABI-aware Landlock path-beneath loader for
+the supported read/write/create/remove/execute plus host-supported `REFER` and
+`TRUNCATE` subset. macOS
 AgentPod now has a native plan compiler for the Apple Virtualization, Endpoint
 Security, Network Extension, entitlement, host bridge, and evidence surfaces,
 but provider execution remains unavailable until live runner and enforcement
@@ -321,7 +323,7 @@ tests exist.
 - native provider execution proof beyond descriptors and gated prototypes
 - protected host path denial tests on each provider that claims filesystem
   isolation
-- provider-specific network enforcement proof before claiming packet/domain denial
+- live domain resolver/ipset proof before claiming domain allowlist enforcement
 - honest platform-specific bypass documentation
 
 See [docs/product-direction.md](docs/product-direction.md) and
