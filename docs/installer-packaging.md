@@ -5,6 +5,10 @@ path is still a source build plus `agentbox install` for shims. This plan
 defines how packaging should graduate without pretending that unverified
 installers or native providers are shipped.
 
+For the product-level split between OSS core, paid packaging/support, remote
+workers, and enterprise controls, see the
+[pricing and packaging boundary](pricing-packaging-boundary.md).
+
 ## Packaging Contract
 
 Every package must preserve the same public support levels used by

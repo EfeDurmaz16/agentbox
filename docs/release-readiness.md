@@ -7,6 +7,9 @@ runtime boundary for autonomous agents.
 For the public v0 paid-product and OSS-proud release bar, including provider
 truth, installer, QA, docs, support, and evidence verification criteria, see
 [AgentPod v0 release criteria](v0-release-criteria.md).
+For the product-level split between OSS core, paid packaging/support, remote
+workers, and enterprise controls, see the
+[pricing and packaging boundary](pricing-packaging-boundary.md).
 For the provider/platform QA gates used to record required checks, optional
 live smoke, host-dependent skips, and future proof, see the
 [AgentPod QA matrix](qa-matrix.md).

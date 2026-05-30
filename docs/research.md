@@ -1,5 +1,10 @@
 # Agentbox Market Research (April 2026)
 
+> Historical market research. Pricing examples and competitor claims in this
+> file are not current packaging claims. Current OSS/paid/remote/enterprise
+> boundaries live in
+> [pricing and packaging boundary](pricing-packaging-boundary.md).
+
 ## Real Incidents — Why This Product Needs to Exist
 
 | Date | Incident | Impact | Source |

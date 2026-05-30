@@ -5,7 +5,9 @@ experimental, prototype, descriptor-only, unavailable, or planned. Agentbox is
 moving from command interception into the AgentPod contract: adaptive governed
 execution cells for autonomous agents. Not every provider boundary is
 implemented yet. The canonical status terms live in the
-[provider truth contract](provider-truth.md).
+[provider truth contract](provider-truth.md). Pricing, packaging, support, and
+enterprise claims must also stay inside the
+[pricing and packaging boundary](pricing-packaging-boundary.md).
 
 ## Product Surface
 

@@ -198,15 +198,19 @@ Docs are release-blocking when they affect operator trust. Before v0, verify:
 - `docs/limitations.md` explains direct-host, Podman, native provider, and
   credential boundaries.
 - `docs/installer-packaging.md` matches the actual installer/package state.
+- `docs/pricing-packaging-boundary.md` separates OSS core, paid
+  packaging/support, remote workers, and enterprise controls without upgrading
+  provider claims.
 - `docs/release-readiness.md` links to this v0 release criteria document.
 - Release notes include the exact verification commands and artifact location.
 
 ### Support
 
-Until a dedicated support bundle command ships, the support baseline is a
-manual collection path:
+The support baseline is the redacted support bundle plus the individual
+diagnostic commands it summarizes:
 
 ```sh
+agentbox support-bundle --output ./agentbox-support-bundle --json
 cargo run --locked -q -p agentbox-cli -- doctor --json
 cargo run --locked -q -p agentbox-cli -- setup-plan --json
 cargo run --locked -q -p agentbox-cli -- provider-gaps --json
@@ -214,6 +218,10 @@ cargo run --locked -q -p agentbox-cli -- provider-readiness --json
 cargo run --locked -q -p agentbox-cli -- bridge-health --json
 bash scripts/release-readiness.sh
 ```
+
+The support bundle must redact secrets and export evidence references rather
+than raw transcripts. It does not replace evidence verification when a session
+claim matters.
 
 Support must ask for evidence references or a verified evidence bundle before
 trusting claims about what happened in a session. Support materials must also

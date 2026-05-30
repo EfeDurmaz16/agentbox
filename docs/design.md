@@ -6,6 +6,12 @@ Repo: EfeDurmaz16/osp (context repo, product is standalone)
 Status: APPROVED
 Mode: Startup
 
+> Historical v0.1 design note. This predates the AgentPod product boundary,
+> current installer state, and current provider truth vocabulary. Treat
+> Homebrew, signed binary, and zero-config distribution notes below as target
+> hypotheses, not shipped claims. Current packaging and paid/OSS boundaries
+> live in [pricing and packaging boundary](pricing-packaging-boundary.md).
+
 ## Problem Statement
 
 Autonomous AI agents (OpenClaw, Hermes, Perplexity Personal Computer) run 24/7 on personal machines. People are so afraid of destructive actions that they buy dedicated Mac Minis ($599) as physical isolation. Apple stores run out of stock. Meanwhile, the YOLO majority runs agents with full machine access and zero governance.
