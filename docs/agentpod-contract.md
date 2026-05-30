@@ -74,8 +74,11 @@ combines rootless user namespace, mount namespace metadata, PID namespace,
 cgroup v2 resource writes, seccomp profile metadata, and Landlock ruleset
 metadata into one object. The gated executor also sets `PR_SET_NO_NEW_PRIVS`
 before exec and can install a prototype BPF seccomp filter for supported
-syscall deny rules and a prototype read/write/execute Landlock path-beneath
-filesystem ruleset. The Landlock loader carries explicit workspace, mount,
+syscall deny rules, a gated coarse connect-deny network guard for deny-all
+network modes, and a prototype read/write/execute Landlock path-beneath
+filesystem ruleset. The network guard proves process-level `connect(2)` denial
+only; domain allowlists and packet firewall semantics still require a later
+nftables/eBPF bridge. The Landlock loader carries explicit workspace, mount,
 guest alias, and runtime support paths so launcher binaries, dynamic loaders,
 host libraries, and diagnostics can run without pretending to be a complete
 filesystem sandbox. The

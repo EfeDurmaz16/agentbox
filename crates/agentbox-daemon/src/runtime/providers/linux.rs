@@ -548,24 +548,7 @@ impl Default for LinuxSeccompProfileImportDescriptor {
 impl LinuxSeccompPlan {
     pub fn from_profile(profile: &SeccompProfile) -> Self {
         let enabled = profile.enabled;
-        let oci_profile = enabled.then(|| LinuxSeccompOciProfile {
-            default_action: seccomp_action_to_oci(&profile.default_action).0,
-            architectures: vec![current_seccomp_architecture().to_string()],
-            syscalls: profile
-                .rules
-                .iter()
-                .map(|rule| {
-                    let (action, errno_ret) = seccomp_action_to_oci(&rule.action);
-                    LinuxSeccompOciSyscall {
-                        names: vec![rule.syscall.clone()],
-                        action,
-                        errno_ret,
-                        comment: rule.reason.clone(),
-                    }
-                })
-                .collect(),
-        });
-        Self {
+        let mut plan = Self {
             schema_version: 1,
             enabled,
             default_action: profile.default_action.clone(),
@@ -579,14 +562,36 @@ impl LinuxSeccompPlan {
                 })
                 .collect(),
             denied_syscall_fixture: linux_seccomp_denied_syscall_fixture(profile),
-            import_descriptor: LinuxSeccompProfileImportDescriptor::for_generated_profile(
-                oci_profile.is_some(),
-            ),
-            oci_profile,
+            import_descriptor: LinuxSeccompProfileImportDescriptor::for_generated_profile(false),
+            oci_profile: None,
             requires_loader: enabled,
             requires_linux: true,
-        }
+        };
+        refresh_linux_seccomp_generated_profile(&mut plan);
+        plan
     }
+}
+
+fn refresh_linux_seccomp_generated_profile(plan: &mut LinuxSeccompPlan) {
+    plan.oci_profile = plan.enabled.then(|| LinuxSeccompOciProfile {
+        default_action: seccomp_action_to_oci(&plan.default_action).0,
+        architectures: vec![current_seccomp_architecture().to_string()],
+        syscalls: plan
+            .syscall_rules
+            .iter()
+            .map(|rule| {
+                let (action, errno_ret) = seccomp_action_to_oci(&rule.action);
+                LinuxSeccompOciSyscall {
+                    names: vec![rule.syscall.clone()],
+                    action,
+                    errno_ret,
+                    comment: rule.reason.clone(),
+                }
+            })
+            .collect(),
+    });
+    plan.import_descriptor =
+        LinuxSeccompProfileImportDescriptor::for_generated_profile(plan.oci_profile.is_some());
 }
 
 fn linux_seccomp_denied_syscall_fixture(
@@ -1274,6 +1279,187 @@ fn linux_nftables_live_gate_enabled() -> bool {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LinuxNetworkEnforcementBridgePlan {
+    pub schema_version: i64,
+    pub env_var: String,
+    pub enabled: bool,
+    pub strategy: LinuxNetworkEnforcementStrategy,
+    pub mode: NetworkMode,
+    pub applied_to_seccomp: bool,
+    pub seccomp_syscalls: Vec<String>,
+    pub denied_destinations: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub denied_destination_fixture: Option<LinuxNetworkDeniedDestinationFixturePlan>,
+    pub evidence_event: String,
+    pub enforcement_claim: String,
+    pub requires_linux: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LinuxNetworkEnforcementStrategy {
+    DescriptorOnly,
+    SeccompConnectDeny,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LinuxNetworkDeniedDestinationFixturePlan {
+    pub schema_version: i64,
+    pub destination_template: String,
+    pub syscall: String,
+    pub expected_error: String,
+    pub evidence_event: String,
+    pub claim_boundary: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LinuxNetworkDeniedDestinationFixtureEvidence {
+    pub schema_version: i64,
+    pub provider: String,
+    pub session_id: String,
+    pub phase: String,
+    pub event_name: String,
+    pub destination: String,
+    pub syscall: String,
+    pub expected_error: String,
+    pub observed_error: String,
+    pub observed_denial: bool,
+    pub claim: String,
+}
+
+pub struct LinuxNetworkEnforcementBridge;
+
+impl LinuxNetworkDeniedDestinationFixturePlan {
+    pub fn evidence(
+        &self,
+        session_id: &str,
+        destination: &str,
+        observed_error: &str,
+    ) -> LinuxNetworkDeniedDestinationFixtureEvidence {
+        LinuxNetworkDeniedDestinationFixtureEvidence {
+            schema_version: 1,
+            provider: "agentpod-linux".into(),
+            session_id: session_id.into(),
+            phase: "apply-network-guard".into(),
+            event_name: self.evidence_event.clone(),
+            destination: destination.into(),
+            syscall: self.syscall.clone(),
+            expected_error: self.expected_error.clone(),
+            observed_error: observed_error.into(),
+            observed_denial: observed_error.contains(&self.expected_error)
+                || observed_error.contains("Operation not permitted")
+                || observed_error.contains("os error 1"),
+            claim: self.claim_boundary.clone(),
+        }
+    }
+}
+
+impl LinuxNetworkEnforcementBridge {
+    pub fn plan(spec: &MinipodSpec) -> Result<LinuxNetworkEnforcementBridgePlan, RuntimeError> {
+        if spec.id.trim().is_empty() {
+            return Err(RuntimeError::ManifestRejected(
+                "network enforcement session id cannot be empty".into(),
+            ));
+        }
+        Ok(Self::plan_with_gate(spec, linux_network_guard_enabled()))
+    }
+
+    fn plan_with_gate(spec: &MinipodSpec, gate_enabled: bool) -> LinuxNetworkEnforcementBridgePlan {
+        let bridge_supported = linux_network_guard_supports_spec(spec);
+        let enabled = gate_enabled && bridge_supported;
+        let denied_destinations = if spec.network.denied_domains.is_empty() {
+            vec!["loopback-ephemeral-fixture".into()]
+        } else {
+            spec.network.denied_domains.clone()
+        };
+        let denied_destination_fixture =
+            bridge_supported.then(linux_network_denied_destination_fixture);
+        let strategy = if enabled {
+            LinuxNetworkEnforcementStrategy::SeccompConnectDeny
+        } else {
+            LinuxNetworkEnforcementStrategy::DescriptorOnly
+        };
+        let seccomp_syscalls = if enabled {
+            vec!["connect".into()]
+        } else {
+            Vec::new()
+        };
+        let enforcement_claim = if enabled {
+            "gated coarse Linux network guard denies connect(2) via Agentbox-generated seccomp BPF for deny-all network modes; this proves process-level connect denial only, not domain allowlist or packet firewall enforcement".into()
+        } else if gate_enabled {
+            "Linux network guard gate is set, but this manifest requires domain/allowlist packet policy that the coarse connect-deny bridge must not claim".into()
+        } else {
+            "Linux network guard descriptor only; set AGENTBOX_LINUX_NETWORK_GUARD=1 for the coarse connect-deny prototype on deny-all network modes".into()
+        };
+
+        LinuxNetworkEnforcementBridgePlan {
+            schema_version: 1,
+            env_var: "AGENTBOX_LINUX_NETWORK_GUARD".into(),
+            enabled,
+            strategy,
+            mode: spec.network.mode.clone(),
+            applied_to_seccomp: enabled,
+            seccomp_syscalls,
+            denied_destinations,
+            denied_destination_fixture,
+            evidence_event: "agentpod.linux.runner.network_guard.denied_destination".into(),
+            enforcement_claim,
+            requires_linux: true,
+        }
+    }
+
+    fn apply_to_seccomp(plan: &LinuxNetworkEnforcementBridgePlan, seccomp: &mut LinuxSeccompPlan) {
+        if !plan.applied_to_seccomp {
+            return;
+        }
+        if seccomp
+            .syscall_rules
+            .iter()
+            .any(|rule| rule.syscall == "connect")
+        {
+            return;
+        }
+        seccomp.enabled = true;
+        seccomp.requires_loader = true;
+        seccomp.syscall_rules.push(LinuxSeccompRule {
+            syscall: "connect".into(),
+            action: SeccompAction::Errno(libc::EPERM),
+            reason:
+                "Linux network guard denies connect syscall for deny-all AgentPod network policy"
+                    .into(),
+        });
+        refresh_linux_seccomp_generated_profile(seccomp);
+    }
+}
+
+fn linux_network_denied_destination_fixture() -> LinuxNetworkDeniedDestinationFixturePlan {
+    LinuxNetworkDeniedDestinationFixturePlan {
+        schema_version: 1,
+        destination_template: "127.0.0.1:<ephemeral-listener-port>".into(),
+        syscall: "connect".into(),
+        expected_error: "EPERM".into(),
+        evidence_event: "agentpod.linux.runner.network_guard.denied_destination".into(),
+        claim_boundary:
+            "fixture proves coarse connect(2) denial only; not nftables packet/domain enforcement"
+                .into(),
+    }
+}
+
+fn linux_network_guard_supports_spec(spec: &MinipodSpec) -> bool {
+    matches!(
+        spec.network.mode,
+        NetworkMode::None | NetworkMode::DenyByDefault
+    ) && !spec.network.allow_localhost
+        && spec.network.allowed_domains.is_empty()
+}
+
+fn linux_network_guard_enabled() -> bool {
+    matches!(
+        std::env::var("AGENTBOX_LINUX_NETWORK_GUARD").as_deref(),
+        Ok("1")
+    )
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LinuxEbpfObservabilityPlan {
     pub schema_version: i64,
     pub session_id: String,
@@ -1415,6 +1601,7 @@ pub struct LinuxAgentPodExecutionPlan {
     pub cgroup: LinuxCgroupV2Plan,
     pub seccomp: LinuxSeccompPlan,
     pub landlock: LinuxLandlockPlan,
+    pub network_enforcement: LinuxNetworkEnforcementBridgePlan,
     pub nftables: LinuxNftablesPlan,
     pub ebpf: LinuxEbpfObservabilityPlan,
     pub cgroup_root: String,
@@ -1482,7 +1669,9 @@ impl LinuxAgentPodExecutionPlan {
         let pid_namespace = LinuxPidNamespaceLauncher::plan(command)?;
         let mut cgroup = LinuxCgroupV2Limiter::plan(&spec.id, &spec.resources)?;
         cgroup.pids_max = linux_pids_max_from_spec(spec)?;
-        let seccomp = LinuxSeccompProfileLoader::plan(&spec.seccomp)?;
+        let network_enforcement = LinuxNetworkEnforcementBridge::plan(spec)?;
+        let mut seccomp = LinuxSeccompProfileLoader::plan(&spec.seccomp)?;
+        LinuxNetworkEnforcementBridge::apply_to_seccomp(&network_enforcement, &mut seccomp);
         let landlock = LinuxLandlockRuleset::plan(spec)?;
         let nftables = LinuxNftablesPolicyDescriptor::plan(spec)?;
         let ebpf = LinuxEbpfObserverDescriptor::plan(spec)?;
@@ -1501,6 +1690,7 @@ impl LinuxAgentPodExecutionPlan {
                 &cgroup,
                 &seccomp,
                 &landlock,
+                &network_enforcement,
                 &nftables,
             ),
             user_namespace,
@@ -1509,6 +1699,7 @@ impl LinuxAgentPodExecutionPlan {
             cgroup,
             seccomp,
             landlock,
+            network_enforcement,
             nftables,
             ebpf,
             cgroup_root: linux_cgroup_v2_root().display().to_string(),
@@ -1564,6 +1755,7 @@ fn linux_agentpod_runner_phases(
     cgroup: &LinuxCgroupV2Plan,
     seccomp: &LinuxSeccompPlan,
     landlock: &LinuxLandlockPlan,
+    network_enforcement: &LinuxNetworkEnforcementBridgePlan,
     nftables: &LinuxNftablesPlan,
 ) -> Vec<LinuxAgentPodRunnerPhase> {
     vec![
@@ -1665,6 +1857,17 @@ fn linux_agentpod_runner_phases(
             } else {
                 "no syscall deny filter requested".into()
             },
+        },
+        LinuxAgentPodRunnerPhase {
+            name: "apply-network-guard".into(),
+            status: if network_enforcement.enabled {
+                "prototype"
+            } else {
+                "inactive"
+            }
+            .into(),
+            evidence_event: "agentpod.linux.runner.network_guard.applied".into(),
+            claim: network_enforcement.enforcement_claim.clone(),
         },
         LinuxAgentPodRunnerPhase {
             name: "apply-nftables".into(),
@@ -1992,6 +2195,79 @@ fn run_linux_seccomp_denied_syscall_fixture(
 }
 
 #[cfg(all(test, target_os = "linux"))]
+fn run_linux_network_denied_destination_fixture(
+    plan: &LinuxNetworkEnforcementBridgePlan,
+    seccomp: &LinuxSeccompPlan,
+    session_id: &str,
+) -> Result<LinuxNetworkDeniedDestinationFixtureEvidence, RuntimeError> {
+    let fixture = plan.denied_destination_fixture.as_ref().ok_or_else(|| {
+        RuntimeError::ManifestRejected(
+            "Linux network enforcement plan does not include a denied destination fixture".into(),
+        )
+    })?;
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).map_err(|err| {
+        RuntimeError::ExecFailed(format!(
+            "Linux network denied destination fixture failed to bind listener: {err}"
+        ))
+    })?;
+    let addr = listener.local_addr().map_err(|err| {
+        RuntimeError::ExecFailed(format!(
+            "Linux network denied destination fixture failed to read listener address: {err}"
+        ))
+    })?;
+    let mut command = std::process::Command::new("python3");
+    command
+        .arg("-c")
+        .arg(
+            r#"
+import errno
+import socket
+import sys
+
+host = sys.argv[1]
+port = int(sys.argv[2])
+sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+try:
+    sock.connect((host, port))
+except OSError as exc:
+    print(f"connect_error:{exc.errno}:{exc.strerror}")
+    sys.exit(0 if exc.errno == errno.EPERM else 3)
+print("connect_unexpectedly_succeeded")
+sys.exit(2)
+"#,
+        )
+        .arg(addr.ip().to_string())
+        .arg(addr.port().to_string())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    configure_linux_child_security(&mut command, Some(seccomp), None).map_err(|err| {
+        RuntimeError::ExecFailed(format!(
+            "Linux network denied destination fixture failed to prepare child security: {err}"
+        ))
+    })?;
+
+    let child = command.spawn().map_err(|err| {
+        RuntimeError::ExecFailed(format!(
+            "Linux network denied destination fixture failed to spawn python3: {err}"
+        ))
+    })?;
+    let output = wait_for_child_output(child, Some(5))?;
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    let destination = addr.to_string();
+    let evidence = fixture.evidence(session_id, &destination, &stdout);
+
+    if !output.status.success() || !evidence.observed_denial {
+        return Err(RuntimeError::ExecFailed(format!(
+            "Linux network denied destination fixture did not observe expected denial: stdout={stdout:?} stderr={stderr:?} status={:?}",
+            output.status.code()
+        )));
+    }
+
+    Ok(evidence)
+}
+
+#[cfg(all(test, target_os = "linux"))]
 struct LinuxPreparedChildSecurity {
     seccomp_filter: Option<Vec<libc::sock_filter>>,
     landlock_ruleset: Option<LinuxLandlockPreparedRuleset>,
@@ -2143,6 +2419,7 @@ fn linux_syscall_number(syscall: &str) -> Option<u32> {
         "bpf" => Some(libc::SYS_bpf as u32),
         "clone" => Some(libc::SYS_clone as u32),
         "clone3" => Some(libc::SYS_clone3 as u32),
+        "connect" => Some(libc::SYS_connect as u32),
         "kill" => Some(libc::SYS_kill as u32),
         "ptrace" => Some(libc::SYS_ptrace as u32),
         "unshare" => Some(libc::SYS_unshare as u32),
@@ -3232,6 +3509,110 @@ printf landlock-policy-ok
     }
 
     #[test]
+    fn network_enforcement_bridge_plans_coarse_connect_deny_for_deny_all_modes() {
+        let mut spec = MinipodSpec::for_agent_task("hermes", "/tmp/agentbox-work");
+        spec.network.mode = NetworkMode::DenyByDefault;
+        spec.network.allow_localhost = false;
+        spec.network.allowed_domains.clear();
+        spec.network.denied_domains = vec!["169.254.169.254".into()];
+        let plan = LinuxNetworkEnforcementBridge::plan_with_gate(&spec, true);
+        let mut seccomp = LinuxSeccompProfileLoader::plan(&spec.seccomp).unwrap();
+
+        LinuxNetworkEnforcementBridge::apply_to_seccomp(&plan, &mut seccomp);
+
+        assert!(plan.enabled);
+        assert_eq!(
+            plan.strategy,
+            LinuxNetworkEnforcementStrategy::SeccompConnectDeny
+        );
+        assert!(plan.applied_to_seccomp);
+        assert_eq!(plan.seccomp_syscalls, vec!["connect"]);
+        assert_eq!(plan.denied_destinations, vec!["169.254.169.254"]);
+        assert!(plan.denied_destination_fixture.is_some());
+        assert!(plan
+            .enforcement_claim
+            .contains("not domain allowlist or packet firewall"));
+        assert!(seccomp.enabled);
+        assert!(seccomp.requires_loader);
+        assert!(seccomp.syscall_rules.iter().any(|rule| {
+            rule.syscall == "connect"
+                && matches!(&rule.action, SeccompAction::Errno(errno) if *errno == libc::EPERM)
+        }));
+        assert!(seccomp
+            .oci_profile
+            .as_ref()
+            .unwrap()
+            .syscalls
+            .iter()
+            .any(|rule| rule.names == vec!["connect"]));
+    }
+
+    #[test]
+    fn network_enforcement_bridge_refuses_to_fake_domain_allowlist_enforcement() {
+        let mut spec = MinipodSpec::for_agent_task("hermes", "/tmp/agentbox-work");
+        spec.network.mode = NetworkMode::AllowListed;
+        spec.network.allow_localhost = false;
+        spec.network.allowed_domains = vec!["api.openai.com".into()];
+        let plan = LinuxNetworkEnforcementBridge::plan_with_gate(&spec, true);
+        let mut seccomp = LinuxSeccompProfileLoader::plan(&spec.seccomp).unwrap();
+
+        LinuxNetworkEnforcementBridge::apply_to_seccomp(&plan, &mut seccomp);
+
+        assert!(!plan.enabled);
+        assert_eq!(
+            plan.strategy,
+            LinuxNetworkEnforcementStrategy::DescriptorOnly
+        );
+        assert!(!plan.applied_to_seccomp);
+        assert!(plan.seccomp_syscalls.is_empty());
+        assert!(plan
+            .enforcement_claim
+            .contains("requires domain/allowlist packet policy"));
+        assert!(!seccomp.enabled);
+        assert!(seccomp.syscall_rules.is_empty());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_network_denied_destination_fixture_records_connect_denial_evidence() {
+        if std::process::Command::new("python3")
+            .arg("--version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_err()
+        {
+            eprintln!("skipping Linux network guard fixture: python3 is required");
+            return;
+        }
+
+        let mut spec = MinipodSpec::for_agent_task("hermes", "/tmp/agentbox-work");
+        spec.network.mode = NetworkMode::None;
+        spec.network.allow_localhost = false;
+        spec.network.allowed_domains.clear();
+        let plan = LinuxNetworkEnforcementBridge::plan_with_gate(&spec, true);
+        let mut seccomp = LinuxSeccompProfileLoader::plan(&spec.seccomp).unwrap();
+        LinuxNetworkEnforcementBridge::apply_to_seccomp(&plan, &mut seccomp);
+
+        let evidence =
+            run_linux_network_denied_destination_fixture(&plan, &seccomp, "session-network")
+                .unwrap();
+
+        assert_eq!(evidence.provider, "agentpod-linux");
+        assert_eq!(evidence.session_id, "session-network");
+        assert_eq!(evidence.phase, "apply-network-guard");
+        assert_eq!(
+            evidence.event_name,
+            "agentpod.linux.runner.network_guard.denied_destination"
+        );
+        assert_eq!(evidence.syscall, "connect");
+        assert_eq!(evidence.expected_error, "EPERM");
+        assert!(evidence.destination.starts_with("127.0.0.1:"));
+        assert!(evidence.observed_denial);
+        assert!(evidence.claim.contains("connect(2) denial"));
+    }
+
+    #[test]
     fn nftables_plan_describes_domain_and_loopback_policy_without_claiming_enforcement() {
         let mut spec = MinipodSpec::for_agent_task("hermes", "/tmp/agentbox-work");
         spec.id = "agentpod.test/session-1".into();
@@ -3486,6 +3867,14 @@ printf landlock-policy-ok
         assert_eq!(plan.nftables.chain_name, "agentpod_egress");
         assert!(plan.nftables.requires_nftables);
         assert_eq!(plan.nftables.live_gate.env_var, "AGENTBOX_LINUX_NFTABLES");
+        assert_eq!(
+            plan.network_enforcement.env_var,
+            "AGENTBOX_LINUX_NETWORK_GUARD"
+        );
+        assert_eq!(
+            plan.network_enforcement.evidence_event,
+            "agentpod.linux.runner.network_guard.denied_destination"
+        );
         assert!(plan.runner_phases.iter().any(|phase| {
             phase.name == "apply-nftables"
                 && phase.evidence_event == "agentpod.linux.runner.nftables.skeleton.applied"
@@ -3600,6 +3989,7 @@ printf landlock-policy-ok
                 ("apply-cgroup", "prototype"),
                 ("apply-landlock", "prototype"),
                 ("apply-seccomp", "inactive"),
+                ("apply-network-guard", "inactive"),
                 ("apply-nftables", "inactive"),
                 ("exec-command", "prototype"),
             ]
@@ -3635,6 +4025,7 @@ printf landlock-policy-ok
         assert_eq!(plan.cgroup.cgroup_name, format!("agentbox-{}", spec.id));
         assert!(plan.landlock.default_deny);
         assert!(!plan.seccomp.requires_loader);
+        assert!(!plan.network_enforcement.enabled);
     }
 
     #[test]
@@ -3662,6 +4053,7 @@ printf landlock-policy-ok
                 "apply-cgroup",
                 "apply-landlock",
                 "apply-seccomp",
+                "apply-network-guard",
                 "apply-nftables",
                 "exec-command",
             ]
