@@ -1,7 +1,13 @@
 # Agentbox 100-Issue Runtime Sprint
 
-This is the initial issue backlog for turning Agentbox into a usable
-cross-platform governed minipod runtime for autonomous agents.
+> Historical/superseded planning note. This backlog captured the first product
+> reset wave before AgentPod became the primary product contract. Keep it for
+> context only; use `docs/roadmap-250-commits.md`,
+> `docs/product-checkpoint-audit.md`, and the status matrix for current claims.
+
+This was the initial issue backlog for turning Agentbox into a usable
+cross-platform governed runtime for autonomous agents. Older "minipod" and
+Podman-centered wording below is historical, not the current product framing.
 
 The target shape is 100 issues grouped into 10 epics. Most issues should become
 one pull request or one atomic commit. Larger issues should split into 2-6

@@ -19,9 +19,10 @@ agent command
 ```
 
 The direct-host path is the strongest generally runnable local path on macOS
-today. Linux native execution is a gated prototype on Linux hosts. macOS,
-Windows, remote, and Podman provider surfaces are useful, but their support
-levels differ and must stay explicit.
+today. Linux native execution is a gated prototype on Linux hosts. Remote is an
+experimental contract worker surface. macOS and Windows native providers are
+descriptor/contract surfaces until lifecycle and enforcement proof exists.
+Podman remains compatibility-only. These support levels must stay explicit.
 
 ## Runnable Today
 

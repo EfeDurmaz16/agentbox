@@ -46,7 +46,7 @@ Autonomous agent task
   |
   +-- current validated mode: host workspace with Agentbox shims on PATH
   |
-  +-- product direction: local minipod with explicit boundaries
+  +-- product direction: AgentPod with explicit boundaries
         |
         v
 filesystem / network / credential / process / host-action boundary
@@ -164,13 +164,13 @@ ntfy_server = "https://ntfy.sh"       # or self-host: https://your-server.com
 approval_timeout_secs = 120            # 30-600 seconds
 ```
 
-## Guarded Minipods (Experimental AgentPod Runtime)
+## AgentPods
 
-Run agents in local AgentPod minipods while routing selected host-impacting
-actions through Agentbox policy. Today, `agentbox run` uses the runtime manager
-with a Podman compatibility adapter because that gives a runnable backend while
-the native `agentpod-macos`, `agentpod-linux`, and `agentpod-windows` providers
-are being built. Podman is not the architecture; it is the bootstrap backend.
+Run agents through AgentPod sessions while routing selected host-impacting
+actions through Agentbox policy. The primary product contract is AgentPod:
+manifest, provider selection, workspace mode, credential grants, policy,
+approval, and evidence. Podman is a compatibility provider for live smoke
+coverage on hosts where it is available; it is not the architecture.
 
 For day-to-day macOS use, the shipped `direct-host` path is the low-friction
 starting point: Agentbox installs PATH shims, runs a local daemon over a Unix
@@ -193,7 +193,8 @@ agentbox bridge-health --json
 ```
 
 ```bash
-# Run an agent in a governed local minipod
+# Run through provider selection. This is governed execution, not a native
+# sandbox unless the selected provider explicitly reports that capability.
 agentbox run "openclaw start"
 
 # Run a low-risk command through the shipped direct-host runtime path
@@ -213,7 +214,7 @@ agentbox run --plan --risk high --workspace-mode overlay-review "codex"
 # Emit machine-readable run output for automation when a backend is runnable
 agentbox run --json --provider podman "npm test"
 
-# Generate the governed minipod manifest without starting a backend
+# Generate the AgentPod manifest without starting a backend
 agentbox minipod-spec hermes --workspace . --allow-domain api.openai.com
 
 # Generate a manifest where writes go to a reviewable overlay instead of being
@@ -243,7 +244,7 @@ scripts/demo-autonomous-agent.sh
 # Live compatibility smoke for daemon socket + shim bridge when Podman exists
 scripts/smoke-podman-bridge.sh
 
-# Build the Linux guest shim artifact used by Podman compatibility minipods
+# Build the Linux guest shim artifact used by Podman compatibility sessions
 rustup target add x86_64-unknown-linux-musl
 eval "$(scripts/build-linux-shim.sh)"
 
@@ -268,10 +269,10 @@ agentbox minipod-spec hermes --workspace . --agent-profile research
 # With specific runtime and services
 agentbox run --runtime node --with postgres "npm test"
 
-# List running minipods
+# List persisted AgentPod sessions
 agentbox pods
 
-# Stop a minipod session
+# Stop an AgentPod session
 agentbox stop-pod 01hxyzagentpod
 ```
 
@@ -287,24 +288,27 @@ Podman compatibility is not presented as domain or packet-level policy
 enforcement. Linux AgentPod work has started with user, mount, PID namespace,
 cgroups v2, no-new-privs, seccomp profile, and Landlock filesystem primitives,
 plus a gated prototype executor with a narrow BPF seccomp loader for supported
-syscall deny rules plus a write-oriented Landlock path-beneath loader. macOS AgentPod now has a native plan compiler for the Apple
-Virtualization, Endpoint Security, Network Extension, entitlement, host bridge,
-and evidence surfaces, but provider execution remains unavailable until live
-runner and enforcement tests exist.
+syscall deny rules plus a write-oriented Landlock path-beneath loader. macOS
+AgentPod now has a native plan compiler for the Apple Virtualization, Endpoint
+Security, Network Extension, entitlement, host bridge, and evidence surfaces,
+but provider execution remains unavailable until live runner and enforcement
+tests exist.
 
-**How guarded minipods work:**
-- Agent runs inside a container with governed filesystem and network policy metadata
-- Agentbox daemon socket is bind-mounted into the pod (the ONLY host connection)
-- Shim binaries are injected into the pod's PATH
-- Commands inside the pod still go through shim -> daemon -> policy check
-- Defense in depth: container isolation + command interception
-- Not bypass-proof yet; macOS Endpoint Security and protocol-level interception are roadmap items
+**How AgentPods work today:**
+- `direct-host` runs commands on the host with Agentbox shims, daemon policy,
+  approvals, and hash-chained audit/evidence. It is not a filesystem, process,
+  or packet sandbox.
+- Podman compatibility can run container-backed sessions where available, but
+  it does not prove Agentbox-owned native isolation.
+- Native Linux execution is prototype-gated. macOS and Windows native providers
+  are descriptor/contract surfaces until live lifecycle and enforcement proof
+  exists.
 
-**What minipods still need before v0.2 is credible:**
-- native AgentPod provider execution beyond descriptors
-- live smoke proof for the current Podman compatibility backend
-- protected host path denial tests
-- smoke tests proving the shim and daemon socket work inside the minipod
+**What AgentPod still needs before stronger isolation claims are credible:**
+- native provider execution proof beyond descriptors and gated prototypes
+- protected host path denial tests on each provider that claims filesystem
+  isolation
+- provider-specific network enforcement proof before claiming packet/domain denial
 - honest platform-specific bypass documentation
 
 See [docs/product-direction.md](docs/product-direction.md) and
@@ -354,7 +358,7 @@ bundle `root_sha256` so the same artifact can be handed to remote evidence
 upload, AGIT lineage, or FIDES-style verification without trusting loose local
 filenames.
 
-For macOS specifically, see
+For macOS AgentPod limitations, see
 [docs/macos-minipod-limitations.md](docs/macos-minipod-limitations.md).
 For file boundaries, see
 [docs/safe-file-sharing.md](docs/safe-file-sharing.md).
@@ -388,12 +392,12 @@ agentbox pods --json       # Inspect persisted AgentPod sessions
 agentbox pods --provider remote-agentpod --status running
 agentbox sessions --watch  # Watch persisted AgentPod sessions using product naming
 agentbox evidence        # Export audit/evidence JSONL
-agentbox minipod-spec    # Generate and validate a governed minipod manifest
+agentbox minipod-spec    # Generate and validate an AgentPod manifest
 agentbox minipod-spec --policy-bundle ./task-policy.json
 
-agentbox run <command>   # Run agent in a guarded local minipod
-agentbox pods            # List running compatibility-backend minipods
-agentbox stop-pod <id>   # Remove a minipod session
+agentbox run <command>   # Run through AgentPod provider selection
+agentbox pods            # List persisted AgentPod sessions
+agentbox stop-pod <id>   # Remove an AgentPod session
 agentbox credentials <session>          # List explicit credential grants
 agentbox credential-revoke <session> <name>  # Revoke a session credential grant
 ```
@@ -433,7 +437,7 @@ approval_timeout_secs = 120
 agentbox/
   crates/
     agentbox-policy/     # Risk classification engine (38 tests)
-    agentbox-daemon/     # Unix socket server + audit + ntfy + minipod runtime
+    agentbox-daemon/     # Unix socket server + audit + ntfy + AgentPod runtime
     agentbox-shim/       # Single binary, symlinked per command
     agentbox-cli/        # User-facing commands
     agentbox-client/     # Lightweight client for other Rust projects
@@ -458,8 +462,9 @@ agentbox/
 | Phase | What | Status |
 |-------|------|--------|
 | v0.1 | PATH shim daemon + phone approval | Done |
-| v0.2 | Guarded minipod runtime spine | In progress |
+| v0.2 | AgentPod runtime spine and provider truth reporting | Done |
 | v0.3 | Context-rich policy engine | Done |
+| v0.4 | Native provider proof: Linux gated prototype, macOS/Windows contracts | In progress |
 | v1.0 | macOS Endpoint Security host process/file enforcement | Planned |
 | v1.5 | MCP Governance Proxy (protocol-level interception) | Planned |
 
@@ -473,7 +478,7 @@ agentbox/
 | Enterprise governance (Palo Alto, Microsoft) | $$$$, team setup, cloud-dependent |
 | Nothing | Agents can mutate files, credentials, remotes, databases, and services without a local policy boundary |
 
-Agentbox: **local-first, agent-aware, policy-bound, audit-first minipods.**
+Agentbox: **local-first, agent-aware, policy-bound, audit-first AgentPods.**
 
 ## Tech Stack
 

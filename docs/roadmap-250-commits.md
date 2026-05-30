@@ -78,21 +78,18 @@ The sprint has moved past pure planning. The current working spine is:
   worker-side approvals, socket/provider-token credentials, full event
   streaming, and automatic remote supervision remain open.
 
-Immediate next implementation queue:
+Current proof queue:
 
-1. Split macOS system-extension readiness into install status, entitlement
-   status, and approval status descriptors.
-2. Wire the macOS native provider to write a VM runner request file and invoke
-   `agentbox-macos-vm-runner` behind `AGENTBOX_MACOS_NATIVE=1`, still expecting
-   an unavailable result until VM boot exists.
-3. Add Linux overlayfs apply as the next native execution primitive, still
-   gated behind `AGENTBOX_LINUX_NATIVE=1`.
-4. Add Linux live smoke coverage for request cleanup and parallel exec where the
-   host has delegated cgroups.
-5. Connect native runner phases to evidence events so plans and post-run
-   receipts share the same vocabulary.
-6. Convert the next implementation slices into GitHub issues with explicit
-   verification commands.
+1. macOS: boot a minimal Apple Virtualization VM cell, mount a workspace, and
+   prove create/exec/destroy lifecycle with evidence before claiming execution.
+2. Linux: strengthen seccomp/Landlock coverage, prove read/execute path policy,
+   and keep live native execution gated behind `AGENTBOX_LINUX_NATIVE=1`.
+3. Windows: extend Job Object contract work into process assignment,
+   kill-on-close cleanup, and resource limit proof before claiming execution.
+4. Remote: add worker-side approval UX, full event streaming, and supervision
+   without weakening the current credential restrictions.
+5. Installer UX: turn provider gap reports and bridge health into guided
+   first-run setup output.
 
 ### Arc 1: Product Contract In Code
 
@@ -406,15 +403,9 @@ run against remote AgentPod workers.
 
 ## First Execution Wave
 
-The next implementation wave should stay narrow and produce runnable value:
-
-1. Add code-level `AgentPodSpec` compatibility naming.
-2. Add risk/workspace/network/provider selection types.
-3. Add CLI flags for risk, workspace mode, and provider hint in manifest output.
-4. Add selection explanation to `agentbox providers` or manifest generation.
-5. Fix macOS direct-host setup/doctor rough edges.
-6. Keep Podman issues open until a Linux guest shim artifact and live Podman
-   smoke proof exist.
+Historical note: this wave has been absorbed into the current AgentPod spine.
+The remaining work is provider proof, installer UX, and release hardening, not
+another broad naming pass.
 
 ## Verification Gates
 
