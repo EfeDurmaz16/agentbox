@@ -1015,6 +1015,9 @@ fn validate_create_material(
         .transport
         .validate()
         .map_err(|err| worker_error(StatusCode::BAD_REQUEST, err.to_string()))?;
+    request
+        .validate_secret_grant_contracts()
+        .map_err(|err| worker_error(StatusCode::BAD_REQUEST, err.to_string()))?;
     if request.spec.credentials.inherit_host_env || !request.spec.credentials.grants.is_empty() {
         if !request.spec.credentials.inherit_host_env
             && request.spec.credentials.grants.iter().all(|grant| {
@@ -3214,6 +3217,7 @@ mod tests {
             spec: MinipodSpec::for_agent_task("remote-test-agent", workspace),
             workspace_bundle: None,
             credential_files: Vec::new(),
+            credential_grants: Vec::new(),
         }
     }
 

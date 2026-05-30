@@ -14,8 +14,9 @@ use crate::runtime::provider::{
     ProviderFamily, ProviderImplementationStatus, RuntimeError, RuntimeProvider,
 };
 use crate::runtime::types::{
-    ApprovalGrant, ApprovalScope, CommandResult, CredentialGrantKind, ExecCommand, MinipodSpec,
-    MountKind, MountMode, RuntimeCapability, RuntimeSession, RuntimeStatus, SessionEvidenceBundle,
+    ApprovalGrant, ApprovalScope, CommandResult, CredentialGrant, CredentialGrantKind, ExecCommand,
+    MinipodSpec, MountKind, MountMode, RuntimeCapability, RuntimeSession, RuntimeStatus,
+    SessionEvidenceBundle,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -523,6 +524,18 @@ pub struct RemoteAgentPodCreateSessionRequest {
     pub workspace_bundle: Option<RemoteAgentPodWorkspaceBundle>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub credential_files: Vec<RemoteAgentPodCredentialFile>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub credential_grants: Vec<RemoteAgentPodSecretGrantContract>,
+}
+
+impl RemoteAgentPodCreateSessionRequest {
+    pub fn validate_secret_grant_contracts(&self) -> Result<(), RuntimeError> {
+        validate_remote_secret_grant_contracts(
+            &self.credential_grants,
+            &self.spec,
+            &self.handshake_ack,
+        )
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -575,6 +588,298 @@ impl RemoteAgentPodCredentialFile {
         }
         Ok(())
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteAgentPodSecretGrantContract {
+    pub schema_version: i64,
+    pub name: String,
+    pub kind: CredentialGrantKind,
+    pub scope: RemoteAgentPodSecretGrantScope,
+    pub recipient: RemoteAgentPodSecretGrantRecipient,
+    pub delivery: RemoteAgentPodSecretGrantDelivery,
+    pub redaction: RemoteAgentPodSecretGrantRedaction,
+    pub one_time: bool,
+    pub requires_approval: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<DateTime<Utc>>,
+    pub secret_material_included: bool,
+    pub claim_boundary: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteAgentPodSecretGrantScope {
+    pub session_id: String,
+    pub grant_name: String,
+    pub kind: CredentialGrantKind,
+    pub target_ref_sha256: String,
+    pub target_ref_redacted: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guest_path: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteAgentPodSecretGrantRecipient {
+    pub provider: String,
+    pub worker_identity: String,
+    pub worker_public_key_sha256: String,
+    pub evidence_endpoint: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteAgentPodSecretGrantDelivery {
+    pub channel: String,
+    pub supported_by_worker: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub env_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guest_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payload_ref: Option<String>,
+    pub claim_boundary: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteAgentPodSecretGrantRedaction {
+    pub secret_values_forbidden: bool,
+    pub payload_contents_forbidden: bool,
+    pub target_ref_redacted: bool,
+    pub redacted_fields: Vec<String>,
+    pub evidence_event_types: Vec<String>,
+}
+
+impl RemoteAgentPodSecretGrantContract {
+    fn from_grant(
+        spec: &MinipodSpec,
+        grant: &CredentialGrant,
+        handshake_ack: &RemoteAgentPodHandshakeAck,
+    ) -> Self {
+        let guest_path = remote_secret_grant_guest_path(spec, grant);
+        let supported_by_worker = matches!(
+            grant.kind,
+            CredentialGrantKind::EnvVar | CredentialGrantKind::FileMount
+        );
+        let delivery = match grant.kind {
+            CredentialGrantKind::EnvVar => RemoteAgentPodSecretGrantDelivery {
+                channel: "session-env-grant".into(),
+                supported_by_worker,
+                env_name: Some(grant.name.clone()),
+                guest_path: None,
+                payload_ref: None,
+                claim_boundary:
+                    "explicit env grant contract only; raw host environment is not forwarded".into(),
+            },
+            CredentialGrantKind::FileMount => RemoteAgentPodSecretGrantDelivery {
+                channel: "session-file-grant".into(),
+                supported_by_worker,
+                env_name: None,
+                guest_path: guest_path.clone(),
+                payload_ref: Some(format!("remote-agentpod:credential-file:{}", grant.name)),
+                claim_boundary:
+                    "file credential payload is separately hash-verified and redacted from evidence"
+                        .into(),
+            },
+            CredentialGrantKind::Socket | CredentialGrantKind::ProviderToken => {
+                RemoteAgentPodSecretGrantDelivery {
+                    channel: "unsupported-remote-secret-grant".into(),
+                    supported_by_worker,
+                    env_name: None,
+                    guest_path: guest_path.clone(),
+                    payload_ref: None,
+                    claim_boundary:
+                        "remote socket and provider-token handoff are described but not supported"
+                            .into(),
+                }
+            }
+        };
+
+        Self {
+            schema_version: 1,
+            name: grant.name.clone(),
+            kind: grant.kind.clone(),
+            scope: RemoteAgentPodSecretGrantScope {
+                session_id: spec.id.clone(),
+                grant_name: grant.name.clone(),
+                kind: grant.kind.clone(),
+                target_ref_sha256: sha256_hex(grant.target.as_bytes()),
+                target_ref_redacted: true,
+                guest_path,
+            },
+            recipient: RemoteAgentPodSecretGrantRecipient {
+                provider: "remote-agentpod".into(),
+                worker_identity: handshake_ack.worker_identity.clone(),
+                worker_public_key_sha256: sha256_hex(handshake_ack.worker_public_key.as_bytes()),
+                evidence_endpoint: handshake_ack.evidence_endpoint.clone(),
+            },
+            delivery,
+            redaction: RemoteAgentPodSecretGrantRedaction {
+                secret_values_forbidden: true,
+                payload_contents_forbidden: true,
+                target_ref_redacted: true,
+                redacted_fields: vec![
+                    "target".into(),
+                    "contents_utf8".into(),
+                    "payload".into(),
+                    "host_path".into(),
+                    "env_value".into(),
+                ],
+                evidence_event_types: vec![
+                    "remote.credential.grant.requested".into(),
+                    "remote.credential.grant.exposed".into(),
+                    "remote.credential.grant.revoked".into(),
+                ],
+            },
+            one_time: grant.one_time,
+            requires_approval: grant.requires_approval,
+            expires_at: grant.expires_at,
+            secret_material_included: false,
+            claim_boundary:
+                "secret-free grant contract only; secret values are delivered only through explicit worker credential channels"
+                    .into(),
+        }
+    }
+
+    pub fn validate_for(
+        &self,
+        spec: &MinipodSpec,
+        handshake_ack: &RemoteAgentPodHandshakeAck,
+        now: DateTime<Utc>,
+    ) -> Result<(), RuntimeError> {
+        if self.schema_version != 1 {
+            return Err(RuntimeError::ManifestRejected(
+                "remote secret grant contract schema_version must be 1".into(),
+            ));
+        }
+        if self.name.trim().is_empty()
+            || self.scope.session_id.trim().is_empty()
+            || self.scope.grant_name.trim().is_empty()
+            || self.recipient.worker_identity.trim().is_empty()
+            || self.recipient.evidence_endpoint.trim().is_empty()
+            || self.delivery.channel.trim().is_empty()
+        {
+            return Err(RuntimeError::ManifestRejected(
+                "remote secret grant contract scope, recipient, and delivery cannot be empty"
+                    .into(),
+            ));
+        }
+        if self.name != self.scope.grant_name || self.kind != self.scope.kind {
+            return Err(RuntimeError::ManifestRejected(
+                "remote secret grant contract scope does not match grant identity".into(),
+            ));
+        }
+        if self.scope.session_id != spec.id {
+            return Err(RuntimeError::ManifestRejected(
+                "remote secret grant contract scope does not match AgentPod session".into(),
+            ));
+        }
+        if self.recipient.worker_identity != handshake_ack.worker_identity
+            || self.recipient.evidence_endpoint != handshake_ack.evidence_endpoint
+        {
+            return Err(RuntimeError::ManifestRejected(
+                "remote secret grant contract recipient does not match verified worker handshake"
+                    .into(),
+            ));
+        }
+        validate_sha256_hex(
+            &self.scope.target_ref_sha256,
+            "remote secret grant target ref",
+        )?;
+        validate_sha256_hex(
+            &self.recipient.worker_public_key_sha256,
+            "remote secret grant worker public key ref",
+        )?;
+        if self.secret_material_included {
+            return Err(RuntimeError::ManifestRejected(
+                "remote secret grant contract must not include secret material".into(),
+            ));
+        }
+        if self.expires_at.is_some_and(|expires_at| expires_at <= now) {
+            return Err(RuntimeError::ManifestRejected(
+                "remote secret grant contract cannot be expired".into(),
+            ));
+        }
+        if !self.scope.target_ref_redacted
+            || !self.redaction.secret_values_forbidden
+            || !self.redaction.payload_contents_forbidden
+            || !self.redaction.target_ref_redacted
+            || self.redaction.redacted_fields.is_empty()
+            || self.redaction.evidence_event_types.is_empty()
+        {
+            return Err(RuntimeError::ManifestRejected(
+                "remote secret grant contract must carry redaction rules".into(),
+            ));
+        }
+        if !self.claim_boundary.contains("secret-free") {
+            return Err(RuntimeError::ManifestRejected(
+                "remote secret grant contract must keep an explicit secret-free claim boundary"
+                    .into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn remote_secret_grant_guest_path(spec: &MinipodSpec, grant: &CredentialGrant) -> Option<String> {
+    spec.filesystem
+        .mounts
+        .iter()
+        .find(|mount| {
+            matches!(mount.kind, MountKind::Credential)
+                && matches!(mount.mode, MountMode::ReadOnly)
+                && mount.host_path.display().to_string() == grant.target
+        })
+        .map(|mount| mount.guest_path.clone())
+}
+
+fn remote_secret_grant_contracts_for_spec(
+    spec: &MinipodSpec,
+    handshake_ack: &RemoteAgentPodHandshakeAck,
+) -> Vec<RemoteAgentPodSecretGrantContract> {
+    spec.credentials
+        .grants
+        .iter()
+        .map(|grant| RemoteAgentPodSecretGrantContract::from_grant(spec, grant, handshake_ack))
+        .collect()
+}
+
+fn validate_remote_secret_grant_contracts(
+    contracts: &[RemoteAgentPodSecretGrantContract],
+    spec: &MinipodSpec,
+    handshake_ack: &RemoteAgentPodHandshakeAck,
+) -> Result<(), RuntimeError> {
+    if contracts.is_empty() {
+        return Ok(());
+    }
+    if contracts.len() != spec.credentials.grants.len() {
+        return Err(RuntimeError::ManifestRejected(
+            "remote secret grant contract count must match manifest credential grants".into(),
+        ));
+    }
+    for contract in contracts {
+        contract.validate_for(spec, handshake_ack, Utc::now())?;
+        let Some(grant) = spec
+            .credentials
+            .grants
+            .iter()
+            .find(|grant| grant.name == contract.name && grant.kind == contract.kind)
+        else {
+            return Err(RuntimeError::ManifestRejected(
+                "remote secret grant contract must match a manifest credential grant".into(),
+            ));
+        };
+        if contract.scope.target_ref_sha256 != sha256_hex(grant.target.as_bytes())
+            || contract.one_time != grant.one_time
+            || contract.requires_approval != grant.requires_approval
+            || contract.expires_at != grant.expires_at
+            || contract.scope.guest_path != remote_secret_grant_guest_path(spec, grant)
+        {
+            return Err(RuntimeError::ManifestRejected(
+                "remote secret grant contract metadata does not match manifest credential grant"
+                    .into(),
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn validate_remote_credential_files(
@@ -635,6 +940,7 @@ impl RemoteAgentPodCreateSessionResponse {
             ));
         }
         validate_remote_credential_files(&request.credential_files)?;
+        request.validate_secret_grant_contracts()?;
         require_lifecycle_events(
             &self.lifecycle_events,
             &[
@@ -1983,6 +2289,7 @@ impl RemoteAgentPodTransport for HttpRemoteAgentPodTransport {
         &self,
         request: RemoteAgentPodCreateSessionRequest,
     ) -> Result<RemoteAgentPodCreateSessionResponse, RuntimeError> {
+        request.validate_secret_grant_contracts()?;
         let response = self
             .client
             .post(self.route("sessions"))
@@ -3329,6 +3636,7 @@ impl RuntimeProvider for RemoteAgentPodProvider {
         let handshake_ack = transport.handshake(&handshake_descriptor).await?;
         let workspace_bundle = self.workspace_bundle_for_spec(spec)?;
         let credential_files = self.credential_files_for_spec(spec)?;
+        let credential_grants = remote_secret_grant_contracts_for_spec(spec, &handshake_ack);
         let response = transport
             .create_session(RemoteAgentPodCreateSessionRequest {
                 transport: transport_descriptor,
@@ -3336,6 +3644,7 @@ impl RuntimeProvider for RemoteAgentPodProvider {
                 spec: spec.clone(),
                 workspace_bundle,
                 credential_files,
+                credential_grants,
             })
             .await?;
         let mut session = RuntimeSession::new(
@@ -3904,6 +4213,141 @@ mod tests {
         let err = tampered.validate().unwrap_err();
 
         assert!(err.to_string().contains("hash or byte count"));
+    }
+
+    #[test]
+    fn remote_secret_grant_contracts_bind_scope_recipient_expiry_and_redaction() {
+        let mut spec = MinipodSpec::for_agent_task("remote-test", "/tmp/agentbox-work");
+        let expires_at = Utc::now() + Duration::seconds(600);
+        spec.credentials.grants.push(CredentialGrant {
+            name: "OPENAI_API_KEY".into(),
+            kind: CredentialGrantKind::EnvVar,
+            target: "HOST_OPENAI_API_KEY".into(),
+            one_time: true,
+            requires_approval: true,
+            expires_at: Some(expires_at),
+        });
+        spec.filesystem
+            .mounts
+            .push(crate::runtime::types::MountRule {
+                host_path: "/tmp/agentbox-secret/openai".into(),
+                guest_path: "/workspace/.agentbox/credentials/openai".into(),
+                mode: MountMode::ReadOnly,
+                kind: MountKind::Credential,
+            });
+        spec.credentials.grants.push(CredentialGrant {
+            name: "openai".into(),
+            kind: CredentialGrantKind::FileMount,
+            target: "/tmp/agentbox-secret/openai".into(),
+            one_time: true,
+            requires_approval: true,
+            expires_at: Some(expires_at),
+        });
+        let handshake_ack = RemoteAgentPodHandshakeAck {
+            worker_identity: "worker.local/dev".into(),
+            worker_public_key: "ed25519:test-public-key".into(),
+            signed_challenge: "ed25519:challenge:signature".into(),
+            capabilities: vec![RuntimeCapability::CredentialPolicy],
+            evidence_endpoint: "https://worker.example.com/agentpod/evidence".into(),
+            lifecycle_ack: true,
+            secret_material_included: false,
+            expires_at,
+        };
+
+        let contracts = remote_secret_grant_contracts_for_spec(&spec, &handshake_ack);
+
+        validate_remote_secret_grant_contracts(&contracts, &spec, &handshake_ack).unwrap();
+        assert_eq!(contracts.len(), 2);
+        let env = contracts
+            .iter()
+            .find(|contract| contract.name == "OPENAI_API_KEY")
+            .unwrap();
+        assert_eq!(env.scope.session_id, spec.id);
+        assert_eq!(env.scope.kind, CredentialGrantKind::EnvVar);
+        assert_eq!(
+            env.scope.target_ref_sha256,
+            sha256_hex("HOST_OPENAI_API_KEY".as_bytes())
+        );
+        assert!(env.scope.target_ref_redacted);
+        assert_eq!(env.expires_at, Some(expires_at));
+        assert_eq!(env.recipient.worker_identity, "worker.local/dev");
+        assert_eq!(
+            env.recipient.worker_public_key_sha256,
+            sha256_hex("ed25519:test-public-key".as_bytes())
+        );
+        assert_eq!(env.delivery.channel, "session-env-grant");
+        assert!(env.delivery.supported_by_worker);
+        assert!(env.redaction.secret_values_forbidden);
+        assert!(env.redaction.payload_contents_forbidden);
+        assert!(!env.secret_material_included);
+        assert!(env.claim_boundary.contains("secret-free"));
+
+        let file = contracts
+            .iter()
+            .find(|contract| contract.name == "openai")
+            .unwrap();
+        assert_eq!(file.scope.kind, CredentialGrantKind::FileMount);
+        assert_eq!(
+            file.scope.guest_path.as_deref(),
+            Some("/workspace/.agentbox/credentials/openai")
+        );
+        assert_eq!(
+            file.delivery.guest_path.as_deref(),
+            Some("/workspace/.agentbox/credentials/openai")
+        );
+        assert_eq!(
+            file.delivery.payload_ref.as_deref(),
+            Some("remote-agentpod:credential-file:openai")
+        );
+
+        let encoded = serde_json::to_string(&contracts).unwrap();
+        assert!(!encoded.contains("HOST_OPENAI_API_KEY"));
+        assert!(!encoded.contains("/tmp/agentbox-secret/openai"));
+        assert!(!encoded.contains("sk-live-secret-value"));
+    }
+
+    #[test]
+    fn remote_secret_grant_contract_rejects_expired_or_secret_bearing_contracts() {
+        let mut spec = MinipodSpec::for_agent_task("remote-test", "/tmp/agentbox-work");
+        spec.credentials.grants.push(CredentialGrant {
+            name: "OPENAI_API_KEY".into(),
+            kind: CredentialGrantKind::EnvVar,
+            target: "HOST_OPENAI_API_KEY".into(),
+            one_time: true,
+            requires_approval: true,
+            expires_at: Some(Utc::now() + Duration::seconds(600)),
+        });
+        let handshake_ack = RemoteAgentPodHandshakeAck {
+            worker_identity: "worker.local/dev".into(),
+            worker_public_key: "ed25519:test-public-key".into(),
+            signed_challenge: "ed25519:challenge:signature".into(),
+            capabilities: vec![RuntimeCapability::CredentialPolicy],
+            evidence_endpoint: "https://worker.example.com/agentpod/evidence".into(),
+            lifecycle_ack: true,
+            secret_material_included: false,
+            expires_at: Utc::now() + Duration::seconds(600),
+        };
+        let mut contracts = remote_secret_grant_contracts_for_spec(&spec, &handshake_ack);
+        contracts[0].expires_at = Some(Utc::now() - Duration::seconds(1));
+
+        let expired =
+            validate_remote_secret_grant_contracts(&contracts, &spec, &handshake_ack).unwrap_err();
+
+        assert!(expired.to_string().contains("expired"));
+        contracts[0].expires_at = Some(Utc::now() + Duration::seconds(600));
+        contracts[0].secret_material_included = true;
+
+        let secret =
+            validate_remote_secret_grant_contracts(&contracts, &spec, &handshake_ack).unwrap_err();
+
+        assert!(secret.to_string().contains("secret material"));
+        contracts[0].secret_material_included = false;
+        contracts[0].scope.target_ref_sha256 = "a".repeat(64);
+
+        let mismatch =
+            validate_remote_secret_grant_contracts(&contracts, &spec, &handshake_ack).unwrap_err();
+
+        assert!(mismatch.to_string().contains("manifest credential grant"));
     }
 
     #[test]
@@ -4562,6 +5006,7 @@ mod tests {
             spec: spec.clone(),
             workspace_bundle: None,
             credential_files: Vec::new(),
+            credential_grants: Vec::new(),
         };
         let response = RemoteAgentPodCreateSessionResponse {
             session_id: spec.id.clone(),
@@ -4991,6 +5436,7 @@ mod tests {
                 spec: spec.clone(),
                 workspace_bundle: None,
                 credential_files: Vec::new(),
+                credential_grants: Vec::new(),
             })
             .await
             .unwrap();
