@@ -889,6 +889,7 @@ enum Commands {
     },
 }
 
+#[allow(clippy::large_enum_variant)]
 #[derive(Subcommand)]
 enum AgentPodCommands {
     /// Run a command inside an isolated Agentbox minipod
