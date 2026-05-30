@@ -4,6 +4,7 @@ use r2d2_sqlite::SqliteConnectionManager;
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::collections::{BTreeMap, HashMap};
 use thiserror::Error;
 use ulid::Ulid;
 
@@ -310,6 +311,27 @@ pub fn redact_sensitive_text(input: &str) -> String {
     }
 
     tokens.join(" ")
+}
+
+pub fn redact_command_argv(argv: &[String]) -> Vec<String> {
+    argv.iter().map(|arg| redact_sensitive_text(arg)).collect()
+}
+
+pub fn redact_command_env(env: &HashMap<String, String>) -> BTreeMap<String, String> {
+    env.iter()
+        .map(|(key, value)| (key.clone(), redact_env_value(key, value)))
+        .collect()
+}
+
+fn redact_env_value(key: &str, value: &str) -> String {
+    if is_sensitive_key(key)
+        || redact_obvious_secret_value(value).is_some()
+        || redact_sensitive_path(value).is_some()
+    {
+        return REDACTED.to_string();
+    }
+
+    redact_url_userinfo(value).unwrap_or_else(|| redact_sensitive_text(value))
 }
 
 fn redact_sensitive_token(token: &str) -> String {
@@ -766,6 +788,63 @@ mod tests {
             );
             assert!(redacted.contains(REDACTED));
         }
+    }
+
+    #[test]
+    fn transcript_redaction_fixtures_cover_env_args_and_output() {
+        let argv = vec![
+            "curl".to_string(),
+            "--api-key".to_string(),
+            "sk-argv-secret".to_string(),
+            "https://user:pass@example.com/v1".to_string(),
+        ];
+        let env = HashMap::from([
+            ("OPENAI_API_KEY".to_string(), "sk-env-secret".to_string()),
+            (
+                "DATABASE_URL".to_string(),
+                "postgres://user:pass@db.example/app".to_string(),
+            ),
+            (
+                "CONFIG_PATH".to_string(),
+                "/Users/efe/.aws/credentials".to_string(),
+            ),
+            ("SAFE_FLAG".to_string(), "enabled".to_string()),
+        ]);
+        let output =
+            "Authorization: Bearer ghp_outputsecret\npath=/Users/efe/.ssh/id_ed25519\nSAFE_FLAG=enabled";
+
+        let redacted_argv = redact_command_argv(&argv);
+        let redacted_env = redact_command_env(&env);
+        let redacted_output = redact_sensitive_text(output);
+
+        assert_eq!(
+            redacted_argv,
+            vec![
+                "curl",
+                "--api-key",
+                "<redacted>",
+                "https://<redacted>@example.com/v1"
+            ]
+        );
+        assert_eq!(
+            redacted_env.get("OPENAI_API_KEY").map(String::as_str),
+            Some("<redacted>")
+        );
+        assert_eq!(
+            redacted_env.get("DATABASE_URL").map(String::as_str),
+            Some("postgres://<redacted>@db.example/app")
+        );
+        assert_eq!(
+            redacted_env.get("CONFIG_PATH").map(String::as_str),
+            Some("<redacted>")
+        );
+        assert_eq!(
+            redacted_env.get("SAFE_FLAG").map(String::as_str),
+            Some("enabled")
+        );
+        assert!(!redacted_output.contains("ghp_outputsecret"));
+        assert!(!redacted_output.contains("/Users/efe/.ssh/id_ed25519"));
+        assert!(redacted_output.contains("<redacted>"));
     }
 
     #[test]

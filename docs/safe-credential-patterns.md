@@ -130,8 +130,11 @@ Agentbox policy objects rather than cryptographic authorization.
 ## Redaction Is Not Isolation
 
 Agentbox redacts credential-like material in audit output, command transcripts,
-and evidence bundles. This reduces accidental leakage, but it is not a complete
-secret management system.
+and evidence bundles. Command transcript evidence covers argv, explicit command
+env summaries, working directory, stdout, and stderr with a deterministic
+`<redacted>` marker; see [command transcript redaction](command-transcript-redaction.md).
+This reduces accidental leakage, but it is not a complete secret management
+system.
 
 Redaction can miss:
 

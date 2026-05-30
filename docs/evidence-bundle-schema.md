@@ -68,6 +68,12 @@ Optional v0 files:
 | `filesystem.jsonl` | Detailed filesystem observations when separated from `policy-decisions.jsonl`. |
 | `credentials.jsonl` | Detailed credential grant/read/revocation observations when separated from `policy-decisions.jsonl`. |
 
+Command transcript payloads must follow the deterministic redaction contract in
+[command transcript redaction](command-transcript-redaction.md). They may store
+redacted argv, explicit command env summaries, working directory, stdout, and
+stderr, but must not store ambient host environment snapshots or raw secret
+values.
+
 ## `index.json`
 
 `index.json` is the entrypoint for validators. It records the canonical schema,

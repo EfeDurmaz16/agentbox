@@ -1,7 +1,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use ulid::Ulid;
 
@@ -12,7 +12,7 @@ use agentbox_agentpod::{
 };
 pub use agentbox_agentpod::{AgentPodNativeReceiptSummary, AgentPodRunnerPhaseReceipt};
 
-use crate::audit::{redact_sensitive_text, AuditEvent};
+use crate::audit::{redact_command_argv, redact_command_env, redact_sensitive_text, AuditEvent};
 
 pub const AGENTPOD_SPEC_SCHEMA_VERSION: u32 = 1;
 pub const AGENTPOD_SPEC_KIND: &str = "AgentPod";
@@ -1459,6 +1459,8 @@ pub struct CommandTranscript {
     pub session_id: String,
     pub command_argv: Vec<String>,
     pub working_dir: Option<String>,
+    #[serde(default)]
+    pub environment: TranscriptEnvironment,
     pub exit_code: i32,
     pub duration_ms: u64,
     pub stdout: TranscriptStream,
@@ -1477,21 +1479,51 @@ impl CommandTranscript {
             schema_version: 1,
             transcript_id: Ulid::new().to_string(),
             session_id: session_id.into(),
-            command_argv: command
-                .argv
-                .iter()
-                .map(|arg| crate::audit::redact_sensitive_text(arg))
-                .collect(),
+            command_argv: redact_command_argv(&command.argv),
             working_dir: command
                 .working_dir
                 .as_deref()
                 .map(crate::audit::redact_sensitive_text),
+            environment: TranscriptEnvironment::from_env(&command.env),
             exit_code: result.exit_code,
             duration_ms: result.duration_ms,
             stdout: TranscriptStream::redacted(&result.stdout),
             stderr: TranscriptStream::redacted(&result.stderr),
             redaction: TranscriptRedaction::default(),
             generated_at: Utc::now(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TranscriptEnvironment {
+    pub variable_count: usize,
+    pub names: Vec<String>,
+    pub values: BTreeMap<String, String>,
+    pub values_redacted: bool,
+}
+
+impl TranscriptEnvironment {
+    pub fn from_env(env: &HashMap<String, String>) -> Self {
+        let values = redact_command_env(env);
+        let names = values.keys().cloned().collect::<Vec<_>>();
+
+        Self {
+            variable_count: values.len(),
+            names,
+            values,
+            values_redacted: true,
+        }
+    }
+}
+
+impl Default for TranscriptEnvironment {
+    fn default() -> Self {
+        Self {
+            variable_count: 0,
+            names: Vec::new(),
+            values: BTreeMap::new(),
+            values_redacted: true,
         }
     }
 }
@@ -1533,6 +1565,10 @@ pub struct TranscriptRedaction {
     pub marker: String,
     pub values_redacted: bool,
     pub max_stream_bytes: usize,
+    #[serde(default = "default_transcript_redaction_scopes")]
+    pub scopes: Vec<String>,
+    #[serde(default = "default_transcript_redaction_rules")]
+    pub rules: Vec<String>,
 }
 
 impl Default for TranscriptRedaction {
@@ -1541,8 +1577,33 @@ impl Default for TranscriptRedaction {
             marker: "<redacted>".to_string(),
             values_redacted: true,
             max_stream_bytes: 16 * 1024,
+            scopes: default_transcript_redaction_scopes(),
+            rules: default_transcript_redaction_rules(),
         }
     }
+}
+
+fn default_transcript_redaction_scopes() -> Vec<String> {
+    vec![
+        "argv".to_string(),
+        "environment".to_string(),
+        "working_dir".to_string(),
+        "stdout".to_string(),
+        "stderr".to_string(),
+    ]
+}
+
+fn default_transcript_redaction_rules() -> Vec<String> {
+    vec![
+        "sensitive environment keys".to_string(),
+        "credential-like argv flags".to_string(),
+        "Authorization bearer values".to_string(),
+        "known token prefixes".to_string(),
+        "JWT-like tokens".to_string(),
+        "URL userinfo".to_string(),
+        "sensitive credential paths".to_string(),
+        "UTF-8 stream truncation".to_string(),
+    ]
 }
 
 fn truncate_utf8(input: &str, max_bytes: usize) -> (String, bool) {
@@ -2205,7 +2266,14 @@ mod tests {
                 "Authorization: Bearer sk-test-secret".into(),
             ],
             working_dir: Some("/tmp/project/.env".into()),
-            env: Default::default(),
+            env: HashMap::from([
+                ("OPENAI_API_KEY".into(), "sk-env-secret".into()),
+                (
+                    "DATABASE_URL".into(),
+                    "postgres://user:pass@db.example/app".into(),
+                ),
+                ("SAFE_FLAG".into(), "enabled".into()),
+            ]),
             timeout_seconds: None,
         };
         let result = CommandResult {
@@ -2222,9 +2290,85 @@ mod tests {
         assert_eq!(transcript.session_id, "01agentboxsession");
         assert_eq!(transcript.exit_code, 1);
         assert!(transcript.redaction.values_redacted);
+        assert_eq!(transcript.environment.variable_count, 3);
+        assert_eq!(
+            transcript
+                .environment
+                .values
+                .get("OPENAI_API_KEY")
+                .map(String::as_str),
+            Some("<redacted>")
+        );
+        assert_eq!(
+            transcript
+                .environment
+                .values
+                .get("DATABASE_URL")
+                .map(String::as_str),
+            Some("postgres://<redacted>@db.example/app")
+        );
+        assert_eq!(
+            transcript
+                .environment
+                .values
+                .get("SAFE_FLAG")
+                .map(String::as_str),
+            Some("enabled")
+        );
+        assert!(transcript
+            .redaction
+            .scopes
+            .contains(&"environment".to_string()));
         assert!(json.contains("<redacted>"));
         assert!(!json.contains("sk-test-secret"));
+        assert!(!json.contains("sk-env-secret"));
         assert!(!json.contains("/tmp/project/.env"));
+    }
+
+    #[test]
+    fn command_transcript_reads_legacy_records_without_new_redaction_fields() {
+        let legacy = serde_json::json!({
+            "schema_version": 1,
+            "transcript_id": "01legacytranscript",
+            "session_id": "01agentboxsession",
+            "command_argv": ["echo", "hello"],
+            "working_dir": null,
+            "exit_code": 0,
+            "duration_ms": 1,
+            "stdout": {
+                "text": "hello",
+                "original_bytes": 5,
+                "original_lines": 1,
+                "stored_bytes": 5,
+                "truncated": false
+            },
+            "stderr": {
+                "text": "",
+                "original_bytes": 0,
+                "original_lines": 0,
+                "stored_bytes": 0,
+                "truncated": false
+            },
+            "redaction": {
+                "marker": "<redacted>",
+                "values_redacted": true,
+                "max_stream_bytes": 16384
+            },
+            "generated_at": "2026-05-30T00:00:00Z"
+        });
+
+        let transcript: CommandTranscript = serde_json::from_value(legacy).unwrap();
+
+        assert_eq!(transcript.environment.variable_count, 0);
+        assert!(transcript.environment.values.is_empty());
+        assert!(transcript
+            .redaction
+            .scopes
+            .contains(&"environment".to_string()));
+        assert!(transcript
+            .redaction
+            .rules
+            .contains(&"sensitive environment keys".to_string()));
     }
 
     #[test]
