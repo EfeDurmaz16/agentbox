@@ -56,6 +56,10 @@ jobs:
           AGENTBOX_PODMAN_BRIDGE_CONTRACT_ONLY=1 bash scripts/smoke-podman-bridge.sh
           AGENTBOX_PODMAN_LIFECYCLE_CONTRACT_ONLY=1 bash scripts/smoke-podman-lifecycle.sh
 
+      - name: Linux AgentPod conformance target
+        if: matrix.os == 'ubuntu-latest'
+        run: bash scripts/smoke-linux-agentpod-conformance.sh
+
       - name: Live-test skip script syntax
         run: |
           bash -n scripts/build-linux-shim.sh
@@ -63,6 +67,7 @@ jobs:
           bash -n scripts/demo-v0.2.sh
           bash -n scripts/linux-isolation-benchmark.sh
           bash -n scripts/smoke-cli-contracts.sh
+          bash -n scripts/smoke-linux-agentpod-conformance.sh
           bash -n scripts/smoke-linux-native.sh
           bash -n scripts/smoke-remote-worker.sh
           bash -n scripts/smoke-macos-minipod.sh

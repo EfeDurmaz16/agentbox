@@ -88,6 +88,7 @@ cargo run -p agentbox-cli -- bridge-health --json
 Use platform/live gates only when the host supports them:
 
 ```sh
+bash scripts/smoke-linux-agentpod-conformance.sh
 AGENTBOX_LINUX_NATIVE=1 bash scripts/smoke-linux-native.sh
 AGENTBOX_LIVE_PODMAN=1 bash scripts/smoke-podman-bridge.sh
 AGENTBOX_WINDOWS_JOB_OBJECT=1 bash scripts/smoke-windows-job-object.sh
