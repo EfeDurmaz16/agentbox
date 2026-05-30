@@ -111,7 +111,8 @@ audit events as JSONL for review or archival.
 
 Agentbox has a FIDES-compatible credential authority request shape. The default
 hook does not fake approval; it reports that no external FIDES runtime is
-configured.
+configured. See [FIDES authority boundary](fides-authority-boundary.md) for the
+adapter interface, no-op behavior, and live-support non-claims.
 
 Target flow:
 

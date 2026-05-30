@@ -5,6 +5,44 @@ use crate::runtime::types::ApprovalSignature;
 use crate::runtime::types::{CredentialGrant, CredentialGrantKind, RuntimeSession};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FidesAuthorityAdapterDescriptor {
+    pub schema_version: i64,
+    pub integration: String,
+    pub descriptor_kind: String,
+    pub status: String,
+    pub live_support: bool,
+    pub requires_external_adapter: bool,
+    pub supported_actions: Vec<String>,
+    pub claim_boundary: String,
+    pub verification_command: String,
+}
+
+impl Default for FidesAuthorityAdapterDescriptor {
+    fn default() -> Self {
+        Self {
+            schema_version: 1,
+            integration: "fides".to_string(),
+            descriptor_kind: "authority-adapter-boundary".to_string(),
+            status: "external-authority-required".to_string(),
+            live_support: false,
+            requires_external_adapter: true,
+            supported_actions: vec![
+                "agentbox.credential_grant.authorize".to_string(),
+                "agentbox.signed_action.draft".to_string(),
+            ],
+            claim_boundary:
+                "Agentbox can produce FIDES-compatible authority requests and signed-action drafts, but it does not verify, sign, revoke, or publish FIDES authority without an external adapter."
+                    .to_string(),
+            verification_command: "cargo test --locked -p agentbox-daemon fides".to_string(),
+        }
+    }
+}
+
+pub fn fides_authority_adapter_descriptor() -> FidesAuthorityAdapterDescriptor {
+    FidesAuthorityAdapterDescriptor::default()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FidesCredentialAuthorityRequest {
     pub schema_version: i64,
     pub action: String,
@@ -51,6 +89,10 @@ pub enum FidesCredentialAuthorityDecision {
 }
 
 pub trait FidesCredentialAuthorityHook: Send + Sync {
+    fn descriptor(&self) -> FidesAuthorityAdapterDescriptor {
+        fides_authority_adapter_descriptor()
+    }
+
     fn evaluate_credential_grant(
         &self,
         request: &FidesCredentialAuthorityRequest,
@@ -140,6 +182,24 @@ mod tests {
     }
 
     #[test]
+    fn fides_authority_adapter_descriptor_never_claims_live_support() {
+        let descriptor = fides_authority_adapter_descriptor();
+
+        assert_eq!(descriptor.schema_version, 1);
+        assert_eq!(descriptor.integration, "fides");
+        assert_eq!(descriptor.descriptor_kind, "authority-adapter-boundary");
+        assert_eq!(descriptor.status, "external-authority-required");
+        assert!(!descriptor.live_support);
+        assert!(descriptor.requires_external_adapter);
+        assert!(descriptor
+            .supported_actions
+            .contains(&"agentbox.credential_grant.authorize".to_string()));
+        assert!(descriptor
+            .claim_boundary
+            .contains("does not verify, sign, revoke, or publish FIDES authority"));
+    }
+
+    #[test]
     fn fides_credential_authority_request_carries_grant_boundary() {
         let (session, grant) = session_with_grant();
 
@@ -166,8 +226,11 @@ mod tests {
         let request = FidesCredentialAuthorityRequest::from_session_grant(&session, &grant, vec![]);
         let hook = NoopFidesCredentialAuthorityHook;
 
+        let descriptor = hook.descriptor();
         let decision = hook.evaluate_credential_grant(&request);
 
+        assert!(!descriptor.live_support);
+        assert!(descriptor.requires_external_adapter);
         assert!(matches!(
             decision,
             FidesCredentialAuthorityDecision::RequiresExternalAuthority { .. }
