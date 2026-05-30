@@ -4,6 +4,9 @@ This is the public v0 release bar for Agentbox AgentPods. It is written for an
 operator deciding whether a build is usable, supportable, and honestly
 described. It is not a pricing page and it is not a roadmap claim.
 
+For the final candidate cut procedure and P0/P1 gate evidence map, see the
+[AgentPod v0 release candidate checklist](v0-release-candidate-checklist.md).
+
 The v0 release can be OSS-proud before it is paid-product ready. Those bars are
 different:
 

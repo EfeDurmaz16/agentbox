@@ -346,6 +346,9 @@ See [docs/release-readiness.md](docs/release-readiness.md) for the release
 gate before tagging public builds.
 See [docs/v0-release-criteria.md](docs/v0-release-criteria.md) for the public
 AgentPod v0 paid-product and OSS-proud release criteria.
+See [docs/v0-release-candidate-checklist.md](docs/v0-release-candidate-checklist.md)
+for the cut checklist that maps every P0/P1 gate to evidence or deferred
+status before tagging.
 See [docs/pricing-packaging-boundary.md](docs/pricing-packaging-boundary.md)
 for the OSS core, paid packaging/support, remote worker, and enterprise control
 claim boundary.
