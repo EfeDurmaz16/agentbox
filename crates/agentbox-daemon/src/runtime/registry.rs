@@ -4,7 +4,9 @@ use std::sync::Arc;
 use crate::runtime::provider::{RuntimeError, RuntimeProvider};
 use crate::runtime::providers::agentpod::{AgentPodProvider, AgentPodProviderKind};
 use crate::runtime::providers::direct_host::DirectHostRuntimeProvider;
-use crate::runtime::providers::podman::PodmanRuntimeProvider;
+use crate::runtime::providers::podman::{
+    PodmanRuntimeProvider, LEGACY_PODMAN_PROVIDER_ALIAS, PODMAN_COMPAT_PROVIDER_NAME,
+};
 use crate::runtime::providers::remote::RemoteAgentPodProvider;
 use crate::runtime::types::AgentPodRiskLevel;
 
@@ -57,10 +59,11 @@ impl RuntimeProviderRegistry {
     }
 
     pub fn set_default(&mut self, name: impl Into<String>) -> Result<(), RuntimeError> {
-        let name = name.into();
+        let requested = name.into();
+        let name = canonical_provider_name(&requested).to_string();
         if !self.providers.contains_key(&name) {
             return Err(RuntimeError::Unavailable(format!(
-                "provider not registered: {name}"
+                "provider not registered: {requested}"
             )));
         }
         self.default_provider = Some(name);
@@ -72,8 +75,9 @@ impl RuntimeProviderRegistry {
     }
 
     pub fn get(&self, name: &str) -> Result<Arc<dyn RuntimeProvider>, RuntimeError> {
+        let canonical = canonical_provider_name(name);
         self.providers
-            .get(name)
+            .get(canonical)
             .cloned()
             .ok_or_else(|| RuntimeError::Unavailable(format!("provider not registered: {name}")))
     }
@@ -91,10 +95,11 @@ impl RuntimeProviderRegistry {
         request: &ProviderSelectionRequest,
     ) -> Result<ProviderSelectionExplanation, RuntimeError> {
         if let Some(preferred) = request.preferred_provider.as_deref() {
-            self.get(preferred)?;
+            let canonical = canonical_provider_name(preferred);
+            self.get(canonical)?;
             return Ok(ProviderSelectionExplanation {
-                selected_provider: preferred.to_string(),
-                reason: "explicit provider requested".to_string(),
+                selected_provider: canonical.to_string(),
+                reason: provider_selection_reason(preferred, canonical),
                 candidates: self.selection_candidates(),
             });
         }
@@ -127,11 +132,11 @@ impl RuntimeProviderRegistry {
             }
             AgentPodRiskLevel::Medium => self
                 .providers
-                .contains_key("podman")
-                .then(|| "podman".to_string())
+                .contains_key(PODMAN_COMPAT_PROVIDER_NAME)
+                .then(|| PODMAN_COMPAT_PROVIDER_NAME.to_string())
                 .ok_or_else(|| {
                     RuntimeError::Unavailable(
-                        "no medium-risk runtime provider registered: podman is required for automatic medium-risk selection; request an explicit provider to override".into(),
+                        "no medium-risk runtime provider registered: podman-compat is required for automatic medium-risk selection; request an explicit provider to override".into(),
                     )
                 }),
             AgentPodRiskLevel::High | AgentPodRiskLevel::VeryHigh => self
@@ -184,6 +189,37 @@ impl RuntimeProviderRegistry {
         registry.register(Arc::new(RemoteAgentPodProvider::default()));
         registry
     }
+}
+
+pub fn canonical_provider_name(name: &str) -> &str {
+    match name.trim().to_ascii_lowercase().as_str() {
+        LEGACY_PODMAN_PROVIDER_ALIAS | "compat" => PODMAN_COMPAT_PROVIDER_NAME,
+        _ => name,
+    }
+}
+
+pub fn deprecated_provider_alias_message(name: &str) -> Option<&'static str> {
+    match name.trim().to_ascii_lowercase().as_str() {
+        LEGACY_PODMAN_PROVIDER_ALIAS => {
+            Some("provider alias `podman` is deprecated; use `podman-compat` for the compatibility backend")
+        }
+        "compat" => {
+            Some("provider alias `compat` is deprecated; use `podman-compat` for the compatibility backend")
+        }
+        _ => None,
+    }
+}
+
+fn provider_selection_reason(requested: &str, canonical: &str) -> String {
+    deprecated_provider_alias_message(requested)
+        .map(|message| format!("explicit provider requested via deprecated alias; {message}"))
+        .unwrap_or_else(|| {
+            if requested == canonical {
+                "explicit provider requested".to_string()
+            } else {
+                format!("explicit provider requested; resolved to {canonical}")
+            }
+        })
 }
 
 fn platform_agentpod_provider_name() -> &'static str {
@@ -275,22 +311,28 @@ mod tests {
         let mut registry = RuntimeProviderRegistry::new();
 
         registry.register(Arc::new(NamedProvider("agentpod-macos")));
-        registry.register(Arc::new(NamedProvider("podman")));
+        registry.register(Arc::new(NamedProvider(PODMAN_COMPAT_PROVIDER_NAME)));
 
         assert_eq!(
             registry.default_provider().unwrap().name(),
             "agentpod-macos"
         );
-        assert_eq!(registry.names(), vec!["agentpod-macos", "podman"]);
+        assert_eq!(
+            registry.names(),
+            vec!["agentpod-macos", PODMAN_COMPAT_PROVIDER_NAME]
+        );
     }
 
     #[test]
     fn explicit_default_must_exist() {
         let mut registry = RuntimeProviderRegistry::new();
-        registry.register(Arc::new(NamedProvider("podman")));
+        registry.register(Arc::new(NamedProvider(PODMAN_COMPAT_PROVIDER_NAME)));
 
         registry.set_default("podman").unwrap();
-        assert_eq!(registry.default_provider().unwrap().name(), "podman");
+        assert_eq!(
+            registry.default_provider().unwrap().name(),
+            PODMAN_COMPAT_PROVIDER_NAME
+        );
 
         let err = registry.set_default("agentpod-linux").unwrap_err();
         assert!(err.to_string().contains("not registered"));
@@ -343,7 +385,7 @@ mod tests {
                 "agentpod-macos",
                 "agentpod-windows",
                 "direct-host",
-                "podman",
+                PODMAN_COMPAT_PROVIDER_NAME,
                 "remote-agentpod"
             ]
         );
@@ -403,7 +445,7 @@ mod tests {
     fn high_risk_selection_refuses_fallback_when_platform_agentpod_missing() {
         let mut registry = RuntimeProviderRegistry::new();
         registry.register(Arc::new(NamedProvider("direct-host")));
-        registry.register(Arc::new(NamedProvider("podman")));
+        registry.register(Arc::new(NamedProvider(PODMAN_COMPAT_PROVIDER_NAME)));
 
         let err = registry
             .explain_selection(&ProviderSelectionRequest {
@@ -421,7 +463,7 @@ mod tests {
     fn very_high_risk_selection_refuses_fallback_when_platform_agentpod_missing() {
         let mut registry = RuntimeProviderRegistry::new();
         registry.register(Arc::new(NamedProvider("direct-host")));
-        registry.register(Arc::new(NamedProvider("podman")));
+        registry.register(Arc::new(NamedProvider(PODMAN_COMPAT_PROVIDER_NAME)));
 
         let err = registry
             .explain_selection(&ProviderSelectionRequest {
@@ -445,8 +487,31 @@ mod tests {
             .explain_selection(&ProviderSelectionRequest::default())
             .unwrap();
 
-        assert_eq!(explanation.selected_provider, "podman");
+        assert_eq!(explanation.selected_provider, PODMAN_COMPAT_PROVIDER_NAME);
         assert!(explanation.reason.contains("governed local execution"));
+    }
+
+    #[test]
+    fn legacy_podman_alias_resolves_to_podman_compat() {
+        let registry = RuntimeProviderRegistry::with_local_providers(
+            "/tmp/agentbox.sock".into(),
+            "/tmp/agentbox-shim".into(),
+        );
+
+        assert_eq!(
+            registry.get("podman").unwrap().name(),
+            PODMAN_COMPAT_PROVIDER_NAME
+        );
+
+        let explanation = registry
+            .explain_selection(&ProviderSelectionRequest {
+                preferred_provider: Some("podman".into()),
+                risk: AgentPodRiskLevel::Medium,
+            })
+            .unwrap();
+
+        assert_eq!(explanation.selected_provider, PODMAN_COMPAT_PROVIDER_NAME);
+        assert!(explanation.reason.contains("deprecated alias"));
     }
 
     #[test]

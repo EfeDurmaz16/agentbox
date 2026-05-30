@@ -18,6 +18,9 @@ use crate::runtime::types::{
     NetworkMode, RuntimeCapability, RuntimeSession, RuntimeStatus,
 };
 
+pub const PODMAN_COMPAT_PROVIDER_NAME: &str = "podman-compat";
+pub const LEGACY_PODMAN_PROVIDER_ALIAS: &str = "podman";
+
 pub struct PodmanRuntimeProvider {
     provider: PodmanProvider,
 }
@@ -33,7 +36,7 @@ impl PodmanRuntimeProvider {
 #[async_trait]
 impl RuntimeProvider for PodmanRuntimeProvider {
     fn name(&self) -> &str {
-        "podman"
+        PODMAN_COMPAT_PROVIDER_NAME
     }
 
     fn platform(&self) -> &str {
@@ -242,7 +245,7 @@ fn pod_session_to_runtime_session(session: PodSession, spec: MinipodSpec) -> Run
     RuntimeSession {
         id: session.id,
         name: spec.name.clone(),
-        provider: session.provider,
+        provider: PODMAN_COMPAT_PROVIDER_NAME.to_string(),
         platform: "linux-vm".to_string(),
         status: pod_status_to_runtime_status(session.status),
         spec,
@@ -316,7 +319,7 @@ mod tests {
 
         assert_provider_metadata(
             &provider,
-            "podman",
+            PODMAN_COMPAT_PROVIDER_NAME,
             "linux-vm",
             &[
                 RuntimeCapability::ContainerIsolation,

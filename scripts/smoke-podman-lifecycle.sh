@@ -102,16 +102,26 @@ check_contract_mode() {
   log "checking Podman lifecycle plan contract without live provider"
   "${CLI[@]}" agentpod run \
     --plan \
-    --provider podman \
+    --provider podman-compat \
     --risk medium \
     --json \
     -- sh -c 'printf lifecycle-ok' >"$TMP/run-plan.json"
   validate_json "$TMP/run-plan.json" \
-    "data.get('schema_version') == 1 and data.get('selected_provider', {}).get('name') == 'podman' and data.get('selected_provider', {}).get('availability_check') == 'not performed by --plan' and 'check Podman availability and start compatibility VM if required' in data.get('backend_actions', []) and 'create runtime session through selected provider' in data.get('backend_actions', []) and 'execute command through RuntimeManager policy checks' in data.get('backend_actions', []) and 'record hash-chained runtime evidence' in data.get('backend_actions', []) and any('plan output does not start a backend' in warning for warning in data.get('warnings', []))"
+    "data.get('schema_version') == 1 and data.get('selected_provider', {}).get('name') == 'podman-compat' and data.get('selected_provider', {}).get('availability_check') == 'not performed by --plan' and 'check Podman availability and start compatibility VM if required' in data.get('backend_actions', []) and 'create runtime session through selected provider' in data.get('backend_actions', []) and 'execute command through RuntimeManager policy checks' in data.get('backend_actions', []) and 'record hash-chained runtime evidence' in data.get('backend_actions', []) and any('plan output does not start a backend' in warning for warning in data.get('warnings', []))"
 
-  "${CLI[@]}" setup-plan --provider podman --json >"$TMP/setup-plan-podman.json"
+  "${CLI[@]}" agentpod run \
+    --plan \
+    --provider podman \
+    --risk medium \
+    --json \
+    -- sh -c 'printf lifecycle-ok' >"$TMP/run-plan-alias.json" 2>"$TMP/run-plan-alias.err"
+  grep -q "provider alias \`podman\` is deprecated" "$TMP/run-plan-alias.err"
+  validate_json "$TMP/run-plan-alias.json" \
+    "data.get('selected_provider', {}).get('name') == 'podman-compat'"
+
+  "${CLI[@]}" setup-plan --provider podman-compat --json >"$TMP/setup-plan-podman.json"
   validate_json "$TMP/setup-plan-podman.json" \
-    "data.get('schema_version') == 1 and data.get('provider') == 'podman' and data.get('required_failed') == 0 and data.get('ready_for_required_setup') == True and all(step.get('severity') == 'advisory' and step.get('check') in ['podman CLI', 'podman machine', 'podman host bridge'] for step in data.get('steps', []))"
+    "data.get('schema_version') == 1 and data.get('provider') == 'podman-compat' and data.get('required_failed') == 0 and data.get('ready_for_required_setup') == True and all(step.get('severity') == 'advisory' and step.get('check') in ['podman CLI', 'podman machine', 'podman host bridge'] for step in data.get('steps', []))"
 
   log "Podman lifecycle contract smoke passed"
 }
@@ -145,26 +155,26 @@ check_contract_mode
 
 log "running Podman create/exec/destroy lifecycle through AgentPod CLI"
 "${CLI[@]}" agentpod run \
-  --provider podman \
+  --provider podman-compat \
   --risk medium \
   --json \
   -- sh -c 'printf lifecycle-ok' >"$TMP/run-exec-destroy.json"
 validate_json "$TMP/run-exec-destroy.json" \
-  "data.get('schema_version') == 1 and data.get('session', {}).get('provider') == 'podman' and data.get('command_result', {}).get('exit_code') == 0 and data.get('command_result', {}).get('stdout') == 'lifecycle-ok' and data.get('destroyed') == True"
+  "data.get('schema_version') == 1 and data.get('session', {}).get('provider') == 'podman-compat' and data.get('command_result', {}).get('exit_code') == 0 and data.get('command_result', {}).get('stdout') == 'lifecycle-ok' and data.get('destroyed') == True"
 
 log "creating a persistent Podman AgentPod session"
 "${CLI[@]}" agentpod run \
-  --provider podman \
+  --provider podman-compat \
   --risk medium \
   --json >"$TMP/create-session.json"
 validate_json "$TMP/create-session.json" \
-  "data.get('schema_version') == 1 and data.get('session', {}).get('provider') == 'podman' and data.get('session', {}).get('status') == 'Running' and data.get('destroyed') == False and data.get('cleanup_command')"
+  "data.get('schema_version') == 1 and data.get('session', {}).get('provider') == 'podman-compat' and data.get('session', {}).get('status') == 'Running' and data.get('destroyed') == False and data.get('cleanup_command')"
 SESSION_ID="$(extract_json_string "$TMP/create-session.json" "data['session']['id']")"
 
 log "checking persistent session status"
 "${CLI[@]}" agentpod status "$SESSION_ID" --json >"$TMP/status-session.json"
 validate_json "$TMP/status-session.json" \
-  "data.get('id') == '$SESSION_ID' and data.get('provider') == 'podman' and data.get('status') == 'Running'"
+  "data.get('id') == '$SESSION_ID' and data.get('provider') == 'podman-compat' and data.get('status') == 'Running'"
 
 log "destroying persistent Podman AgentPod session"
 "${CLI[@]}" stop-pod "$SESSION_ID" >"$TMP/stop-session.txt"
@@ -174,6 +184,6 @@ grep -F "AgentPod session $SESSION_ID stopped." "$TMP/stop-session.txt" >/dev/nu
 log "checking destroyed session status is persisted honestly"
 "${CLI[@]}" agentpod status "$SESSION_ID" --json >"$TMP/status-destroyed-session.json"
 validate_json "$TMP/status-destroyed-session.json" \
-  "data.get('id') == '$SESSION_ID' and data.get('provider') == 'podman' and data.get('status') == 'Stopped'"
+  "data.get('id') == '$SESSION_ID' and data.get('provider') == 'podman-compat' and data.get('status') == 'Stopped'"
 
 log "Podman lifecycle conformance smoke passed"

@@ -46,7 +46,7 @@ commands before trying a live run:
 cargo run --locked -q -p agentbox-cli -- provider-readiness --json
 cargo run --locked -q -p agentbox-cli -- provider-readiness --provider direct-host --json
 cargo run --locked -q -p agentbox-cli -- provider-readiness --provider remote-agentpod --json
-cargo run --locked -q -p agentbox-cli -- setup-plan --provider podman --json
+cargo run --locked -q -p agentbox-cli -- setup-plan --provider podman-compat --json
 cargo run --locked -q -p agentbox-cli -- setup-plan --provider agentpod-linux --json
 cargo run --locked -q -p agentbox-cli -- setup-plan --provider agentpod-windows --json
 ```

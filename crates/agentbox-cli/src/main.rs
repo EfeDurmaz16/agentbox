@@ -18,6 +18,8 @@ use sha2::{Digest, Sha256};
 const REMOTE_LABEL_ENDPOINT: &str = "agentbox.remote.endpoint";
 const REMOTE_LABEL_WORKER_SESSION: &str = "agentbox.remote.worker_session";
 const DIRECT_HOST_DEV_MODE_LABEL: &str = "agentbox.direct_host.dev_mode";
+const PODMAN_COMPAT_PROVIDER: &str = "podman-compat";
+const LEGACY_PODMAN_PROVIDER_ALIAS: &str = "podman";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 struct ReviewJsonOutput {
@@ -85,7 +87,7 @@ enum Commands {
         #[arg(long)]
         dry_run: bool,
 
-        /// Limit setup actions to one provider: direct-host, podman, agentpod-macos, agentpod-linux, agentpod-windows, or remote-agentpod
+        /// Limit setup actions to one provider: direct-host, podman-compat, agentpod-macos, agentpod-linux, agentpod-windows, or remote-agentpod
         #[arg(long)]
         provider: Option<String>,
 
@@ -109,7 +111,7 @@ enum Commands {
         #[arg(long)]
         json: bool,
 
-        /// Limit setup actions to one provider: direct-host, podman, agentpod-macos, agentpod-linux, agentpod-windows, or remote-agentpod
+        /// Limit setup actions to one provider: direct-host, podman-compat, agentpod-macos, agentpod-linux, agentpod-windows, or remote-agentpod
         #[arg(long)]
         provider: Option<String>,
     },
@@ -201,7 +203,7 @@ enum Commands {
         #[arg(long = "risk", default_value = "medium")]
         risk: String,
 
-        /// Runtime provider: auto, direct-host, podman, agentpod-macos, agentpod-linux, agentpod-windows, remote-agentpod
+        /// Runtime provider: auto, direct-host, podman-compat, agentpod-macos, agentpod-linux, agentpod-windows, remote-agentpod
         #[arg(long = "provider", default_value = "auto")]
         provider: String,
 
@@ -420,7 +422,7 @@ enum Commands {
         #[arg(long = "risk", default_value = "medium")]
         risk: String,
 
-        /// Runtime provider hint: auto, podman, agentpod-macos, agentpod-linux, agentpod-windows
+        /// Runtime provider hint: auto, podman-compat, agentpod-macos, agentpod-linux, agentpod-windows
         #[arg(long = "provider", default_value = "auto")]
         provider: String,
 
@@ -917,7 +919,7 @@ enum AgentPodCommands {
         #[arg(long = "risk", default_value = "medium")]
         risk: String,
 
-        /// Runtime provider: auto, direct-host, podman, agentpod-macos, agentpod-linux, agentpod-windows, remote-agentpod
+        /// Runtime provider: auto, direct-host, podman-compat, agentpod-macos, agentpod-linux, agentpod-windows, remote-agentpod
         #[arg(long = "provider", default_value = "auto")]
         provider: String,
 
@@ -1011,7 +1013,7 @@ enum AgentPodCommands {
     },
     /// Explain how Agentbox would run a command without executing it
     Explain {
-        /// Runtime provider: auto, direct-host, podman, agentpod-macos, agentpod-linux, agentpod-windows, remote-agentpod
+        /// Runtime provider: auto, direct-host, podman-compat, agentpod-macos, agentpod-linux, agentpod-windows, remote-agentpod
         #[arg(long = "provider", default_value = "auto")]
         provider: String,
 
@@ -1395,7 +1397,9 @@ fn cmd_setup(
 ) {
     use agentbox_daemon::config;
 
-    let provider_filter = provider.as_deref().map(normalize_setup_provider_filter);
+    let provider_filter = provider
+        .as_deref()
+        .map(normalize_setup_provider_filter_with_warning);
     let remote_endpoint = setup_remote_endpoint(provider_filter.as_deref(), endpoint.as_deref());
     let mut actions = Vec::new();
     let mut config_summary = None;
@@ -2046,7 +2050,7 @@ struct SetupFirstRunProviderOption {
 }
 
 fn setup_plan_from_doctor(report: &DoctorReport, provider: Option<&str>) -> SetupPlan {
-    let provider_filter = provider.map(normalize_setup_provider_filter);
+    let provider_filter = provider.map(normalize_setup_provider_filter_with_warning);
     let checks = if let Some(provider_filter) = provider_filter.as_deref() {
         if provider_filter == "all" {
             report.checks.clone()
@@ -2204,7 +2208,7 @@ fn setup_wizard_steps(
         );
     }
 
-    if matches!(provider, "all" | "podman") {
+    if matches!(provider, "all" | PODMAN_COMPAT_PROVIDER) {
         push_setup_wizard_step(
             &mut steps,
             "Prepare Podman compatibility provider",
@@ -2295,7 +2299,11 @@ fn setup_wizard_steps(
 fn setup_first_run_provider_plan(provider: Option<&str>) -> SetupFirstRunProviderPlan {
     let provider = provider.unwrap_or("all");
     let recommended_provider = match provider {
-        "direct-host" | "podman" | "agentpod-macos" | "agentpod-linux" | "agentpod-windows"
+        "direct-host"
+        | PODMAN_COMPAT_PROVIDER
+        | "agentpod-macos"
+        | "agentpod-linux"
+        | "agentpod-windows"
         | "remote-agentpod" => provider,
         _ => "direct-host",
     };
@@ -2317,7 +2325,7 @@ fn setup_first_run_provider_plan(provider: Option<&str>) -> SetupFirstRunProvide
                 .to_string();
             let setup_command = match provider_name.as_str() {
                 "direct-host" => "agentbox setup --provider direct-host",
-                "podman" => "agentbox setup-plan --provider podman",
+                PODMAN_COMPAT_PROVIDER => "agentbox setup-plan --provider podman-compat",
                 "agentpod-macos" => "agentbox native-plan --provider agentpod-macos -- <cmd>",
                 "agentpod-linux" => "agentbox native-plan --provider agentpod-linux -- <cmd>",
                 "agentpod-windows" => "agentbox native-plan --provider agentpod-windows -- <cmd>",
@@ -2327,7 +2335,7 @@ fn setup_first_run_provider_plan(provider: Option<&str>) -> SetupFirstRunProvide
             .to_string();
             let first_run_command = match provider_name.as_str() {
                 "direct-host" => "agentbox run --provider direct-host --risk low -- <cmd>",
-                "podman" => "agentbox run --provider podman -- <cmd>",
+                PODMAN_COMPAT_PROVIDER => "agentbox run --provider podman-compat -- <cmd>",
                 "agentpod-macos" => "agentbox native-plan --provider agentpod-macos -- <cmd>",
                 "agentpod-linux" => {
                     "AGENTBOX_LINUX_NATIVE=1 agentbox run --provider agentpod-linux -- <cmd>"
@@ -2387,7 +2395,7 @@ fn normalize_setup_provider_filter(provider: &str) -> String {
     match provider.as_str() {
         "" | "auto" | "all" => "all".to_string(),
         "direct" | "host" | "direct-host" => "direct-host".to_string(),
-        "podman" | "compat" => "podman".to_string(),
+        "podman" | "compat" | "podman-compat" => PODMAN_COMPAT_PROVIDER.to_string(),
         "remote" | "remote-agentpod" => "remote-agentpod".to_string(),
         "macos" | "agentpod-macos" => "agentpod-macos".to_string(),
         "linux" | "agentpod-linux" => "agentpod-linux".to_string(),
@@ -2395,11 +2403,16 @@ fn normalize_setup_provider_filter(provider: &str) -> String {
         other => {
             eprintln!("error: unsupported --provider value `{}`", other);
             eprintln!(
-                "hint: expected direct-host, podman, agentpod-macos, agentpod-linux, agentpod-windows, or remote-agentpod"
+                "hint: expected direct-host, podman-compat, agentpod-macos, agentpod-linux, agentpod-windows, or remote-agentpod"
             );
             std::process::exit(1);
         }
     }
+}
+
+fn normalize_setup_provider_filter_with_warning(provider: &str) -> String {
+    warn_if_deprecated_provider_alias(provider);
+    normalize_setup_provider_filter(provider)
 }
 
 fn filter_doctor_checks_for_provider(checks: &[DoctorCheck], provider: &str) -> Vec<DoctorCheck> {
@@ -2425,7 +2438,7 @@ fn setup_provider_check_names(provider: &str) -> &'static [&'static str] {
             "shim PATH priority",
             "audit database",
         ],
-        "podman" => &["podman CLI", "podman machine", "podman host bridge"],
+        PODMAN_COMPAT_PROVIDER => &["podman CLI", "podman machine", "podman host bridge"],
         "remote-agentpod" => &["remote-agentpod endpoint"],
         "agentpod-macos" => &[
             "macOS native plan",
@@ -2633,7 +2646,7 @@ fn podman_host_bridge_doctor_check() -> DoctorCheck {
     let ok = script_ok && guest_shim_detail.is_some();
     let detail = match (script_ok, guest_shim_detail) {
         (true, Some(shim)) => format!(
-            "guest shim ready at {shim}; verify host bridge with `agentbox bridge-health --provider podman`"
+            "guest shim ready at {shim}; verify host bridge with `agentbox bridge-health --provider podman-compat`"
         ),
         (true, None) => {
             "Linux guest shim artifact missing; build one before running the Podman compatibility bridge".to_string()
@@ -2647,7 +2660,7 @@ fn podman_host_bridge_doctor_check() -> DoctorCheck {
         "podman host bridge",
         ok,
         detail,
-        "run `scripts/build-linux-shim.sh`, then `agentbox bridge-health --provider podman`; this prepares the compatibility bridge, not native AgentPod support",
+        "run `scripts/build-linux-shim.sh`, then `agentbox bridge-health --provider podman-compat`; this prepares the compatibility bridge, not native AgentPod support",
     )
 }
 
@@ -3517,7 +3530,7 @@ async fn cmd_run(options: RunOptions) {
             "execute command through RuntimeManager policy checks".to_string(),
             "record hash-chained runtime evidence".to_string(),
         ];
-        if selection.selected_provider == "podman" {
+        if selection.selected_provider == PODMAN_COMPAT_PROVIDER {
             backend_actions.insert(
                 0,
                 "check Podman availability and start compatibility VM if required".to_string(),
@@ -3542,7 +3555,7 @@ async fn cmd_run(options: RunOptions) {
         }
         if !matches!(
             selection.selected_provider.as_str(),
-            "podman" | "direct-host"
+            PODMAN_COMPAT_PROVIDER | "direct-host"
         ) {
             warnings.push(format!(
                 "{} is not generally runnable in this build; execution may require a platform gate or future provider wiring",
@@ -3625,7 +3638,7 @@ async fn cmd_run(options: RunOptions) {
 
     if !matches!(
         selection.selected_provider.as_str(),
-        "podman" | "direct-host"
+        PODMAN_COMPAT_PROVIDER | "direct-host"
     ) {
         let selected_provider = registry
             .get(&selection.selected_provider)
@@ -3661,7 +3674,7 @@ async fn cmd_run(options: RunOptions) {
         }
     }
 
-    if selection.selected_provider == "podman" {
+    if selection.selected_provider == PODMAN_COMPAT_PROVIDER {
         // 3. Check whether the current compatibility backend is available.
         match Command::new("podman").arg("--version").output() {
             Ok(output) if output.status.success() => {
@@ -3673,7 +3686,7 @@ async fn cmd_run(options: RunOptions) {
                     "{}",
                     format_actionable_provider_unavailable(
                         "agentbox run",
-                        Some("podman"),
+                        Some(PODMAN_COMPAT_PROVIDER),
                         &spec.risk,
                         "podman --version failed; Podman is required before the podman compatibility provider can run",
                     )
@@ -3769,7 +3782,7 @@ async fn cmd_run(options: RunOptions) {
             );
         }
 
-        if selection.selected_provider == "podman" {
+        if selection.selected_provider == PODMAN_COMPAT_PROVIDER {
             println!("  Agentbox: socket + shims injected");
         } else if selection.selected_provider == "direct-host" {
             println!("  Agentbox: direct host process mediated by RuntimeManager policy");
@@ -3922,7 +3935,7 @@ async fn cmd_run(options: RunOptions) {
         println!();
         println!("Minipod session running.");
         println!("  Session id: {}", session.id);
-        if selection.selected_provider == "podman" {
+        if selection.selected_provider == PODMAN_COMPAT_PROVIDER {
             println!("  Backend container: sb-{}-workspace", session.id);
             println!(
                 "  Debug shell: podman exec -it sb-{}-workspace bash",
@@ -6453,7 +6466,26 @@ fn parse_provider_hint(raw: &str) -> Option<String> {
     if provider.is_empty() || provider.eq_ignore_ascii_case("auto") {
         None
     } else {
-        Some(provider.to_string())
+        warn_if_deprecated_provider_alias(provider);
+        Some(normalize_setup_provider_filter(provider))
+    }
+}
+
+fn warn_if_deprecated_provider_alias(provider: &str) {
+    if let Some(message) = deprecated_provider_alias_message(provider) {
+        eprintln!("warning: {message}");
+    }
+}
+
+fn deprecated_provider_alias_message(provider: &str) -> Option<&'static str> {
+    match provider.trim().to_ascii_lowercase().as_str() {
+        LEGACY_PODMAN_PROVIDER_ALIAS => Some(
+            "provider alias `podman` is deprecated; use `podman-compat` for the compatibility backend",
+        ),
+        "compat" => Some(
+            "provider alias `compat` is deprecated; use `podman-compat` for the compatibility backend",
+        ),
+        _ => None,
     }
 }
 
@@ -6498,7 +6530,9 @@ fn actionable_provider_required_gate(provider: Option<&str>, reason: &str) -> St
         Some("remote-agentpod") => {
             "AGENTBOX_REMOTE_AGENTPOD_ENDPOINT=https://worker.example.com/agentpod".to_string()
         }
-        Some("podman") => "podman --version".to_string(),
+        Some(PODMAN_COMPAT_PROVIDER) | Some(LEGACY_PODMAN_PROVIDER_ALIAS) => {
+            "podman --version".to_string()
+        }
         Some("direct-host") => "agentbox daemon socket and shim PATH".to_string(),
         _ if reason.contains("AGENTBOX_LINUX_NATIVE=1") => "AGENTBOX_LINUX_NATIVE=1".to_string(),
         _ if reason.contains("Apple Virtualization VM lifecycle") => {
@@ -6528,12 +6562,15 @@ fn actionable_provider_next_commands(provider: Option<&str>, reason: &str) -> Ve
             push_unique_command(&mut commands, "agentbox setup-plan");
             push_unique_command(&mut commands, "agentbox start");
         }
-        Some("podman") => {
+        Some(PODMAN_COMPAT_PROVIDER) | Some(LEGACY_PODMAN_PROVIDER_ALIAS) => {
             push_unique_command(
                 &mut commands,
-                "agentbox provider-readiness --provider podman",
+                "agentbox provider-readiness --provider podman-compat",
             );
-            push_unique_command(&mut commands, "agentbox setup-plan --provider podman");
+            push_unique_command(
+                &mut commands,
+                "agentbox setup-plan --provider podman-compat",
+            );
             push_unique_command(&mut commands, "podman machine init && podman machine start");
         }
         Some("agentpod-linux") => {
@@ -6938,7 +6975,7 @@ fn provider_status_rows() -> Vec<serde_json::Value> {
         let provider = registry
             .get(name)
             .expect("provider name came from registry");
-        if matches!(provider.name(), "podman" | "direct-host") {
+        if matches!(provider.name(), PODMAN_COMPAT_PROVIDER | "direct-host") {
             continue;
         }
         rows.push(serde_json::json!({
@@ -6980,7 +7017,8 @@ fn provider_status_rows() -> Vec<serde_json::Value> {
     let podman_machine = podman_machine_status();
     let podman_bridge = podman_host_bridge_doctor_check();
     rows.push(serde_json::json!({
-        "provider": "podman",
+        "provider": PODMAN_COMPAT_PROVIDER,
+        "aliases": [LEGACY_PODMAN_PROVIDER_ALIAS],
         "family": "compat",
         "platform": "linux-vm",
         "status": podman_status,
@@ -7005,7 +7043,7 @@ fn provider_status_rows() -> Vec<serde_json::Value> {
         ],
         "bridge_health": {
             "schema_version": 1,
-            "provider": "podman",
+            "provider": PODMAN_COMPAT_PROVIDER,
             "transports": ["UnixSocket"],
             "policy": {"supported": true, "active": podman_status == "experimental", "detail": "policy mediation through the host bridge"},
             "approval": {"supported": true, "active": podman_status == "experimental", "detail": "operator approval request and response transport"},
@@ -7031,17 +7069,17 @@ fn provider_status_rows() -> Vec<serde_json::Value> {
             "host_bridge": {
                 "ok": podman_bridge.ok,
                 "detail": podman_bridge.detail,
-                "command": "scripts/build-linux-shim.sh && agentbox bridge-health --provider podman"
+                "command": "scripts/build-linux-shim.sh && agentbox bridge-health --provider podman-compat"
             }
         },
         "prerequisite_commands": [
             "install Podman",
             "podman machine init && podman machine start",
             "scripts/build-linux-shim.sh",
-            "agentbox bridge-health --provider podman"
+            "agentbox bridge-health --provider podman-compat"
         ],
-        "setup_command": "agentbox setup-plan --provider podman",
-        "verification_command": "agentbox run --provider podman -- <cmd>",
+        "setup_command": "agentbox setup-plan --provider podman-compat",
+        "verification_command": "agentbox run --provider podman-compat -- <cmd>",
     }));
 
     rows
@@ -7165,12 +7203,15 @@ fn provider_gap_rows(provider_filter: Option<&str>) -> Vec<serde_json::Value> {
 }
 
 fn cmd_provider_gaps(json: bool, provider_filter: Option<String>) {
+    let provider_filter = provider_filter
+        .as_deref()
+        .map(normalize_setup_provider_filter_with_warning);
     let rows = provider_gap_rows(provider_filter.as_deref());
     if provider_filter.is_some() && rows.is_empty() {
         let provider = provider_filter.as_deref().unwrap_or_default();
         eprintln!("error: unknown provider `{provider}`");
         eprintln!(
-            "hint: expected direct-host, podman, agentpod-macos, agentpod-linux, agentpod-windows, or remote-agentpod"
+            "hint: expected direct-host, podman-compat, agentpod-macos, agentpod-linux, agentpod-windows, or remote-agentpod"
         );
         std::process::exit(1);
     }
@@ -7265,12 +7306,15 @@ fn provider_readiness_rows(provider_filter: Option<&str>) -> Vec<serde_json::Val
 }
 
 fn cmd_provider_readiness(json: bool, provider_filter: Option<String>) {
+    let provider_filter = provider_filter
+        .as_deref()
+        .map(normalize_setup_provider_filter_with_warning);
     let rows = provider_readiness_rows(provider_filter.as_deref());
     if provider_filter.is_some() && rows.is_empty() {
         let provider = provider_filter.as_deref().unwrap_or_default();
         eprintln!("error: unknown provider `{provider}`");
         eprintln!(
-            "hint: expected direct-host, podman, agentpod-macos, agentpod-linux, agentpod-windows, or remote-agentpod"
+            "hint: expected direct-host, podman-compat, agentpod-macos, agentpod-linux, agentpod-windows, or remote-agentpod"
         );
         std::process::exit(1);
     }
@@ -7317,14 +7361,15 @@ fn json_string_array(value: &serde_json::Value) -> Vec<String> {
 }
 
 fn cmd_bridge_health(json: bool, provider_filter: Option<String>) {
+    let provider_filter = provider_filter
+        .as_deref()
+        .map(normalize_setup_provider_filter_with_warning);
     let mut rows = provider_status_rows()
         .into_iter()
         .filter_map(|row| {
             let provider = row.get("provider")?.as_str()?.to_string();
             let health = row.get("bridge_health")?.clone();
-            if provider_filter
-                .as_deref()
-                .is_some_and(|filter| filter != provider)
+            if provider_filter.as_deref().is_some_and(|filter| filter != provider)
             {
                 return None;
             }
@@ -7345,7 +7390,7 @@ fn cmd_bridge_health(json: bool, provider_filter: Option<String>) {
         if rows.is_empty() {
             eprintln!("error: unknown provider `{provider}`");
             eprintln!(
-                "hint: expected direct-host, podman, agentpod-macos, agentpod-linux, agentpod-windows, or remote-agentpod"
+                "hint: expected direct-host, podman-compat, agentpod-macos, agentpod-linux, agentpod-windows, or remote-agentpod"
             );
             std::process::exit(1);
         }
@@ -7417,17 +7462,17 @@ fn bridge_readiness(row: &serde_json::Value) -> serde_json::Value {
             "PATH/shim and daemon-mediated commands only; not a full sandbox",
             "agentbox doctor",
         ),
-        "podman" if status == "experimental" => (
+        PODMAN_COMPAT_PROVIDER if status == "experimental" => (
             "active-if-podman-available",
             "compatibility container provider",
             "Podman compatibility backend; this is not native AgentPod execution and still needs machine/VM plus host bridge prerequisites where relevant",
-            "agentbox setup-plan --provider podman",
+            "agentbox setup-plan --provider podman-compat",
         ),
-        "podman" => (
+        PODMAN_COMPAT_PROVIDER => (
             "needs-podman-prereqs",
             "compatibility container provider",
             "Podman compatibility backend is not native AgentPod execution; Podman CLI, VM/machine where relevant, and host bridge prerequisites are optional for direct-host usage and required only for this backend",
-            "agentbox setup-plan --provider podman",
+            "agentbox setup-plan --provider podman-compat",
         ),
         "agentpod-linux" => (
             "prototype-gated",
@@ -7470,7 +7515,7 @@ fn provider_doctor_check(provider: &str) -> Option<&'static str> {
         "agentpod-linux" => Some("Linux native plan"),
         "agentpod-windows" => Some("Windows native plan"),
         "remote-agentpod" => Some("remote-agentpod endpoint"),
-        "podman" => Some("podman provider"),
+        PODMAN_COMPAT_PROVIDER => Some("podman provider"),
         _ => None,
     }
 }
@@ -7484,7 +7529,7 @@ fn provider_setup_command(provider: &str) -> Option<&'static str> {
         "remote-agentpod" => {
             Some("export AGENTBOX_REMOTE_AGENTPOD_ENDPOINT=https://worker.example.com/agentpod")
         }
-        "podman" => Some("agentbox setup-plan --provider podman"),
+        PODMAN_COMPAT_PROVIDER => Some("agentbox setup-plan --provider podman-compat"),
         _ => None,
     }
 }
@@ -7498,7 +7543,7 @@ fn provider_verification_command(provider: &str) -> Option<&'static str> {
         "remote-agentpod" => {
             Some("agentbox remote-handshake --endpoint https://worker.example.com/agentpod")
         }
-        "podman" => Some("agentbox run --provider podman -- <cmd>"),
+        PODMAN_COMPAT_PROVIDER => Some("agentbox run --provider podman-compat -- <cmd>"),
         _ => None,
     }
 }
@@ -10542,8 +10587,8 @@ mod tests {
         assert_eq!(remote.steps.len(), 1);
         assert_eq!(remote.steps[0].check, "remote-agentpod endpoint");
 
-        let podman = setup_plan_from_doctor(&report, Some("podman"));
-        assert_eq!(podman.provider.as_deref(), Some("podman"));
+        let podman = setup_plan_from_doctor(&report, Some("podman-compat"));
+        assert_eq!(podman.provider.as_deref(), Some(PODMAN_COMPAT_PROVIDER));
         assert_eq!(podman.required_failed, 0);
         assert_eq!(podman.advisory_failed, 2);
         assert!(podman.ready_for_required_setup);
@@ -10566,22 +10611,34 @@ mod tests {
                 "podman host bridge",
                 false,
                 "guest shim missing".into(),
-                "run `scripts/build-linux-shim.sh` and `agentbox bridge-health --provider podman`",
+                "run `scripts/build-linux-shim.sh` and `agentbox bridge-health --provider podman-compat`",
             ),
         ]);
 
         assert_eq!(report.required_failed, 0);
         assert_eq!(report.advisory_failed, 3);
 
-        let plan = setup_plan_from_doctor(&report, Some("podman"));
-        let commands = setup_operator_commands(&plan, Some("podman"), None);
+        let plan = setup_plan_from_doctor(&report, Some("podman-compat"));
+        let commands = setup_operator_commands(&plan, Some("podman-compat"), None);
 
         assert!(plan.ready_for_required_setup);
         assert_eq!(plan.required_failed, 0);
         assert!(commands.contains(&"install Podman".to_string()));
         assert!(commands.contains(&"podman machine start".to_string()));
         assert!(commands.contains(&"scripts/build-linux-shim.sh".to_string()));
-        assert!(commands.contains(&"agentbox bridge-health --provider podman".to_string()));
+        assert!(commands.contains(&"agentbox bridge-health --provider podman-compat".to_string()));
+    }
+
+    #[test]
+    fn podman_legacy_alias_normalizes_to_podman_compat() {
+        assert_eq!(
+            normalize_setup_provider_filter("podman"),
+            PODMAN_COMPAT_PROVIDER
+        );
+        assert_eq!(
+            normalize_setup_provider_filter("podman-compat"),
+            PODMAN_COMPAT_PROVIDER
+        );
     }
 
     #[test]
@@ -10610,7 +10667,7 @@ mod tests {
         assert!(setup_should_install_shims(None));
         assert!(setup_should_install_shims(Some("all")));
         assert!(setup_should_install_shims(Some("direct-host")));
-        assert!(!setup_should_install_shims(Some("podman")));
+        assert!(!setup_should_install_shims(Some("podman-compat")));
         assert!(!setup_should_install_shims(Some("remote-agentpod")));
         assert!(!setup_should_install_shims(Some("agentpod-macos")));
     }

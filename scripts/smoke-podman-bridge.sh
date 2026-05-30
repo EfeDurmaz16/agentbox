@@ -45,13 +45,17 @@ check_contract_mode() {
   trap 'rm -rf "$tmp"' RETURN
 
   log "checking Podman bridge metadata contract without live provider"
-  "${CLI[@]}" bridge-health --provider podman --json >"$tmp/bridge-health-podman.json"
+  "${CLI[@]}" bridge-health --provider podman-compat --json >"$tmp/bridge-health-podman.json"
   validate_json "$tmp/bridge-health-podman.json" \
-    "len(data) == 1 and data[0].get('provider') == 'podman' and data[0].get('readiness', {}).get('verdict') in ['active-if-podman-available', 'needs-podman-prereqs'] and data[0].get('readiness', {}).get('next_command') == 'agentbox setup-plan --provider podman' and data[0].get('bridge_health', {}).get('policy', {}).get('supported') == True and data[0].get('bridge_health', {}).get('approval', {}).get('supported') == True and data[0].get('bridge_health', {}).get('credentials', {}).get('supported') == True and data[0].get('bridge_health', {}).get('evidence', {}).get('supported') == True and data[0].get('bridge_health', {}).get('kill_switch', {}).get('supported') == True and data[0].get('bridge_health', {}).get('network', {}).get('supported') == False and 'UnixSocket' in data[0].get('bridge_health', {}).get('transports', []) and data[0].get('verification_command') == 'agentbox run --provider podman -- <cmd>'"
+    "len(data) == 1 and data[0].get('provider') == 'podman-compat' and data[0].get('readiness', {}).get('verdict') in ['active-if-podman-available', 'needs-podman-prereqs'] and data[0].get('readiness', {}).get('next_command') == 'agentbox setup-plan --provider podman-compat' and data[0].get('bridge_health', {}).get('policy', {}).get('supported') == True and data[0].get('bridge_health', {}).get('approval', {}).get('supported') == True and data[0].get('bridge_health', {}).get('credentials', {}).get('supported') == True and data[0].get('bridge_health', {}).get('evidence', {}).get('supported') == True and data[0].get('bridge_health', {}).get('kill_switch', {}).get('supported') == True and data[0].get('bridge_health', {}).get('network', {}).get('supported') == False and 'UnixSocket' in data[0].get('bridge_health', {}).get('transports', []) and data[0].get('verification_command') == 'agentbox run --provider podman-compat -- <cmd>'"
+  "${CLI[@]}" bridge-health --provider podman --json >"$tmp/bridge-health-podman-alias.json" 2>"$tmp/bridge-health-podman-alias.err"
+  grep -q "provider alias \`podman\` is deprecated" "$tmp/bridge-health-podman-alias.err"
+  validate_json "$tmp/bridge-health-podman-alias.json" \
+    "len(data) == 1 and data[0].get('provider') == 'podman-compat'"
 
-  "${CLI[@]}" setup-plan --provider podman --json >"$tmp/setup-plan-podman.json"
+  "${CLI[@]}" setup-plan --provider podman-compat --json >"$tmp/setup-plan-podman.json"
   validate_json "$tmp/setup-plan-podman.json" \
-    "data.get('schema_version') == 1 and data.get('provider') == 'podman' and data.get('required_failed') == 0 and data.get('ready_for_required_setup') == True and all(step.get('severity') == 'advisory' for step in data.get('steps', [])) and any(step.get('check') == 'podman host bridge' and 'compatibility bridge' in step.get('action', '') for step in data.get('steps', []))"
+    "data.get('schema_version') == 1 and data.get('provider') == 'podman-compat' and data.get('required_failed') == 0 and data.get('ready_for_required_setup') == True and all(step.get('severity') == 'advisory' for step in data.get('steps', [])) and any(step.get('check') == 'podman host bridge' and 'compatibility bridge' in step.get('action', '') for step in data.get('steps', []))"
 
   log "Podman bridge contract smoke passed"
 }

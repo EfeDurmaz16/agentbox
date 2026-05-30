@@ -216,7 +216,7 @@ agentbox run --plan --risk high --workspace-mode overlay-review "codex"
 # network enforcement metadata, warnings, and the full AgentPod manifest.
 
 # Emit machine-readable run output for automation when a backend is runnable
-agentbox run --json --provider podman "npm test"
+agentbox run --json --provider podman-compat "npm test"
 
 # Generate the AgentPod manifest without starting a backend
 agentbox minipod-spec hermes --workspace . --allow-domain api.openai.com
@@ -240,7 +240,7 @@ agentbox review-commit <session-id> --message "agent output"
 agentbox minipod-spec codex --workspace . --risk high --provider auto
 
 # Force the current compatibility backend in the manifest.
-agentbox minipod-spec codex --workspace . --provider podman
+agentbox minipod-spec codex --workspace . --provider podman-compat
 
 # Run a safe OpenClaw/Hermes-style manifest demo
 scripts/demo-autonomous-agent.sh
