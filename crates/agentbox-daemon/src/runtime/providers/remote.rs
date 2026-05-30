@@ -2373,6 +2373,245 @@ pub struct RemoteAgentPodTransportDescriptor {
     pub created_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RemoteAgentPodProviderDescriptorStatus {
+    Experimental,
+    Deprecated,
+    Disabled,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteAgentPodEndpointPolicyDescriptor {
+    pub base_url: String,
+    pub allow_http: bool,
+    pub allow_http_loopback_only: bool,
+    pub embedded_credentials_forbidden: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteAgentPodTransportSecurityDescriptor {
+    pub https_required: bool,
+    pub ssh_allowed: bool,
+    pub mutual_tls_supported: bool,
+    pub signed_challenge_supported: bool,
+    pub embedded_credentials_forbidden: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteAgentPodWorkerIdentityRequirements {
+    pub required: bool,
+    pub worker_public_key_required: bool,
+    pub signed_challenge_required: bool,
+    pub lifecycle_ack_required: bool,
+    pub secret_material_forbidden: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteAgentPodProviderDescriptor {
+    pub schema_version: i64,
+    pub provider: String,
+    pub provider_id: String,
+    pub endpoint_policy: RemoteAgentPodEndpointPolicyDescriptor,
+    pub transport_security: RemoteAgentPodTransportSecurityDescriptor,
+    pub worker_identity: RemoteAgentPodWorkerIdentityRequirements,
+    pub capabilities: Vec<RuntimeCapability>,
+    pub evidence_modes: Vec<RemoteAgentPodEvidenceMode>,
+    pub approvals_supported: bool,
+    pub kill_switch_supported: bool,
+    pub status: RemoteAgentPodProviderDescriptorStatus,
+    pub expires_at: DateTime<Utc>,
+    pub secret_material_included: bool,
+    pub non_claims: Vec<String>,
+    pub created_at: DateTime<Utc>,
+}
+
+impl RemoteAgentPodProviderDescriptor {
+    pub fn new(
+        provider_id: impl Into<String>,
+        endpoint: impl Into<String>,
+        expires_at: DateTime<Utc>,
+    ) -> Result<Self, RuntimeError> {
+        let endpoint = endpoint.into();
+        validate_remote_endpoint(&endpoint)?;
+        let descriptor = Self {
+            schema_version: 1,
+            provider: "remote-agentpod".to_string(),
+            provider_id: provider_id.into(),
+            endpoint_policy: RemoteAgentPodEndpointPolicyDescriptor {
+                base_url: endpoint,
+                allow_http: false,
+                allow_http_loopback_only: true,
+                embedded_credentials_forbidden: true,
+            },
+            transport_security: RemoteAgentPodTransportSecurityDescriptor {
+                https_required: true,
+                ssh_allowed: true,
+                mutual_tls_supported: true,
+                signed_challenge_supported: true,
+                embedded_credentials_forbidden: true,
+            },
+            worker_identity: RemoteAgentPodWorkerIdentityRequirements {
+                required: true,
+                worker_public_key_required: true,
+                signed_challenge_required: true,
+                lifecycle_ack_required: true,
+                secret_material_forbidden: true,
+            },
+            capabilities: vec![
+                RuntimeCapability::NetworkPolicy,
+                RuntimeCapability::ApprovalBridge,
+                RuntimeCapability::EvidenceExport,
+            ],
+            evidence_modes: vec![
+                RemoteAgentPodEvidenceMode::AppendOnlyStream,
+                RemoteAgentPodEvidenceMode::BundleUpload,
+                RemoteAgentPodEvidenceMode::LocalPull,
+            ],
+            approvals_supported: true,
+            kill_switch_supported: true,
+            status: RemoteAgentPodProviderDescriptorStatus::Experimental,
+            expires_at,
+            secret_material_included: false,
+            non_claims: vec![
+                "remote worker isolation is not complete".to_string(),
+                "descriptor validation does not prove worker-side sandbox enforcement".to_string(),
+                "transport reachability does not prove evidence durability".to_string(),
+            ],
+            created_at: Utc::now(),
+        };
+        descriptor.validate_at(Utc::now())?;
+        Ok(descriptor)
+    }
+
+    pub fn validate_at(&self, now: DateTime<Utc>) -> Result<(), RuntimeError> {
+        if self.provider_id.trim().is_empty() {
+            return Err(RuntimeError::ManifestRejected(
+                "remote provider descriptor must include a provider id".into(),
+            ));
+        }
+        if self.schema_version != 1 || self.provider != "remote-agentpod" {
+            return Err(RuntimeError::ManifestRejected(
+                "remote provider descriptor must be schema v1 for remote-agentpod".into(),
+            ));
+        }
+        if !self
+            .provider_id
+            .bytes()
+            .all(|byte| matches!(byte, b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'-' | b'_'))
+        {
+            return Err(RuntimeError::ManifestRejected(
+                "remote provider descriptor provider id must be a safe identifier".into(),
+            ));
+        }
+        self.endpoint_policy.validate()?;
+        self.transport_security.validate()?;
+        self.worker_identity.validate()?;
+        if self.secret_material_included {
+            return Err(RuntimeError::ManifestRejected(
+                "remote provider descriptor must not include secret material".into(),
+            ));
+        }
+        if self.capabilities.is_empty()
+            || !self
+                .capabilities
+                .contains(&RuntimeCapability::ApprovalBridge)
+            || !self
+                .capabilities
+                .contains(&RuntimeCapability::EvidenceExport)
+        {
+            return Err(RuntimeError::ManifestRejected(
+                "remote provider descriptor must declare approval and evidence capabilities".into(),
+            ));
+        }
+        if self.evidence_modes.is_empty()
+            || !self
+                .evidence_modes
+                .contains(&RemoteAgentPodEvidenceMode::AppendOnlyStream)
+        {
+            return Err(RuntimeError::ManifestRejected(
+                "remote provider descriptor must declare append-only evidence support".into(),
+            ));
+        }
+        if !self.approvals_supported || !self.kill_switch_supported {
+            return Err(RuntimeError::ManifestRejected(
+                "remote provider descriptor must support approvals and kill-switch control".into(),
+            ));
+        }
+        if self.expires_at <= now {
+            return Err(RuntimeError::ManifestRejected(
+                "remote provider descriptor expiry must be in the future".into(),
+            ));
+        }
+        if !matches!(
+            self.status,
+            RemoteAgentPodProviderDescriptorStatus::Experimental
+        ) {
+            return Err(RuntimeError::ManifestRejected(
+                "remote provider descriptor status must be experimental until live isolation is proven"
+                    .into(),
+            ));
+        }
+        if !self
+            .non_claims
+            .iter()
+            .any(|claim| claim.contains("remote worker isolation is not complete"))
+        {
+            return Err(RuntimeError::ManifestRejected(
+                "remote provider descriptor must explicitly avoid complete isolation claims".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl RemoteAgentPodEndpointPolicyDescriptor {
+    pub fn validate(&self) -> Result<(), RuntimeError> {
+        validate_remote_endpoint(&self.base_url)?;
+        if self.allow_http && !self.allow_http_loopback_only {
+            return Err(RuntimeError::ManifestRejected(
+                "remote provider endpoint policy can allow HTTP only for loopback verification"
+                    .into(),
+            ));
+        }
+        if !self.embedded_credentials_forbidden {
+            return Err(RuntimeError::ManifestRejected(
+                "remote provider endpoint policy must forbid embedded credentials".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl RemoteAgentPodTransportSecurityDescriptor {
+    pub fn validate(&self) -> Result<(), RuntimeError> {
+        if !self.https_required
+            || !self.signed_challenge_supported
+            || !self.embedded_credentials_forbidden
+        {
+            return Err(RuntimeError::ManifestRejected(
+                "remote provider transport security must require HTTPS, signed challenges, and no embedded credentials".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl RemoteAgentPodWorkerIdentityRequirements {
+    pub fn validate(&self) -> Result<(), RuntimeError> {
+        if !self.required
+            || !self.worker_public_key_required
+            || !self.signed_challenge_required
+            || !self.lifecycle_ack_required
+            || !self.secret_material_forbidden
+        {
+            return Err(RuntimeError::ManifestRejected(
+                "remote provider descriptor must require worker identity, challenge binding, lifecycle ack, and no secret material".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
 impl RemoteAgentPodTransportDescriptor {
     pub fn new(
         endpoint: impl Into<String>,
@@ -3840,6 +4079,91 @@ mod tests {
         )
         .unwrap_err();
         assert!(secret.to_string().contains("must not embed credentials"));
+    }
+
+    #[test]
+    fn remote_provider_descriptor_defines_stable_secret_free_contract() {
+        let expires_at = Utc::now() + Duration::seconds(600);
+        let descriptor = RemoteAgentPodProviderDescriptor::new(
+            "agentpod-remote-primary",
+            "https://worker.example.com/agentpod",
+            expires_at,
+        )
+        .unwrap();
+
+        assert_eq!(descriptor.schema_version, 1);
+        assert_eq!(descriptor.provider_id, "agentpod-remote-primary");
+        assert_eq!(descriptor.provider, "remote-agentpod");
+        assert_eq!(
+            descriptor.endpoint_policy.base_url,
+            "https://worker.example.com/agentpod"
+        );
+        assert!(!descriptor.endpoint_policy.allow_http);
+        assert!(descriptor.transport_security.https_required);
+        assert!(descriptor.transport_security.embedded_credentials_forbidden);
+        assert!(descriptor.worker_identity.required);
+        assert!(descriptor.worker_identity.signed_challenge_required);
+        assert!(descriptor
+            .capabilities
+            .contains(&RuntimeCapability::ApprovalBridge));
+        assert!(descriptor
+            .capabilities
+            .contains(&RuntimeCapability::EvidenceExport));
+        assert!(descriptor
+            .evidence_modes
+            .contains(&RemoteAgentPodEvidenceMode::AppendOnlyStream));
+        assert!(descriptor.approvals_supported);
+        assert!(descriptor.kill_switch_supported);
+        assert_eq!(
+            descriptor.status,
+            RemoteAgentPodProviderDescriptorStatus::Experimental
+        );
+        assert_eq!(descriptor.expires_at, expires_at);
+        assert!(!descriptor.secret_material_included);
+        assert!(descriptor
+            .non_claims
+            .iter()
+            .any(|claim| claim.contains("remote worker isolation is not complete")));
+
+        descriptor.validate_at(Utc::now()).unwrap();
+    }
+
+    #[test]
+    fn remote_provider_descriptor_rejects_insecure_secret_or_malformed_contracts() {
+        let expires_at = Utc::now() + Duration::seconds(600);
+        let insecure = RemoteAgentPodProviderDescriptor::new(
+            "agentpod-remote-primary",
+            "http://worker.example.com/agentpod",
+            expires_at,
+        )
+        .unwrap_err();
+        assert!(insecure.to_string().contains("https:// or ssh://"));
+
+        let secret = RemoteAgentPodProviderDescriptor::new(
+            "agentpod-remote-primary",
+            "https://token@worker.example.com/agentpod",
+            expires_at,
+        )
+        .unwrap_err();
+        assert!(secret.to_string().contains("must not embed credentials"));
+
+        let malformed = RemoteAgentPodProviderDescriptor {
+            provider_id: String::new(),
+            capabilities: Vec::new(),
+            evidence_modes: Vec::new(),
+            non_claims: Vec::new(),
+            secret_material_included: true,
+            expires_at: Utc::now() - Duration::seconds(1),
+            ..RemoteAgentPodProviderDescriptor::new(
+                "agentpod-remote-primary",
+                "https://worker.example.com/agentpod",
+                expires_at,
+            )
+            .unwrap()
+        };
+
+        let err = malformed.validate_at(Utc::now()).unwrap_err();
+        assert!(err.to_string().contains("provider id"));
     }
 
     #[test]

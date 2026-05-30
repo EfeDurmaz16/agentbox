@@ -1,0 +1,204 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentbox.dev/schemas/agentpod-remote-provider-descriptor.schema.json",
+  "title": "AgentPod Remote Provider Descriptor",
+  "description": "Stable secret-free descriptor for remote AgentPod providers. This describes provider policy and declared support only; it does not claim complete remote worker isolation.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "provider",
+    "provider_id",
+    "endpoint_policy",
+    "transport_security",
+    "worker_identity",
+    "capabilities",
+    "evidence_modes",
+    "approvals_supported",
+    "kill_switch_supported",
+    "status",
+    "expires_at",
+    "secret_material_included",
+    "non_claims",
+    "created_at"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "provider": {
+      "const": "remote-agentpod"
+    },
+    "provider_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]+$",
+      "minLength": 1
+    },
+    "endpoint_policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "base_url",
+        "allow_http",
+        "allow_http_loopback_only",
+        "embedded_credentials_forbidden"
+      ],
+      "properties": {
+        "base_url": {
+          "type": "string",
+          "oneOf": [
+            {
+              "pattern": "^https://[^@\\s]+$"
+            },
+            {
+              "pattern": "^ssh://\\S+$"
+            }
+          ]
+        },
+        "allow_http": {
+          "const": false
+        },
+        "allow_http_loopback_only": {
+          "const": true
+        },
+        "embedded_credentials_forbidden": {
+          "const": true
+        }
+      }
+    },
+    "transport_security": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "https_required",
+        "ssh_allowed",
+        "mutual_tls_supported",
+        "signed_challenge_supported",
+        "embedded_credentials_forbidden"
+      ],
+      "properties": {
+        "https_required": {
+          "const": true
+        },
+        "ssh_allowed": {
+          "type": "boolean"
+        },
+        "mutual_tls_supported": {
+          "type": "boolean"
+        },
+        "signed_challenge_supported": {
+          "const": true
+        },
+        "embedded_credentials_forbidden": {
+          "const": true
+        }
+      }
+    },
+    "worker_identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "required",
+        "worker_public_key_required",
+        "signed_challenge_required",
+        "lifecycle_ack_required",
+        "secret_material_forbidden"
+      ],
+      "properties": {
+        "required": {
+          "const": true
+        },
+        "worker_public_key_required": {
+          "const": true
+        },
+        "signed_challenge_required": {
+          "const": true
+        },
+        "lifecycle_ack_required": {
+          "const": true
+        },
+        "secret_material_forbidden": {
+          "const": true
+        }
+      }
+    },
+    "capabilities": {
+      "type": "array",
+      "minItems": 2,
+      "uniqueItems": true,
+      "allOf": [
+        {
+          "contains": {
+            "const": "ApprovalBridge"
+          }
+        },
+        {
+          "contains": {
+            "const": "EvidenceExport"
+          }
+        }
+      ],
+      "items": {
+        "enum": [
+          "ContainerIsolation",
+          "VmIsolation",
+          "NativeNamespaces",
+          "EndpointSecurity",
+          "WindowsJobObjects",
+          "AppContainer",
+          "FilesystemPolicy",
+          "NetworkPolicy",
+          "CredentialPolicy",
+          "ApprovalBridge",
+          "EvidenceExport"
+        ]
+      }
+    },
+    "evidence_modes": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "contains": {
+        "const": "AppendOnlyStream"
+      },
+      "items": {
+        "enum": [
+          "AppendOnlyStream",
+          "BundleUpload",
+          "LocalPull"
+        ]
+      }
+    },
+    "approvals_supported": {
+      "const": true
+    },
+    "kill_switch_supported": {
+      "const": true
+    },
+    "status": {
+      "const": "Experimental"
+    },
+    "expires_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "secret_material_included": {
+      "const": false
+    },
+    "non_claims": {
+      "type": "array",
+      "minItems": 1,
+      "contains": {
+        "const": "remote worker isolation is not complete"
+      },
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    }
+  }
+}
